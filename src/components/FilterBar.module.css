@@ -1,0 +1,200 @@
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+  min-height: 40px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.bar::-webkit-scrollbar {
+  height: 6px;
+}
+
+.label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s ease;
+  position: relative;
+}
+
+.chip:hover {
+  background: #dde0e3;
+}
+
+.chip.disabled {
+  opacity: 0.45;
+}
+
+.chip.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.chip .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 10px;
+}
+
+.chip .name {
+  font-size: 12px;
+  color: var(--text);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip .count {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: #e8eaed;
+  border-radius: 8px;
+  padding: 0 6px;
+  min-width: 20px;
+  text-align: center;
+}
+
+.chip .toggle {
+  display: inline-flex;
+  align-items: center;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.chip .toggle:hover {
+  opacity: 1;
+}
+
+.empty {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.addBtn:hover {
+  background: var(--accent-light);
+}
+
+.addBtn:disabled {
+  background: var(--bg-elevated);
+  color: var(--text-faint);
+}
+
+/* editor popover */
+.editor {
+  position: fixed;
+  z-index: 100;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  padding: 12px;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.editor .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.editor .color-pick {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: none;
+  padding: 0;
+}
+
+.editor .label-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.editor .pattern-input {
+  width: 100%;
+}
+
+.editor .error {
+  color: var(--danger);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.editor .toggles {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
+.editor .toggles label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.editor .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.editor .actions button {
+  padding: 6px 14px;
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+}

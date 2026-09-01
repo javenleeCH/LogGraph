@@ -1,0 +1,50 @@
+2024-01-01 09:00:00.000 [MainThread] INFO  Application starting up v3.2.1
+2024-01-01 09:00:00.120 [NetPool-1] DEBUG Initializing network pool with 8 workers
+2024-01-01 09:00:00.250 [MainThread] INFO  Loading configuration from app.config
+2024-01-01 09:00:00.450 [DBWorker] INFO  Database connection established (host=db01.internal)
+2024-01-01 09:00:01.100 [NetPool-1] DEBUG Sending heartbeat to upstream
+2024-01-01 09:00:01.500 [NetPool-2] WARN  Upstream response slow: 450ms
+2024-01-01 09:00:02.000 [MainThread] INFO  Configuration loaded successfully
+2024-01-01 09:00:02.300 [DBWorker] DEBUG Executing query: SELECT * FROM users WHERE active=1
+2024-01-01 09:00:02.800 [NetPool-1] ERROR Connection reset by peer (errno=104)
+2024-01-01 09:00:03.050 [MainThread] WARN  Retry policy triggered for upstream call
+2024-01-01 09:00:03.400 [NetPool-2] DEBUG Retrying upstream request attempt 1/3
+2024-01-01 09:00:04.000 [DBWorker] INFO  Query returned 1524 rows in 1200ms
+2024-01-01 09:00:04.500 [NetPool-2] INFO  Upstream recovered, response ok
+2024-01-01 09:00:05.100 [MainThread] INFO  Startup phase complete
+2024-01-01 09:00:05.500 [Worker-3] DEBUG Processing task batch #1 (50 items)
+2024-01-01 09:00:06.200 [Worker-3] DEBUG Processing task batch #2 (50 items)
+2024-01-01 09:00:07.000 [NetPool-1] DEBUG Sending heartbeat to upstream
+2024-01-01 09:00:07.500 [DBWorker] INFO  Cache refresh triggered
+2024-01-01 09:00:08.100 [NetPool-2] WARN  Upstream response slow: 620ms
+2024-01-01 09:00:08.600 [Worker-3] DEBUG Processing task batch #3 (50 items)
+2024-01-01 09:00:09.000 [MainThread] INFO  Periodic health check: all systems nominal
+2024-01-01 09:00:09.500 [DBWorker] ERROR Deadlock detected, rolling back transaction
+2024-01-01 09:00:10.200 [NetPool-1] ERROR Connection reset by peer (errno=104)
+2024-01-01 09:00:10.800 [MainThread] WARN  Retry policy triggered for upstream call
+2024-01-01 09:00:11.300 [NetPool-2] DEBUG Retrying upstream request attempt 1/3
+2024-01-01 09:00:12.000 [Worker-3] DEBUG Processing task batch #4 (50 items)
+2024-01-01 09:00:12.700 [DBWorker] INFO  Deadlock resolved after retry
+2024-01-01 09:00:13.200 [NetPool-2] INFO  Upstream recovered, response ok
+2024-01-01 09:00:13.900 [MainThread] INFO  Periodic health check: all systems nominal
+2024-01-01 09:00:14.500 [Worker-3] DEBUG Processing task batch #5 (50 items)
+2024-01-01 09:00:15.100 [NetPool-1] ERROR Connection reset by peer (errno=110)
+2024-01-01 09:00:15.700 [MainThread] WARN  Retry policy triggered for upstream call
+2024-01-01 09:00:16.300 [NetPool-2] ERROR Retrying upstream request attempt 1/3
+2024-01-01 09:00:17.000 [DBWorker] WARN  Slow query detected: 2100ms
+2024-01-01 09:00:17.600 [Worker-3] DEBUG Processing task batch #6 (50 items)
+2024-01-01 09:00:18.200 [NetPool-1] INFO  Upstream recovered, response ok
+2024-01-01 09:00:18.900 [MainThread] ERROR Failed health check: upstream degraded
+2024-01-01 09:00:19.500 [DBWorker] DEBUG Query optimized via index hint
+2024-01-01 09:00:20.100 [NetPool-2] WARN  Upstream response slow: 780ms
+2024-01-01 09:00:20.700 [Worker-3] INFO  Task queue drained
+2024-01-01 09:00:21.300 [MainThread] INFO  Periodic health check: degraded but stable
+2024-01-01 09:00:22.000 [NetPool-1] ERROR Connection reset by peer (errno=104)
+2024-01-01 09:00:22.600 [DBWorker] INFO  Database connection established (host=db02.internal)
+2024-01-01 09:00:23.200 [NetPool-2] INFO  Upstream recovered, response ok
+2024-01-01 09:00:23.900 [MainThread] WARN  Retry policy triggered for upstream call
+2024-01-01 09:00:24.500 [Worker-3] DEBUG Idle, waiting for tasks
+2024-01-01 09:00:25.100 [NetPool-1] DEBUG Sending heartbeat to upstream
+2024-01-01 09:00:25.700 [DBWorker] WARN  Slow query detected: 3400ms
+2024-01-01 09:00:26.300 [MainThread] INFO  Periodic health check: all systems nominal
+2024-01-01 09:00:27.000 [NetPool-2] ERROR Connection reset by peer (errno=104)

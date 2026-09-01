@@ -1,0 +1,120 @@
+.detail {
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+  flex: 0 0 auto;
+  max-height: 34vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+}
+
+.detail-header .label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.detail-header .ts {
+  color: var(--accent-light);
+  font-weight: 500;
+  font-family: 'Roboto Mono', monospace;
+}
+
+.detail-header .tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-family: 'Roboto Mono', monospace;
+}
+
+.detail-header .tag.level {
+  border-color: transparent;
+}
+
+.detail-header .linenum {
+  font-family: 'Roboto Mono', monospace;
+  color: var(--text-dim);
+}
+
+.detail-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 4px 0;
+  font-family: 'Roboto Mono', 'SFMono-Regular', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ctx-line {
+  display: flex;
+  padding: 1px 16px;
+  white-space: pre;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.ctx-line:hover {
+  background: rgba(60, 64, 67, 0.05);
+}
+
+.ctx-line .lineno {
+  color: var(--text-faint);
+  width: 56px;
+  flex: 0 0 56px;
+  text-align: right;
+  user-select: none;
+  padding-right: 4px;
+}
+
+.ctx-line .content {
+  white-space: pre-wrap;
+  word-break: break-all;
+  min-width: 0;
+}
+
+.ctx-line.context {
+  color: var(--text-dim);
+}
+
+.ctx-line.selected {
+  background: rgba(26, 115, 232, 0.18);
+  box-shadow: inset 3px 0 0 var(--accent);
+  color: var(--text);
+}
+
+.ctx-line.correlated {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.ctx-line .level-tag {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 10px;
+  font-weight: 500;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.detail-empty {
+  padding: 14px 16px;
+  color: var(--text-faint);
+  text-align: center;
+  font-size: 12px;
+}

@@ -1,0 +1,167 @@
+:root {
+  /* Light (Perfetto-light-inspired) palette */
+  --bg: #ffffff;             /* app background */
+  --bg-panel: #f8f9fa;       /* top bar / detail */
+  --bg-elevated: #e8eaed;    /* buttons, inputs */
+  --bg-canvas: #ffffff;      /* timeline canvas */
+  --bg-track: #f1f3f4;       /* track row */
+  --bg-track-alt: #f8f9fa;
+  --bg-track-hover: #e8f0fe; /* hover row - light blue */
+  --border: #dadce0;
+  --border-light: #e8eaed;
+  --text: #202124;           /* primary text - near black */
+  --text-dim: #5f6368;       /* secondary text */
+  --text-faint: #9aa0a6;
+  --accent: #1a73e8;         /* blue */
+  --accent-light: #4285f4;
+  --accent-dim: #d2e3fc;
+  --danger: #d93025;         /* red */
+  --warn: #f9ab00;           /* amber */
+  --ok: #1e8e3e;             /* green */
+  --link: #1a73e8;
+
+  /* track palette (slightly darker for contrast on light bg) */
+  --track-blue: #1a73e8;
+  --track-green: #1e8e3e;
+  --track-orange: #e37400;
+  --track-red: #d93025;
+  --track-purple: #9334c4;
+  --track-cyan: #0091a0;
+  --track-pink: #c61d73;
+  --track-lime: #5f8b2c;
+
+  /* timeline layout metrics */
+  --track-header-w: 200px;
+  --axis-h: 28px;
+  --track-h: 40px;
+  --track-gap: 1px;
+  --minimap-h: 44px;
+
+  color-scheme: light;
+  font-family: 'Google Sans', 'Roboto', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', 'Microsoft YaHei', Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+button {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background 0.1s ease, box-shadow 0.1s ease;
+  white-space: nowrap;
+}
+
+button:hover {
+  background: #dde0e3;
+}
+
+button:active {
+  background: #cfd2d5;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+button.primary:hover {
+  background: var(--accent-light);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+button.ghost {
+  background: transparent;
+}
+
+button.ghost:hover {
+  background: rgba(60, 64, 67, 0.08);
+}
+
+input[type='text'],
+input[type='search'],
+select,
+textarea {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  outline: none;
+  transition: border-color 0.1s ease;
+}
+
+input[type='text']:focus,
+input[type='search']:focus,
+textarea:focus {
+  border-color: var(--accent);
+}
+
+input[type='checkbox'] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c4c7c9;
+  border-radius: 5px;
+  border: 2px solid var(--bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a8abb0;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.mono {
+  font-family: 'Roboto Mono', 'SFMono-Regular', Consolas, 'Liberation Mono',
+    Menlo, monospace;
+}
