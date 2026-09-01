@@ -1,0 +1,35 @@
+{
+  "filters": [
+    {
+      "id": "f1788247505799_12",
+      "label": "Retry policy triggered",
+      "color": "#1a73e8",
+      "pattern": "Retry policy triggered",
+      "isRegex": false,
+      "caseSensitive": false,
+      "enabled": true,
+      "scope": "raw"
+    },
+    {
+      "id": "f1788247505799_13",
+      "label": "Slow query detected",
+      "color": "#1e8e3e",
+      "pattern": "Slow query detected",
+      "isRegex": false,
+      "caseSensitive": false,
+      "enabled": true,
+      "scope": "raw"
+    },
+    {
+      "id": "f1788247505799_14",
+      "label": "Startup phase complete",
+      "color": "#e37400",
+      "pattern": "Startup phase complete",
+      "isRegex": false,
+      "caseSensitive": false,
+      "enabled": true,
+      "scope": "raw"
+    }
+  ],
+  "savedAt": 1788249192801
+}

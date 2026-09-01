@@ -2,7 +2,7 @@
 
 /** 一条解析后的日志事件 */
 export interface LogEvent {
-  /** 行索引（从 0 开始） */
+  /** 行索引（从 0 开始，多文件合并后为全局行号） */
   id: number;
   /** 解析得到的时间戳（epoch 毫秒） */
   ts: number;
@@ -14,6 +14,8 @@ export interface LogEvent {
   level?: string;
   /** 时间戳之后的正文部分 */
   message: string;
+  /** 来源文件名（多文件合并时标记出处） */
+  sourceFile?: string;
 }
 
 /** 用户定义的过滤器 */

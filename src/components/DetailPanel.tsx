@@ -75,6 +75,11 @@ export function DetailPanel() {
         <span className={styles.label}>详情</span>
         <span className={styles.linenum}>行 #{selected.id + 1}</span>
         <span className={styles.ts}>{formatDateTime(selected.ts)}</span>
+        {selected.sourceFile && (
+          <span className={styles.tag} title={`来源文件：${selected.sourceFile}`}>
+            📄 {selected.sourceFile}
+          </span>
+        )}
         {selected.thread && (
           <span className={styles.tag}>{selected.thread}</span>
         )}

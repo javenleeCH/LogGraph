@@ -4,6 +4,7 @@ import { loadFile } from '../io/fileLoader';
 import { LogParser } from '../parser/LogParser';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
 import styles from './Toolbar.module.css';
+/* eslint-disable @typescript-eslint/no-explicit-any */
 
 const parser = new LogParser();
 
@@ -15,6 +16,15 @@ export function Toolbar() {
   const resetView = useLogStore((s) => s.resetView);
   const setLog = useLogStore((s) => s.setLog);
   const events = useLogStore((s) => s.events);
+  const persistSupported = useLogStore((s) => s.persistSupported);
+  const persistDirName = useLogStore((s) => s.persistDirName);
+  const choosePersistDir = useLogStore((s) => s.choosePersistDir);
+  const saveFiltersNow = useLogStore((s) => s.saveFiltersNow);
+  const logsSupported = useLogStore((s) => s.persistSupported); // FSA 支持判定共用
+  const logsDirName = useLogStore((s) => s.logsDirName);
+  const chooseLogsDir = useLogStore((s) => s.chooseLogsDir);
+  const splitOrientation = useLogStore((s) => s.splitOrientation);
+  const setSplitOrientation = useLogStore((s) => s.setSplitOrientation);
 
   async function onFile(file: File) {
     try {
@@ -56,6 +66,62 @@ export function Toolbar() {
       <button className="primary" onClick={() => inputRef.current?.click()}>
         打开日志
       </button>
+
+      {logsSupported && (
+        <button
+          className="ghost"
+          onClick={chooseLogsDir}
+          title={
+            logsDirName
+              ? `当前日志目录：${logsDirName}（点击重新选择）`
+              : '选择一个日志文件夹，像 VS Code 一样浏览全部日志'
+          }
+        >
+          {logsDirName ? `📂 ${logsDirName}` : '📂 打开目录'}
+        </button>
+      )}
+
+      <button
+        className="ghost"
+        onClick={() =>
+          setSplitOrientation(
+            splitOrientation === 'vertical' ? 'horizontal' : 'vertical',
+          )
+        }
+        title={
+          splitOrientation === 'vertical'
+            ? '当前：表格流（LogStreamView）。点击切换为时间线画布'
+            : '当前：时间线画布（TimelineCanvas）。点击切换为表格流'
+        }
+      >
+        {splitOrientation === 'vertical' ? '📋 表格流' : '📊 时间线'}
+      </button>
+
+      {persistSupported && (
+        <>
+          <div className={styles.sep} />
+          <button
+            className="ghost"
+            onClick={choosePersistDir}
+            title={
+              persistDirName
+                ? `当前持久化目录：${persistDirName}（点击重新选择）`
+                : '选择 .loggraph 目录以持久化过滤器'
+            }
+          >
+            {persistDirName ? `📁 ${persistDirName}` : '📁 持久化目录'}
+          </button>
+          {persistDirName && (
+            <button
+              className="ghost"
+              onClick={saveFiltersNow}
+              title="立即保存过滤器到 filters.json"
+            >
+              保存
+            </button>
+          )}
+        </>
+      )}
 
       {meta && (
         <>

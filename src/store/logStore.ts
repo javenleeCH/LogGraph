@@ -6,6 +6,21 @@
 import { create } from 'zustand';
 import type { Filter, FilterMatch, LogEvent, TimeRange } from '../types';
 import { FilterEngine } from '../filters/FilterEngine';
+import {
+  pickDirectory,
+  getSavedDirectory,
+  ensureWritePermission,
+  readFilters,
+  writeFilters,
+  isFSASupported,
+  type PersistedFilters,
+} from '../io/filterPersist';
+import {
+  pickLogDirectory,
+  getSavedLogDirectory,
+  ensureReadPermission,
+  isFSASupported as isFSASupportedDir,
+} from '../io/dirLoader';
 
 // 延迟重算关联，避免拖拽/缩放时每帧都重算导致抖动
 let corrRaf = 0;
@@ -31,6 +46,30 @@ const PALETTE = [
 
 let filterSeq = 0;
 const genFilterId = () => `f${Date.now()}_${filterSeq++}`;
+
+// ---- 过滤器持久化（File System Access API） ----
+/* eslint-disable @typescript-eslint/no-explicit-any */
+let persistDir: any = null; // 目录句柄
+let persistTimer = 0;
+
+/** 防抖写入 filters.json */
+function schedulePersist(get: () => LogState) {
+  if (!persistDir) return;
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = window.setTimeout(async () => {
+    persistTimer = 0;
+    if (!persistDir) return;
+    try {
+      const data: PersistedFilters = {
+        filters: get().filters.map((f) => ({ ...f })),
+        savedAt: Date.now(),
+      };
+      await writeFilters(persistDir, data);
+    } catch (e) {
+      console.error('过滤器持久化写入失败', e);
+    }
+  }, 400);
+}
 
 export interface LogMeta {
   fileName: string;
@@ -84,6 +123,36 @@ interface LogState {
   setScrubber: (ts: number | null, active?: boolean) => void;
   recomputeCorrelations: () => void;
   setCorrelationWindow: (halfMs: number | null) => void;
+
+  // --- 持久化 ---
+  /** 持久化目录名（已授权）；null=未配置 */
+  persistDirName: string | null;
+  /** 浏览器是否支持 FSA */
+  persistSupported: boolean;
+  /** 启动时调用：从 IndexedDB 恢复目录句柄并加载 filters.json */
+  initPersistence: () => Promise<void>;
+  /** 让用户选择持久化目录 */
+  choosePersistDir: () => Promise<void>;
+  /** 立即写入一次 */
+  saveFiltersNow: () => Promise<void>;
+
+  // --- 日志目录（目录式加载） ---
+  /** 日志目录句柄（已授权）；null=未选择。用 any 避免 FSA 类型缺失 */
+  /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+  logsDirHandle: any;
+  /** 日志目录名；null=未选择 */
+  logsDirName: string | null;
+  /** 设置日志目录（来自 FileTreePanel 或 Toolbar） */
+  setLogsDir: (handle: any, name: string) => void;
+  /** 让用户选择日志目录（弹窗授权） */
+  chooseLogsDir: () => Promise<void>;
+  /** 启动时调用：从 IndexedDB 恢复日志目录句柄 */
+  initLogsDir: () => Promise<void>;
+
+  // --- 主区域布局 ---
+  /** 时间线/详情 横竖排列：vertical=上下，horizontal=左右 */
+  splitOrientation: 'vertical' | 'horizontal';
+  setSplitOrientation: (o: 'vertical' | 'horizontal') => void;
 }
 
 export const useLogStore = create<LogState>((set, get) => ({
@@ -103,6 +172,15 @@ export const useLogStore = create<LogState>((set, get) => ({
   scrubberActive: false,
   correlationHalfWindow: null, // null = 自适应
   correlatedEventIds: new Set(),
+
+  persistDirName: null,
+  persistSupported: isFSASupported(),
+
+  logsDirHandle: null,
+  logsDirName: null,
+
+  splitOrientation: 'vertical',
+  setSplitOrientation: (o) => set({ splitOrientation: o }),
 
   setLog: (events, rawLines, meta) => {
     if (events.length === 0) {
@@ -153,6 +231,7 @@ export const useLogStore = create<LogState>((set, get) => ({
     };
     set({ filters: [...get().filters, filter] });
     get().recomputeMatches();
+    schedulePersist(get);
     return id;
   },
 
@@ -161,11 +240,13 @@ export const useLogStore = create<LogState>((set, get) => ({
       filters: get().filters.map((f) => (f.id === id ? { ...f, ...patch } : f)),
     });
     get().recomputeMatches();
+    schedulePersist(get);
   },
 
   removeFilter: (id) => {
     set({ filters: get().filters.filter((f) => f.id !== id) });
     get().recomputeMatches();
+    schedulePersist(get);
   },
 
   recomputeMatches: () => {
@@ -336,5 +417,80 @@ export const useLogStore = create<LogState>((set, get) => ({
       }
     }
     set({ correlatedEventIds: ids });
+  },
+
+  // ---- 过滤器持久化 ----
+  initPersistence: async () => {
+    if (!isFSASupported()) return;
+    try {
+      const dir = await getSavedDirectory();
+      if (!dir) return;
+      if (!(await ensureWritePermission(dir))) return;
+      persistDir = dir;
+      set({ persistDirName: dir.name });
+      const saved = await readFilters(dir);
+      if (saved && Array.isArray(saved.filters) && saved.filters.length > 0) {
+        // 从 JSON 恢复过滤器（补全默认字段）
+        const restored: Filter[] = saved.filters.map((f: any, i: number) => ({
+          id: genFilterId(),
+          label: f.label ?? `Filter ${i + 1}`,
+          color: f.color ?? PALETTE[i % PALETTE.length],
+          pattern: f.pattern ?? '',
+          isRegex: f.isRegex ?? false,
+          caseSensitive: f.caseSensitive ?? false,
+          enabled: f.enabled ?? true,
+          scope: f.scope === 'message' ? 'message' : 'raw',
+        }));
+        set({ filters: restored });
+        get().recomputeMatches();
+      }
+    } catch (e) {
+      console.error('过滤器持久化初始化失败', e);
+    }
+  },
+
+  choosePersistDir: async () => {
+    const dir = await pickDirectory();
+    if (!dir) return;
+    persistDir = dir;
+    set({ persistDirName: dir.name });
+    // 选择目录后立即把当前过滤器写一次
+    await get().saveFiltersNow();
+  },
+
+  saveFiltersNow: async () => {
+    if (!persistDir) return;
+    try {
+      const data: PersistedFilters = {
+        filters: get().filters.map((f) => ({ ...f })),
+        savedAt: Date.now(),
+      };
+      await writeFilters(persistDir, data);
+    } catch (e) {
+      console.error('过滤器持久化写入失败', e);
+    }
+  },
+
+  // ---- 日志目录 ----
+  setLogsDir: (handle, name) => {
+    set({ logsDirHandle: handle, logsDirName: name });
+  },
+
+  chooseLogsDir: async () => {
+    const dir = await pickLogDirectory();
+    if (!dir) return;
+    set({ logsDirHandle: dir, logsDirName: dir.name });
+  },
+
+  initLogsDir: async () => {
+    if (!isFSASupportedDir()) return;
+    try {
+      const dir = await getSavedLogDirectory();
+      if (!dir) return;
+      if (!(await ensureReadPermission(dir))) return;
+      set({ logsDirHandle: dir, logsDirName: dir.name });
+    } catch (e) {
+      console.error('日志目录恢复失败', e);
+    }
   },
 }));

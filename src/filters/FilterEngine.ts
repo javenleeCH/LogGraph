@@ -60,31 +60,33 @@ function eventMatches(ev: LogEvent, cf: CompiledFilter): boolean {
 }
 
 export class FilterEngine {
-  /** 运行所有过滤器，返回 per-filter 匹配集合 */
+  /** 运行所有过滤器，返回 per-filter 匹配集合（与 filters 同序同长，空 pattern 返回空数组） */
   static run(events: LogEvent[], filters: Filter[]): FilterMatch[] {
-    const compiled = filters
-      .map(compileFilter)
-      .filter((c): c is CompiledFilter => c !== null);
+    // 按 filters 原序编译；未编译成功（空 pattern / 非法正则）的保留为 null
+    const compiled: (CompiledFilter | null)[] = filters.map(compileFilter);
+    const valid = compiled.filter(
+      (c): c is CompiledFilter => c !== null,
+    );
 
-    // 初始化每个过滤器的结果桶
+    // 初始化每个有效过滤器的结果桶
     const buckets = new Map<string, LogEvent[]>();
-    for (const cf of compiled) buckets.set(cf.filterId, []);
+    for (const cf of valid) buckets.set(cf.filterId, []);
 
     // 单次遍历所有事件，分桶到匹配的过滤器
     for (const ev of events) {
-      for (const cf of compiled) {
+      for (const cf of valid) {
         if (eventMatches(ev, cf)) {
           buckets.get(cf.filterId)!.push(ev);
         }
       }
     }
 
-    const result: FilterMatch[] = [];
-    for (const cf of compiled) {
-      const evs = buckets.get(cf.filterId)!;
-      // events 本身已按 ts 升序，保持
-      result.push({ filterId: cf.filterId, events: evs });
-    }
+    // 结果与 filters 一一对应（空 pattern / 未启用的过滤器返回空 events）
+    const result: FilterMatch[] = filters.map((f, i) => {
+      const cf = compiled[i];
+      if (!cf) return { filterId: f.id, events: [] };
+      return { filterId: f.id, events: buckets.get(cf.filterId)! };
+    });
     return result;
   }
 
