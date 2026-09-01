@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLogStore } from '../store/logStore';
-import { LAYOUT } from './layout';
+import {
+  LAYOUT,
+  buildVisibleRows,
+  type VisibleRow,
+} from './layout';
 import {
   drawAxis,
-  drawLaneBackground,
-  drawLaneEvents,
+  drawLaneBackgroundAt,
+  drawLaneEventsAt,
   drawCorrelationLinks,
   drawScrubber,
   drawMinimap,
+  drawGroupHeader,
+  drawGroupDensity,
   type RenderContext,
 } from './renderers';
 import { bisectLeft, nearestEvent } from './correlation';
@@ -45,6 +51,7 @@ export function TimelineCanvas() {
   const events = useLogStore((s) => s.events);
   const filters = useLogStore((s) => s.filters);
   const matches = useLogStore((s) => s.matches);
+  const groups = useLogStore((s) => s.groups);
   const viewRange = useLogStore((s) => s.viewRange);
   const fullRange = useLogStore((s) => s.fullRange);
   const hoveredEventId = useLogStore((s) => s.hoveredEventId);
@@ -57,6 +64,7 @@ export function TimelineCanvas() {
   const selectEvent = useLogStore((s) => s.selectEvent);
   const setHovered = useLogStore((s) => s.setHovered);
   const setScrubber = useLogStore((s) => s.setScrubber);
+  const toggleGroupCollapsed = useLogStore((s) => s.toggleGroupCollapsed);
 
   // ---- WASD 平滑缩放/平移动画器（Perfetto 式弹簧+加速）----
   // 回调实时读取 store 状态与画布尺寸，避免闭包陈旧。
@@ -117,6 +125,7 @@ export function TimelineCanvas() {
       events,
       filters,
       matches,
+      groups,
       viewRange,
       fullRange,
       selectedEventId,
@@ -139,16 +148,19 @@ export function TimelineCanvas() {
 
     const { timeToX, xToTime } = makeTimeFns(viewRange, w);
 
-    // 计算当前鼠标悬停在哪条 lane（用于行高亮）
+    // 构建可见行（group 折叠/展开后的行列表）
+    const rows = buildVisibleRows(filters, groups, matches);
+
+    // 计算当前鼠标悬停在哪一行（用于行高亮）
     const myMouse = mousePosRef.current?.y ?? null;
-    let hoveredLane = -1;
+    let hoveredRowIdx = -1;
     if (myMouse !== null) {
-      const relY = myMouse - LAYOUT.AXIS_HEIGHT;
-      const laneH = LAYOUT.LANE_HEIGHT + LAYOUT.LANE_GAP;
-      const idx = Math.floor(relY / laneH);
-      const lanesEndY = filters.length * laneH;
-      if (relY >= 0 && relY < lanesEndY && relY - idx * laneH < LAYOUT.LANE_HEIGHT) {
-        hoveredLane = idx;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (myMouse >= r.y && myMouse < r.y + r.height) {
+          hoveredRowIdx = i;
+          break;
+        }
       }
     }
 
@@ -164,20 +176,51 @@ export function TimelineCanvas() {
 
     drawAxis(rc, fullRange);
 
-    for (let i = 0; i < filters.length; i++) {
-      const f = filters[i];
-      const fm = matches.find((m) => m.filterId === f.id);
-      const evs = fm?.events ?? [];
-      drawLaneBackground(rc, f, i, evs.length, i === hoveredLane);
-      drawLaneEvents(
-        rc,
-        f,
-        i,
-        evs,
-        selectedEventId,
-        hoveredEventId,
-        correlatedEventIds,
-      );
+    // 遍历可见行绘制（group-header / filter / group-density）
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (row.kind === 'group-header') {
+        drawGroupHeader(
+          rc,
+          row.group,
+          row.y,
+          row.height,
+          row.childCount,
+          i === hoveredRowIdx,
+        );
+      } else if (row.kind === 'group-density') {
+        drawGroupDensity(
+          rc,
+          row.group,
+          row.events,
+          row.y,
+          row.height,
+          selectedEventId,
+          hoveredEventId,
+          correlatedEventIds,
+        );
+      } else {
+        // filter 行：保持原有绘制逻辑，但 index 用行序映射 y
+        const evs = row.match?.events ?? [];
+        drawLaneBackgroundAt(
+          rc,
+          row.filter,
+          row.y,
+          row.height,
+          evs.length,
+          i === hoveredRowIdx,
+        );
+        drawLaneEventsAt(
+          rc,
+          row.filter,
+          row.y,
+          row.height,
+          evs,
+          selectedEventId,
+          hoveredEventId,
+          correlatedEventIds,
+        );
+      }
     }
 
     const centerTs =
@@ -223,30 +266,51 @@ export function TimelineCanvas() {
     };
   }, [render]);
 
-  // ---- 命中测试：根据鼠标位置找到 lane 内最近事件 ----
+  // ---- 命中测试：根据鼠标位置找到 visibleRow 内最近事件 ----
+  const rowsMemo = useMemo(
+    () => buildVisibleRows(filters, groups, matches),
+    [filters, groups, matches],
+  );
+
+  /** 找到鼠标 y 落在哪一行（返回 VisibleRow 或 null） */
+  const rowAt = useCallback(
+    (my: number): VisibleRow | null => {
+      for (const r of rowsMemo) {
+        if (my >= r.y && my < r.y + r.height) return r;
+      }
+      return null;
+    },
+    [rowsMemo],
+  );
+
   const hitTest = useCallback(
     (mx: number, my: number): { event: LogEvent; filter: Filter } | null => {
       if (!viewRange) return null;
       const { w } = sizeRef.current;
       const { xToTime } = makeTimeFns(viewRange, w);
-      // 判断落在哪条 lane
       if (my < LAYOUT.AXIS_HEIGHT) return null;
-      const lanesEndY =
-        LAYOUT.AXIS_HEIGHT +
-        filters.length * (LAYOUT.LANE_HEIGHT + LAYOUT.LANE_GAP);
-      if (my > lanesEndY) return null;
       if (mx < LAYOUT.LEFT_LABEL_WIDTH) return null;
 
-      const laneIdx = Math.floor(
-        (my - LAYOUT.AXIS_HEIGHT) / (LAYOUT.LANE_HEIGHT + LAYOUT.LANE_GAP),
-      );
-      if (laneIdx < 0 || laneIdx >= filters.length) return null;
-      const filter = filters[laneIdx];
-      const fm = matches.find((m) => m.filterId === filter.id);
-      if (!fm) return null;
+      const row = rowAt(my);
+      if (!row) return null;
+      // group-header 行无事件
+      if (row.kind === 'group-header') return null;
+
+      let evs: LogEvent[] = [];
+      let filter: Filter | null = null;
+      if (row.kind === 'filter') {
+        evs = row.match?.events ?? [];
+        filter = row.filter;
+      } else {
+        // group-density 行：聚合事件，filter 用组内第一个子 filter 近似
+        evs = row.events;
+        const child = filters.find((f) => f.groupId === row.group.id);
+        if (child) filter = child;
+      }
+      if (!filter || evs.length === 0) return null;
 
       const targetTs = xToTime(mx);
-      const ev = nearestEvent(fm.events, targetTs);
+      const ev = nearestEvent(evs, targetTs);
       if (!ev) return null;
 
       // 容差：像素距离换算
@@ -256,7 +320,7 @@ export function TimelineCanvas() {
       if (Math.abs(ev.ts - targetTs) > pxToMs * 6) return null;
       return { event: ev, filter };
     },
-    [viewRange, filters, matches, makeTimeFns],
+    [viewRange, filters, rowAt, makeTimeFns],
   );
 
   // 判断是否在 minimap 区域
@@ -317,6 +381,13 @@ export function TimelineCanvas() {
         return;
       }
 
+      // group-header 行点击：折叠/展开
+      const row = rowAt(my);
+      if (row && row.kind === 'group-header') {
+        toggleGroupCollapsed(row.group.id);
+        return;
+      }
+
       // lane 区域：命中测试
       const hit = hitTest(mx, my);
       if (hit) {
@@ -342,6 +413,8 @@ export function TimelineCanvas() {
       setScrubber,
       selectEvent,
       hitTest,
+      rowAt,
+      toggleGroupCollapsed,
     ],
   );
 

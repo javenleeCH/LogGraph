@@ -10,6 +10,8 @@
  * 兼容性：仅 Chromium 系浏览器支持 showDirectoryPicker。
  */
 
+import type { Filter, FilterGroup } from '../types';
+
 const DB_NAME = 'loggraph';
 const STORE = 'handles';
 const KEY_DIR = 'filtersDir';
@@ -65,7 +67,9 @@ async function idbDel(key: string): Promise<void> {
 // ---- 类型 ----
 
 export interface PersistedFilters {
-  filters: unknown[];
+  filters: Filter[];
+  /** 分组列表（旧文件无此字段=空 groups，向后兼容） */
+  groups?: FilterGroup[];
   savedAt: number;
 }
 

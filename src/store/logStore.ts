@@ -4,7 +4,7 @@
  */
 
 import { create } from 'zustand';
-import type { Filter, FilterMatch, LogEvent, TimeRange } from '../types';
+import type { Filter, FilterGroup, FilterMatch, LogEvent, TimeRange } from '../types';
 import { FilterEngine } from '../filters/FilterEngine';
 import {
   pickDirectory,
@@ -47,6 +47,9 @@ const PALETTE = [
 let filterSeq = 0;
 const genFilterId = () => `f${Date.now()}_${filterSeq++}`;
 
+let groupSeq = 0;
+const genGroupId = () => `g${Date.now()}_${groupSeq++}`;
+
 // ---- 过滤器持久化（File System Access API） ----
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let persistDir: any = null; // 目录句柄
@@ -62,6 +65,7 @@ function schedulePersist(get: () => LogState) {
     try {
       const data: PersistedFilters = {
         filters: get().filters.map((f) => ({ ...f })),
+        groups: get().groups.map((g) => ({ ...g })),
         savedAt: Date.now(),
       };
       await writeFilters(persistDir, data);
@@ -88,6 +92,17 @@ interface LogState {
   // --- 过滤器 ---
   filters: Filter[];
   matches: FilterMatch[]; // 过滤结果，按 filters 顺序
+  groups: FilterGroup[]; // 过滤器分组（顺序即显示顺序）
+  collapsedGroups: Set<string>; // 冗余：快速查询折叠状态
+  // --- group actions ---
+  addGroup: (partial?: Partial<FilterGroup>) => string;
+  updateGroup: (id: string, patch: Partial<FilterGroup>) => void;
+  removeGroup: (id: string) => void;
+  toggleGroupCollapsed: (id: string) => void;
+  toggleGroupVisible: (id: string) => void;
+  addFilterToGroup: (filterId: string, groupId: string) => void;
+  removeFilterFromGroup: (filterId: string, groupId: string) => void;
+  reorderGroup: (id: string, toIndex: number) => void;
 
   // --- 视图 ---
   viewRange: TimeRange | null; // 当前可见时间窗
@@ -162,6 +177,8 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   filters: [],
   matches: [],
+  groups: [],
+  collapsedGroups: new Set(),
 
   viewRange: null,
   fullRange: null,
@@ -246,6 +263,92 @@ export const useLogStore = create<LogState>((set, get) => ({
   removeFilter: (id) => {
     set({ filters: get().filters.filter((f) => f.id !== id) });
     get().recomputeMatches();
+    schedulePersist(get);
+  },
+
+  // ---- 分组（group） ----
+  addGroup: (partial) => {
+    const id = genGroupId();
+    const idx = get().groups.length;
+    const group: FilterGroup = {
+      id,
+      label: partial?.label ?? `Group ${idx + 1}`,
+      color: partial?.color ?? PALETTE[idx % PALETTE.length],
+      collapsed: partial?.collapsed ?? false,
+      visible: partial?.visible ?? true,
+      filterIds: partial?.filterIds ?? [],
+    };
+    set({ groups: [...get().groups, group] });
+    schedulePersist(get);
+    return id;
+  },
+
+  updateGroup: (id, patch) => {
+    set({
+      groups: get().groups.map((g) => (g.id === id ? { ...g, ...patch } : g)),
+    });
+    schedulePersist(get);
+  },
+
+  removeGroup: (id) => {
+    // 删组：只删 group（filter 不动，多对多引用自然断开）
+    set({ groups: get().groups.filter((g) => g.id !== id) });
+    const collapsed = new Set(get().collapsedGroups);
+    collapsed.delete(id);
+    set({ collapsedGroups: collapsed });
+    schedulePersist(get);
+  },
+
+  toggleGroupCollapsed: (id) => {
+    const groups = get().groups.map((g) =>
+      g.id === id ? { ...g, collapsed: !g.collapsed } : g,
+    );
+    const collapsed = new Set<string>();
+    for (const g of groups) if (g.collapsed) collapsed.add(g.id);
+    set({ groups, collapsedGroups: collapsed });
+    schedulePersist(get);
+  },
+
+  toggleGroupVisible: (id) => {
+    set({
+      groups: get().groups.map((g) =>
+        g.id === id ? { ...g, visible: !g.visible } : g,
+      ),
+    });
+    schedulePersist(get);
+  },
+
+  addFilterToGroup: (filterId, groupId) => {
+    set({
+      groups: get().groups.map((g) =>
+        g.id === groupId && !g.filterIds.includes(filterId)
+          ? { ...g, filterIds: [...g.filterIds, filterId] }
+          : g,
+      ),
+    });
+    get().recomputeMatches();
+    schedulePersist(get);
+  },
+
+  removeFilterFromGroup: (filterId, groupId) => {
+    set({
+      groups: get().groups.map((g) =>
+        g.id === groupId
+          ? { ...g, filterIds: g.filterIds.filter((fid) => fid !== filterId) }
+          : g,
+      ),
+    });
+    get().recomputeMatches();
+    schedulePersist(get);
+  },
+
+  reorderGroup: (id, toIndex) => {
+    const arr = [...get().groups];
+    const from = arr.findIndex((g) => g.id === id);
+    if (from === -1 || from === toIndex) return;
+    const [moved] = arr.splice(from, 1);
+    arr.splice(toIndex, 0, moved);
+    set({ groups: arr });
     schedulePersist(get);
   },
 
@@ -430,18 +533,67 @@ export const useLogStore = create<LogState>((set, get) => ({
       set({ persistDirName: dir.name });
       const saved = await readFilters(dir);
       if (saved && Array.isArray(saved.filters) && saved.filters.length > 0) {
-        // 从 JSON 恢复过滤器（补全默认字段）
-        const restored: Filter[] = saved.filters.map((f: any, i: number) => ({
-          id: genFilterId(),
-          label: f.label ?? `Filter ${i + 1}`,
-          color: f.color ?? PALETTE[i % PALETTE.length],
-          pattern: f.pattern ?? '',
-          isRegex: f.isRegex ?? false,
-          caseSensitive: f.caseSensitive ?? false,
-          enabled: f.enabled ?? true,
-          scope: f.scope === 'message' ? 'message' : 'raw',
+        // 旧 filter id → 新 filter id 的映射（filter 加载时重新生成 id）
+        const oldToNewFid = new Map<string, string>();
+        // 从 JSON 恢复过滤器（补全默认字段；保留原 groupId 用于迁移）
+        const restoredRaw: Filter[] = saved.filters.map((f: any, i: number) => {
+          const newId = genFilterId();
+          if (f.id) oldToNewFid.set(f.id, newId);
+          return {
+            id: newId,
+            label: f.label ?? `Filter ${i + 1}`,
+            color: f.color ?? PALETTE[i % PALETTE.length],
+            pattern: f.pattern ?? '',
+            isRegex: f.isRegex ?? false,
+            caseSensitive: f.caseSensitive ?? false,
+            enabled: f.enabled ?? true,
+            scope: f.scope === 'message' ? 'message' : 'raw',
+            groupId: f.groupId ?? null, // 旧字段，迁移后置 null
+          };
+        });
+        // 恢复分组；新格式有 filterIds（需重映射到新 id），旧格式无则从 filter.groupId 反向迁移
+        const restoredGroups: FilterGroup[] = Array.isArray(saved.groups)
+          ? saved.groups.map((g: any, i: number) => {
+              const id = genGroupId();
+              const base = {
+                id,
+                label: g.label ?? `Group ${i + 1}`,
+                color: g.color ?? PALETTE[i % PALETTE.length],
+                collapsed: g.collapsed ?? false,
+                visible: g.visible ?? true,
+              };
+              // 新格式：filterIds 重映射 旧id→新id（找不到的丢弃）
+              if (Array.isArray(g.filterIds)) {
+                return {
+                  ...base,
+                  filterIds: g.filterIds
+                    .map((fid: string) => oldToNewFid.get(fid))
+                    .filter((fid: string | undefined): fid is string => !!fid),
+                };
+              }
+              // 旧格式：filterIds 为空，下方迁移旧 filter.groupId
+              return { ...base, filterIds: [] as string[] };
+            })
+          : [];
+        // 旧→新迁移：若 filter 仍带 legacy groupId，按 saved.filter.groupId 反向构建 group.filterIds
+        const hasLegacyGroupIds = restoredRaw.some((f) => f.groupId);
+        if (hasLegacyGroupIds && saved.groups && Array.isArray(saved.groups)) {
+          for (let gi = 0; gi < restoredGroups.length; gi++) {
+            const oldGid = saved.groups[gi]?.id;
+            if (!oldGid) continue;
+            restoredGroups[gi].filterIds = restoredRaw
+              .filter((f) => f.groupId === oldGid)
+              .map((f) => f.id);
+          }
+        }
+        // 迁移完毕，filter.groupId 全部置 null（不再使用单值归属）
+        const restored: Filter[] = restoredRaw.map((f) => ({
+          ...f,
+          groupId: null,
         }));
-        set({ filters: restored });
+        const collapsed = new Set<string>();
+        for (const g of restoredGroups) if (g.collapsed) collapsed.add(g.id);
+        set({ filters: restored, groups: restoredGroups, collapsedGroups: collapsed });
         get().recomputeMatches();
       }
     } catch (e) {
@@ -463,6 +615,7 @@ export const useLogStore = create<LogState>((set, get) => ({
     try {
       const data: PersistedFilters = {
         filters: get().filters.map((f) => ({ ...f })),
+        groups: get().groups.map((g) => ({ ...g })),
         savedAt: Date.now(),
       };
       await writeFilters(persistDir, data);

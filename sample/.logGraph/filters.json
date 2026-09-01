@@ -1,35 +1,62 @@
 {
   "filters": [
     {
-      "id": "f1788247505799_12",
+      "id": "f1788261657687_3",
       "label": "Retry policy triggered",
       "color": "#1a73e8",
       "pattern": "Retry policy triggered",
       "isRegex": false,
       "caseSensitive": false,
       "enabled": true,
-      "scope": "raw"
+      "scope": "raw",
+      "groupId": null
     },
     {
-      "id": "f1788247505799_13",
+      "id": "f1788261657687_4",
       "label": "Slow query detected",
       "color": "#1e8e3e",
       "pattern": "Slow query detected",
       "isRegex": false,
       "caseSensitive": false,
       "enabled": true,
-      "scope": "raw"
+      "scope": "raw",
+      "groupId": null
     },
     {
-      "id": "f1788247505799_14",
+      "id": "f1788261657687_5",
       "label": "Startup phase complete",
       "color": "#e37400",
       "pattern": "Startup phase complete",
       "isRegex": false,
       "caseSensitive": false,
       "enabled": true,
-      "scope": "raw"
+      "scope": "raw",
+      "groupId": null
     }
   ],
-  "savedAt": 1788249192801
+  "groups": [
+    {
+      "id": "g1788261657687_2",
+      "label": "qqq",
+      "color": "#1a73e8",
+      "collapsed": true,
+      "visible": true,
+      "filterIds": [
+        "f1788261657687_3",
+        "f1788261657687_4",
+        "f1788261657687_5"
+      ]
+    },
+    {
+      "id": "g1788261657687_3",
+      "label": "zzz",
+      "color": "#1a73e8",
+      "collapsed": false,
+      "visible": true,
+      "filterIds": [
+        "f1788261657687_4"
+      ]
+    }
+  ],
+  "savedAt": 1788261779881
 }

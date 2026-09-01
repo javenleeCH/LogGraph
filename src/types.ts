@@ -34,6 +34,22 @@ export interface Filter {
   enabled: boolean;
   /** 匹配字段范围：完整行 raw，或正文 message */
   scope: 'raw' | 'message';
+  /** 所属 group id；null 或 undefined=未分组（顶层） */
+  groupId?: string | null;
+}
+
+/** 用户定义的过滤器分组（类比 Perfetto 进程） */
+export interface FilterGroup {
+  id: string;
+  label: string;
+  /** 16 进制颜色，如 #4ea2ff */
+  color: string;
+  /** 是否折叠（折叠=合并成一行密度热力条） */
+  collapsed: boolean;
+  /** 是否显示（false 时整组及其子 filter 在所有视图隐藏） */
+  visible: boolean;
+  /** 组内 filter 引用列表（多对多：一个 filter 可属于多个 group） */
+  filterIds: string[];
 }
 
 /** 过滤器与其匹配到的事件集合 */

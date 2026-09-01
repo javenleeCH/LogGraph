@@ -116,6 +116,21 @@ export function LogStreamView() {
   const fullRange = useLogStore((s) => s.fullRange);
   const matches = useLogStore((s) => s.matches);
   const filters = useLogStore((s) => s.filters);
+  const groups = useLogStore((s) => s.groups);
+  // 可见 filter（多对多 + 真隐藏语义）：
+  // - 不属于任何 group 的 filter → 可见（顶层）
+  // - 属于至少一个可见 group 的 filter → 可见
+  // - 所属 group 全部隐藏的 filter → 不可见（真隐藏，不回流）
+  const visibleFilters = useMemo(() => {
+    const visibleGroupIds = new Set(
+      groups.filter((g) => g.visible !== false).map((g) => g.id),
+    );
+    return filters.filter((f) => {
+      const owning = groups.filter((g) => g.filterIds.includes(f.id));
+      if (owning.length === 0) return true; // 顶层无组 → 可见
+      return owning.some((g) => visibleGroupIds.has(g.id));
+    });
+  }, [filters, groups]);
   const selectedEventId = useLogStore((s) => s.selectedEventId);
   const correlatedEventIds = useLogStore((s) => s.correlatedEventIds);
   const hoveredEventId = useLogStore((s) => s.hoveredEventId);
@@ -129,9 +144,17 @@ export function LogStreamView() {
   // 时间轴模式：aligned=按事件时间戳对齐；independent=各列独立；global=固定刻度时间尺
   const [mode, setMode] = useState<ViewMode>('aligned');
 
+  // 只取可见 filter 对应的 matches（顺序与 visibleFilters 一致）
+  const visibleMatches = useMemo(
+    () =>
+      visibleFilters
+        .map((f) => matches.find((m) => m.filterId === f.id))
+        .filter((m): m is NonNullable<typeof m> => !!m),
+    [visibleFilters, matches],
+  );
   const { rows, laneEvents } = useMemo(
-    () => buildRows(matches, viewRange),
-    [matches, viewRange],
+    () => buildRows(visibleMatches, viewRange),
+    [visibleMatches, viewRange],
   );
 
   const totalHeight =
@@ -144,11 +167,11 @@ export function LogStreamView() {
   // 过滤器数量变化时重置为等分
   useEffect(() => {
     setColRatios((prev) => {
-      const n = filters.length;
+      const n = visibleFilters.length;
       if (prev.length === n) return prev;
       return new Array(n).fill(1 / Math.max(1, n));
     });
-  }, [filters.length]);
+  }, [visibleFilters.length]);
   useEffect(() => {
     const el = measureRef.current;
     if (!el) return;
@@ -163,7 +186,7 @@ export function LogStreamView() {
   }, []);
   // 实际各列像素宽（保底最小宽度）
   const colWidths = useMemo(() => {
-    const n = filters.length;
+    const n = visibleFilters.length;
     if (n === 0) return [];
     const total = availW;
     const ratios = colRatios.length === n ? colRatios : new Array(n).fill(1 / n);
@@ -178,7 +201,7 @@ export function LogStreamView() {
         clamped[clamped.length - 1] + diff,
       );
     return clamped;
-  }, [colRatios, availW, filters.length]);
+  }, [colRatios, availW, visibleFilters.length]);
 
   // 列间拖拽：拖动第 i 与 i+1 列之间的分隔条
   const colDrag = useRef<{ idx: number; startX: number; startRatios: number[] } | null>(null);
@@ -380,7 +403,7 @@ export function LogStreamView() {
     );
   }
 
-  if (filters.length === 0) {
+  if (visibleFilters.length === 0) {
     return (
       <div ref={measureRef} className={styles.empty}>
         请先添加过滤器，每列对应一个过滤器的匹配结果
@@ -392,7 +415,7 @@ export function LogStreamView() {
 
   /** 渲染列间竖向 resizer（在第 i 与 i+1 列之间） */
   const renderColResizer = (i: number) => {
-    if (i >= filters.length - 1) return null;
+    if (i >= visibleFilters.length - 1) return null;
     return (
       <div
         key={'rs' + i}
@@ -416,8 +439,8 @@ export function LogStreamView() {
         <span className={styles.headerDivider}>|</span>
         <span className={styles.headerInfo}>
           {mode === 'global'
-            ? `${globalData?.ticks.length ?? 0} 刻度 · ${filters.length} 列`
-            : `${rows.length} 个时间点 · ${filters.length} 列`}
+            ? `${globalData?.ticks.length ?? 0} 刻度 · ${visibleFilters.length} 列`
+            : `${rows.length} 个时间点 · ${visibleFilters.length} 列`}
         </span>
         <span className={styles.spacer} />
         <span className={styles.hint} title="W/S 缩放时间窗，A/D 平移时间窗">WASD</span>
@@ -447,7 +470,7 @@ export function LogStreamView() {
             时间
           </div>
         )}
-        {filters.map((f, li) => (
+        {visibleFilters.map((f, li) => (
           <Fragment key={f.id}>
             <div
               className={styles.laneHeader}
@@ -485,7 +508,7 @@ export function LogStreamView() {
               )}
             </div>
 
-            {filters.map((f, li) => (
+            {visibleFilters.map((f, li) => (
               <Fragment key={f.id}>
                 <GlobalLane
                   color={f.color}
@@ -525,7 +548,7 @@ export function LogStreamView() {
               )}
             </div>
 
-            {filters.map((f, li) => (
+            {visibleFilters.map((f, li) => (
               <Fragment key={f.id}>
                 <LaneColumn
                   color={f.color}
@@ -545,7 +568,7 @@ export function LogStreamView() {
         ) : (
           /* —— 独立模式：各列各自从上到下顺序排列，不按时间对齐 —— */
           <div className={styles.gridInner}>
-            {filters.map((f, li) => (
+            {visibleFilters.map((f, li) => (
               <Fragment key={f.id}>
                 <LaneStream
                   color={f.color}
