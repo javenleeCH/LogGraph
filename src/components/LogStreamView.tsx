@@ -205,6 +205,7 @@ export function LogStreamView() {
   const resetView = useLogStore((s) => s.resetView);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const headerInnerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(600);
   // 时间轴模式：aligned=按事件时间戳对齐；independent=各列独立；global=固定刻度时间尺
@@ -227,6 +228,16 @@ export function LogStreamView() {
     () => buildVisibleColumns(visibleFilters, groups),
     [visibleFilters, groups],
   );
+  // 所有 group 标题列总宽（每个固定 28px），需从可用宽度扣除
+  const segHeadersW = useMemo(
+    () => segments.filter((s) => s.kind === 'group').length * 28,
+    [segments],
+  );
+  // 列间 resizer 总宽（每相邻两列一个 5px）
+  const resizersW = useMemo(
+    () => Math.max(0, visibleFilters.length - 1) * 5,
+    [visibleFilters.length],
+  );
   const { rows, laneEvents } = useMemo(
     () => buildRows(visibleMatches, viewRange),
     [visibleMatches, viewRange],
@@ -235,86 +246,61 @@ export function LogStreamView() {
   const totalHeight =
     rows.length > 0 ? rows[rows.length - 1].top + rows[rows.length - 1].height : 0;
 
-  // 列宽：按比例数组控制，各列之间可拖拽
+  // 列宽：绝对像素数组（每列独立宽度，允许总宽超出容器→横向滚动）
   const measureRef = useRef<HTMLDivElement>(null);
-  const [availW, setAvailW] = useState(800);
-  const [colRatios, setColRatios] = useState<number[]>([]);
-  // 过滤器数量变化时重置为等分
+  const [viewportW, setViewportW] = useState(800);
+  // colWidths 为 state（直接像素），不再走 ratio；拖动列 i 边界仅改 colWidths[i]，
+  // 后续列宽度不变 → 它们整体位置随 flex 排列自然右移（即"整体平移跟随"）
+  const [colWidths, setColWidths] = useState<number[]>([]);
+  // 过滤器数量变化时重置为等分填充可用宽
   useEffect(() => {
-    setColRatios((prev) => {
+    setColWidths((prev) => {
       const n = visibleFilters.length;
       if (prev.length === n) return prev;
-      return new Array(n).fill(1 / Math.max(1, n));
+      const w = Math.max(MIN_LANE_WIDTH, Math.floor(viewportW / Math.max(1, n)));
+      return new Array(n).fill(w);
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleFilters.length]);
   useEffect(() => {
     const el = measureRef.current;
     if (!el) return;
     const ro = new ResizeObserver(() => {
-      setAvailW(Math.max(0, el.clientWidth - TIME_COL_WIDTH));
+      setViewportW(Math.max(0, el.clientWidth - TIME_COL_WIDTH - segHeadersW - resizersW));
       setViewportH(el.clientHeight);
     });
     ro.observe(el);
-    setAvailW(Math.max(0, el.clientWidth - TIME_COL_WIDTH));
+    setViewportW(Math.max(0, el.clientWidth - TIME_COL_WIDTH - segHeadersW - resizersW));
     setViewportH(el.clientHeight);
     return () => ro.disconnect();
-  }, []);
-  // 实际各列像素宽（保底最小宽度）
-  const colWidths = useMemo(() => {
-    const n = visibleFilters.length;
-    if (n === 0) return [];
-    const total = availW;
-    const ratios = colRatios.length === n ? colRatios : new Array(n).fill(1 / n);
-    const sum = ratios.reduce((a, b) => a + b, 0) || 1;
-    const raw = ratios.map((r) => (r / sum) * total);
-    const clamped = raw.map((w) => Math.max(MIN_LANE_WIDTH, w));
-    // 修正总和误差：最后一列吸收
-    const diff = total - clamped.reduce((a, b) => a + b, 0);
-    if (clamped.length > 0)
-      clamped[clamped.length - 1] = Math.max(
-        MIN_LANE_WIDTH,
-        clamped[clamped.length - 1] + diff,
-      );
-    return clamped;
-  }, [colRatios, availW, visibleFilters.length]);
+  }, [segHeadersW, resizersW]);
 
-  // 列间拖拽：拖动第 i 与 i+1 列之间的分隔条
-  const colDrag = useRef<{ idx: number; startX: number; startRatios: number[] } | null>(null);
+  // 列间拖拽（方案A）：resizer 在每个 filter 左侧，拖动改该 filter 自身宽度（idx=自身 li），
+  // 仅 colWidths[idx] 改变（±dx），后面所有列宽度不变 → 随 flex 排列整体平移跟随，
+  // 超出容器宽度则由 .body 的 overflow-x:auto 横向滚动
+  const colDrag = useRef<{ idx: number; startX: number; startWidths: number[] } | null>(null);
   const onColResizeDown = useCallback(
     (idx: number, e: React.MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      colDrag.current = { idx, startX: e.clientX, startRatios: [...colRatios] };
+      colDrag.current = { idx, startX: e.clientX, startWidths: [...colWidths] };
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
     },
-    [colRatios],
+    [colWidths],
   );
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
+      // filter 列拖拽（resizer 在右侧改自身 li）：拖右 dx>0 → 自身变宽，
+      // 后面所有列宽度不变 → 随 flex 排列整体右移平移，resizer 位于 lane 右边界跟随鼠标
       const d = colDrag.current;
       if (!d) return;
       const dx = e.clientX - d.startX;
-      const total = availW || 1;
-      const deltaRatio = dx / total;
-      const ratios = [...d.startRatios];
+      const widths = [...d.startWidths];
       const i = d.idx;
-      if (i + 1 >= ratios.length) return;
-      const sum = ratios[i] + ratios[i + 1];
-      let a = ratios[i] + deltaRatio;
-      let b = sum - a;
-      const minRatio = MIN_LANE_WIDTH / total;
-      if (a < minRatio) {
-        a = minRatio;
-        b = sum - a;
-      }
-      if (b < minRatio) {
-        b = minRatio;
-        a = sum - b;
-      }
-      ratios[i] = a;
-      ratios[i + 1] = b;
-      setColRatios(ratios);
+      if (i >= widths.length) return;
+      widths[i] = Math.max(MIN_LANE_WIDTH, d.startWidths[i] + dx);
+      setColWidths(widths);
     };
     const onUp = () => {
       if (colDrag.current) {
@@ -329,7 +315,7 @@ export function LogStreamView() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [availW]);
+  }, []);
 
   // 对齐模式：虚拟化按行前缀和二分定位可见行
   const overscan = 6;
@@ -450,10 +436,13 @@ export function LogStreamView() {
     lastScrollTarget.current = selectedEventId;
   }, [selectedEventId, rows, laneEvents, mode, viewRange, globalData]);
 
-  const [scrollLeft, setScrollLeft] = useState(0);
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    setScrollTop(e.currentTarget.scrollTop);
-    setScrollLeft(e.currentTarget.scrollLeft);
+    const el = e.currentTarget;
+    setScrollTop(el.scrollTop);
+    // 直接同步 DOM transform，绕过 React 渲染延迟，与原生滚动同帧
+    if (headerInnerRef.current) {
+      headerInnerRef.current.style.transform = `translateX(${-el.scrollLeft}px)`;
+    }
   }, []);
 
   // 每个 lane 按 ts 分组（供对齐模式渲染）
@@ -490,18 +479,17 @@ export function LogStreamView() {
 
   const showTimeCol = mode !== 'independent';
 
-  /** 渲染列间竖向 resizer（在第 i 与 i+1 列之间） */
-  const renderColResizer = (i: number) => {
-    if (i >= visibleFilters.length - 1) return null;
-    return (
-      <div
-        key={'rs' + i}
-        className={styles.colResizer}
-        onMouseDown={(e) => onColResizeDown(i, e)}
-        title="拖拽调节列宽"
-      />
-    );
-  };
+  /** 渲染 filter 右侧竖向 resizer：拖动改第 i 列（该 filter 自身）宽度，
+   *  后面所有列随 flex 排列整体平移跟随。每个 filter 右侧都有一个（含末列），
+   *  resizer 位于 lane 右边界，拖动时跟随鼠标，手感直观。 */
+  const renderColResizer = (i: number) => (
+    <div
+      key={'rs' + i}
+      className={styles.colResizer}
+      onMouseDown={(e) => onColResizeDown(i, e)}
+      title="拖拽调节列宽"
+    />
+  );
 
   /** 渲染一个分段的子列：filters 为该段的列列表
    *  group 段：左侧竖向标题列（可点击左右折叠）+ 右侧子 filter 列
@@ -509,8 +497,9 @@ export function LogStreamView() {
   const renderSegmentColumns = (
     seg: ColumnSegment,
     renderLane: (f: Filter, li: number) => React.ReactNode,
-    // isHeaderCtx 保留参数但不再使用（标题列在列头和主体中一致渲染）
-    _isHeaderCtx = false,
+    // true=列头上下文（渲染完整标题：文字/caret/计数/可点击折叠）
+    // false=主体上下文（仅渲染 sticky 纯色占位条，纵向滚动时钉在顶部不跟随）
+    isHeaderCtx = false,
   ) => {
     const gid = seg.kind === 'group' ? seg.group!.id : '';
     const collapsed = gid ? !!segCollapsed[gid] : false;
@@ -519,19 +508,28 @@ export function LogStreamView() {
         key={seg.kind === 'group' ? 'g-' + gid : 'top'}
         className={`${styles.segWrapper} ${collapsed ? styles.segCollapsed : ''}`}
       >
-        {seg.kind === 'group' && (
-          <div
-            className={styles.segHeader}
-            style={{ background: seg.group!.color }}
-            onClick={() => toggleSeg(gid)}
-            title={collapsed ? '点击展开子列' : '点击折叠子列'}
-          >
-            <span className={styles.segDot} style={{ background: '#fff' }} />
-            <span className={styles.segTitleV}>{seg.group!.label}</span>
-            <span className={styles.segCount}>{seg.filters.length}</span>
-            <span className={styles.segCaret}>{collapsed ? '▶' : '◀'}</span>
-          </div>
-        )}
+        {seg.kind === 'group' &&
+          (isHeaderCtx ? (
+            // 列头：完整标题（可点击折叠），固定宽度整体
+            <div
+              className={styles.segHeader}
+              style={{ background: seg.group!.color }}
+              onClick={() => toggleSeg(gid)}
+              title={collapsed ? '点击展开子列' : '点击折叠子列'}
+            >
+              <span className={styles.segDot} style={{ background: '#fff' }} />
+              <span className={styles.segTitleV}>{seg.group!.label}</span>
+              <span className={styles.segCount}>{seg.filters.length}</span>
+              <span className={styles.segCaret}>{collapsed ? '▶' : '◀'}</span>
+            </div>
+          ) : (
+            // 主体：sticky 纯色占位条（无文字，钉在可视区顶部），固定宽度整体
+            <div
+              className={styles.segHeaderBody}
+              style={{ background: seg.group!.color }}
+              aria-hidden="true"
+            />
+          ))}
         <div className={styles.segCols}>
           {seg.filters.map(({ filter: f, index: li }) => (
             <Fragment key={f.id}>
@@ -581,9 +579,9 @@ export function LogStreamView() {
         </button>
       </div>
 
-      {/* 列头（内层 inner 跟随主体横向滚动） */}
+      {/* 列头（内层 inner 跟随主体横向滚动，transform 由 ref 同步避免脱轨） */}
       <div className={styles.columnHeader}>
-        <div className={styles.columnHeaderInner} style={{ transform: `translateX(${-scrollLeft}px)` }}>
+        <div ref={headerInnerRef} className={styles.columnHeaderInner}>
           {showTimeCol && (
             <div className={styles.timeColHeader} style={{ width: TIME_COL_WIDTH }}>
               时间

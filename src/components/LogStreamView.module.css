@@ -85,11 +85,11 @@
   white-space: nowrap;
 }
 
-/* 列头（外层固定，overflow 隐藏，内部 inner 跟随横向滚动） */
+/* 列头（外层固定，高度 auto 让竖向 group 标题撑开；内部 inner 跟随横向滚动） */
 .columnHeader {
   display: flex;
   flex: 0 0 auto;
-  height: 30px;
+  min-height: 30px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
   overflow: hidden;
@@ -100,7 +100,8 @@
 .columnHeaderInner {
   display: flex;
   flex: 0 0 auto;
-  min-width: 0;
+  width: max-content;
+  min-width: 100%;
   will-change: transform;
 }
 
@@ -122,11 +123,15 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 0 0 auto;
+  flex-grow: 0;
+  flex-shrink: 0;
+  /* flex-basis 由 inline style 的 width 设定 */
+  min-height: 30px;
   padding: 0 8px;
   border-left: 3px solid #999;
   border-right: 1px solid var(--border);
   overflow: hidden;
+  box-sizing: border-box;
 }
 
 .laneDot {
@@ -172,7 +177,7 @@
   display: flex;
   flex-direction: row;
   flex: 0 0 auto;
-  min-width: 0;
+  min-width: max-content;
   min-height: 0;
 }
 
@@ -181,7 +186,8 @@
   display: none;
 }
 
-/* 左侧竖向标题列（整块实色，背景色由内联 style 注入 group 色） */
+/* 左侧竖向标题列（整块实色，固定 28px 作为一个整体）
+   高度 auto 让竖向文字撑开列头 */
 .segHeader {
   display: flex;
   flex-direction: column;
@@ -189,15 +195,29 @@
   gap: 4px;
   width: 28px;
   flex: 0 0 28px;
+  align-self: stretch;
   padding: 8px 0;
   border-right: 1px solid rgba(0, 0, 0, 0.15);
   overflow: hidden;
   cursor: pointer;
   user-select: none;
   transition: filter 0.12s;
+  box-sizing: border-box;
 }
 .segHeader:hover {
   filter: brightness(1.08);
+}
+
+/* 主体内 group 色条：sticky 钉在可视区顶部，纵向滚动时不跟随；固定 28px */
+.segHeaderBody {
+  width: 28px;
+  flex: 0 0 28px;
+  position: sticky;
+  top: 0;
+  align-self: stretch;
+  border-right: 1px solid rgba(0, 0, 0, 0.15);
+  z-index: 2;
+  box-sizing: border-box;
 }
 
 .segDot {
@@ -241,25 +261,39 @@
 .segCols {
   display: flex;
   flex: 0 0 auto;
-  min-width: 0;
+  min-width: max-content;
   min-height: 0;
 }
 
 .gridInner {
   display: flex;
   position: relative;
-  min-width: 0;
+  width: max-content;
+  min-width: 100%;
 }
 
-/* 列间竖向拖拽条 */
+/* 列间竖向拖拽条：撑满列高，默认可见，hover 高亮 */
 .colResizer {
-  flex: 0 0 5px;
-  width: 5px;
+  flex: 0 0 6px;
+  width: 6px;
+  min-height: 30px;
+  align-self: stretch;
   cursor: col-resize;
   position: relative;
-  z-index: 8;
-  background: var(--border);
+  z-index: 10;
+  background: #6b7280;
   transition: background 0.12s;
+}
+
+/* 用伪元素扩大可点击区域（左右各延伸 4px） */
+.colResizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+  z-index: -1;
 }
 
 .colResizer::before {
@@ -269,10 +303,10 @@
   top: 50%;
   transform: translate(-50%, -50%);
   width: 2px;
-  height: 28px;
+  height: 20px;
   border-radius: 1px;
-  background: rgba(255, 255, 255, 0.55);
-  opacity: 0;
+  background: rgba(255, 255, 255, 0.6);
+  opacity: 0.7;
   transition: opacity 0.12s;
 }
 
@@ -323,13 +357,15 @@
   margin-top: 8px;
 }
 
-/* 各过滤器列 */
+/* 各过滤器列（flex-basis 由 inline style 的 width 设定） */
 .lane {
-  flex: 0 0 auto;
+  flex-grow: 0;
+  flex-shrink: 0;
   position: relative;
   border-left: 3px solid #999;
   border-right: 1px solid var(--border);
   overflow: hidden;
+  box-sizing: border-box;
 }
 
 /* 行容器（绝对定位） */
