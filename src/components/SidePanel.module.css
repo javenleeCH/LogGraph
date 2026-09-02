@@ -1,0 +1,236 @@
+.sidePanel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  gap: 1px;
+  background: var(--border);
+}
+
+/* 三段可折叠区块 */
+.section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* 文件树段固定较小比例，group/filter 段均分剩余空间 */
+.section:first-child {
+  flex: 0 0 38%;
+  min-height: 80px;
+}
+.section:nth-child(2) {
+  flex: 1 1 auto;
+  min-height: 60px;
+}
+.section:nth-child(3) {
+  flex: 1 1 auto;
+  min-height: 60px;
+}
+
+/* 折叠态：只保留 header，固定高度 */
+.section.collapsed {
+  flex: 0 0 34px !important;
+  min-height: 34px;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 8px;
+  flex: 0 0 34px;
+  background: var(--bg-elev, var(--bg));
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  transition: background 0.12s;
+}
+
+.sectionHeader:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+}
+
+.caret {
+  font-size: 9px;
+  opacity: 0.6;
+  width: 10px;
+}
+
+.sectionTitle {
+  flex: 0 0 auto;
+}
+
+.sectionCount {
+  flex: 0 0 auto;
+  font-size: 11px;
+  opacity: 0.5;
+  background: rgba(128, 128, 128, 0.18);
+  padding: 0 5px;
+  border-radius: 8px;
+  line-height: 16px;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.addBtn {
+  flex: 0 0 auto;
+  border: none;
+  background: rgba(128, 128, 128, 0.16);
+  color: var(--text);
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.addBtn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.sectionBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ── Group 行 ── */
+.groupRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.groupRow:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+}
+
+/* ── Filter 行 ── */
+.filterRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.filterRow:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+}
+
+.dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.rowLabel {
+  flex: 0 1 auto;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+
+.rowCount {
+  flex: 0 0 auto;
+  font-size: 11px;
+  opacity: 0.5;
+  background: rgba(128, 128, 128, 0.16);
+  padding: 0 5px;
+  border-radius: 8px;
+  line-height: 16px;
+}
+
+.rowTitleInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  outline: none;
+}
+.rowTitleInput:hover,
+.rowTitleInput:focus {
+  border-color: var(--border);
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.rowActions {
+  display: none;
+  gap: 2px;
+  margin-left: auto;
+}
+.groupRow:hover .rowActions {
+  display: flex;
+}
+
+.miniBtn {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.1s, background 0.1s;
+}
+.miniBtn:hover {
+  opacity: 1;
+  background: rgba(128, 128, 128, 0.18);
+}
+
+.rowTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  width: 100%;
+  margin-top: 2px;
+}
+
+.rowTag {
+  font-size: 10px;
+  opacity: 0.65;
+  border: 1px solid var(--border);
+  padding: 0 4px;
+  border-radius: 3px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.dim {
+  opacity: 0.45;
+}
+
+.emptyHint {
+  padding: 10px 8px;
+  font-size: 11px;
+  opacity: 0.4;
+  text-align: center;
+}

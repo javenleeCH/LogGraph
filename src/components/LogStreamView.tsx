@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'rea
 import { useLogStore } from '../store/logStore';
 import { bisectLeft } from '../timeline/correlation';
 import { formatTime, formatDuration, chooseTickStep } from '../utils/timeFormat';
-import type { LogEvent } from '../types';
+import type { LogEvent, Filter } from '../types';
 import styles from './LogStreamView.module.css';
 
 const CARD_H = 20; // 单个事件卡片高度
@@ -38,6 +38,7 @@ function hexToRgb(hex: string): [number, number, number] {
   const num = parseInt(n, 16);
   return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
 }
+
 
 interface RowData {
   ts: number;
@@ -103,6 +104,71 @@ function buildRows(
   return { rows, laneEvents };
 }
 
+/** 可见列分段：group 包裹子 filter 列 + 顶层 filter 列 */
+interface ColumnSegment {
+  kind: 'group' | 'top';
+  /** group 段的组对象（top 段为 null） */
+  group?: import('../types').FilterGroup;
+  /** 该段内的 filter 列表（含在 visibleFilters 中的全局索引） */
+  filters: { filter: Filter; index: number }[];
+}
+
+/**
+ * 按 groups 顺序构建列分段：
+ * - 每个可见 group 一个 segment（含其子 filter，按 g.filterIds 顺序，跳过已删除 / 不可见的）
+ * - 顶层 filter（不被任何 group 引用）一个 segment
+ * 不可见 filter（所属 group 全部隐藏的）不出现在任何段中。
+ */
+function buildVisibleColumns(
+  visibleFilters: Filter[],
+  groups: import('../types').FilterGroup[],
+): ColumnSegment[] {
+  const segments: ColumnSegment[] = [];
+  // 不可见 filter 的集合（所属 group 全部隐藏 → 真隐藏）
+  const visibleGroupIds = new Set(
+    groups.filter((g) => g.visible !== false).map((g) => g.id),
+  );
+  const isInvisible = (f: Filter) => {
+    const owning = groups.filter((g) => g.filterIds.includes(f.id));
+    return owning.length > 0 && !owning.some((g) => visibleGroupIds.has(g.id));
+  };
+
+  // 全局索引查找
+  const globalIdx = (fid: string) => visibleFilters.findIndex((f) => f.id === fid);
+
+  // 1. 按 groups 顺序
+  for (const g of groups) {
+    if (g.visible === false) continue;
+    const cols: { filter: Filter; index: number }[] = [];
+    for (const fid of g.filterIds) {
+      const idx = globalIdx(fid);
+      if (idx < 0) continue; // 不在可见 filter 列表里（可能被隐藏或已删除）
+      cols.push({ filter: visibleFilters[idx], index: idx });
+    }
+    if (cols.length > 0) {
+      segments.push({ kind: 'group', group: g, filters: cols });
+    }
+  }
+
+  // 2. 顶层 filter（不被任何 group 引用，且可见）
+  const referencedByAnyGroup = new Set<string>();
+  for (const g of groups) {
+    for (const fid of g.filterIds) referencedByAnyGroup.add(fid);
+  }
+  const topCols: { filter: Filter; index: number }[] = [];
+  for (let i = 0; i < visibleFilters.length; i++) {
+    const f = visibleFilters[i];
+    if (referencedByAnyGroup.has(f.id)) continue;
+    if (isInvisible(f)) continue;
+    topCols.push({ filter: f, index: i });
+  }
+  if (topCols.length > 0) {
+    segments.push({ kind: 'top', group: undefined, filters: topCols });
+  }
+
+  return segments;
+}
+
 type ViewMode = 'aligned' | 'independent' | 'global';
 
 const MODE_LABEL: Record<ViewMode, string> = {
@@ -143,6 +209,10 @@ export function LogStreamView() {
   const [viewportH, setViewportH] = useState(600);
   // 时间轴模式：aligned=按事件时间戳对齐；independent=各列独立；global=固定刻度时间尺
   const [mode, setMode] = useState<ViewMode>('aligned');
+  // 纵轴视图 group 左右折叠状态（本地，独立于时间线的 collapsed）
+  const [segCollapsed, setSegCollapsed] = useState<Record<string, boolean>>({});
+  const toggleSeg = (gid: string) =>
+    setSegCollapsed((prev) => ({ ...prev, [gid]: !prev[gid] }));
 
   // 只取可见 filter 对应的 matches（顺序与 visibleFilters 一致）
   const visibleMatches = useMemo(
@@ -151,6 +221,11 @@ export function LogStreamView() {
         .map((f) => matches.find((m) => m.filterId === f.id))
         .filter((m): m is NonNullable<typeof m> => !!m),
     [visibleFilters, matches],
+  );
+  // 可见列分段：group 包裹子 filter + 顶层 filter
+  const segments = useMemo(
+    () => buildVisibleColumns(visibleFilters, groups),
+    [visibleFilters, groups],
   );
   const { rows, laneEvents } = useMemo(
     () => buildRows(visibleMatches, viewRange),
@@ -375,8 +450,10 @@ export function LogStreamView() {
     lastScrollTarget.current = selectedEventId;
   }, [selectedEventId, rows, laneEvents, mode, viewRange, globalData]);
 
+  const [scrollLeft, setScrollLeft] = useState(0);
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     setScrollTop(e.currentTarget.scrollTop);
+    setScrollLeft(e.currentTarget.scrollLeft);
   }, []);
 
   // 每个 lane 按 ts 分组（供对齐模式渲染）
@@ -426,6 +503,47 @@ export function LogStreamView() {
     );
   };
 
+  /** 渲染一个分段的子列：filters 为该段的列列表
+   *  group 段：左侧竖向标题列（可点击左右折叠）+ 右侧子 filter 列
+   *  top 段：无标题列，仅子 filter 列 */
+  const renderSegmentColumns = (
+    seg: ColumnSegment,
+    renderLane: (f: Filter, li: number) => React.ReactNode,
+    // isHeaderCtx 保留参数但不再使用（标题列在列头和主体中一致渲染）
+    _isHeaderCtx = false,
+  ) => {
+    const gid = seg.kind === 'group' ? seg.group!.id : '';
+    const collapsed = gid ? !!segCollapsed[gid] : false;
+    return (
+      <div
+        key={seg.kind === 'group' ? 'g-' + gid : 'top'}
+        className={`${styles.segWrapper} ${collapsed ? styles.segCollapsed : ''}`}
+      >
+        {seg.kind === 'group' && (
+          <div
+            className={styles.segHeader}
+            style={{ background: seg.group!.color }}
+            onClick={() => toggleSeg(gid)}
+            title={collapsed ? '点击展开子列' : '点击折叠子列'}
+          >
+            <span className={styles.segDot} style={{ background: '#fff' }} />
+            <span className={styles.segTitleV}>{seg.group!.label}</span>
+            <span className={styles.segCount}>{seg.filters.length}</span>
+            <span className={styles.segCaret}>{collapsed ? '▶' : '◀'}</span>
+          </div>
+        )}
+        <div className={styles.segCols}>
+          {seg.filters.map(({ filter: f, index: li }) => (
+            <Fragment key={f.id}>
+              {renderLane(f, li)}
+              {renderColResizer(li)}
+            </Fragment>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div ref={measureRef} className={styles.wrap}>
       {/* 顶栏 */}
@@ -463,26 +581,31 @@ export function LogStreamView() {
         </button>
       </div>
 
-      {/* 列头 */}
+      {/* 列头（内层 inner 跟随主体横向滚动） */}
       <div className={styles.columnHeader}>
-        {showTimeCol && (
-          <div className={styles.timeColHeader} style={{ width: TIME_COL_WIDTH }}>
-            时间
-          </div>
-        )}
-        {visibleFilters.map((f, li) => (
-          <Fragment key={f.id}>
-            <div
-              className={styles.laneHeader}
-              style={{ width: colWidths[li] ?? MIN_LANE_WIDTH, borderLeftColor: f.color }}
-            >
-              <span className={styles.laneDot} style={{ background: f.color }} />
-              <span className={styles.laneTitle}>{f.label}</span>
-              <span className={styles.lanePattern}>{f.pattern || '（空）'}</span>
+        <div className={styles.columnHeaderInner} style={{ transform: `translateX(${-scrollLeft}px)` }}>
+          {showTimeCol && (
+            <div className={styles.timeColHeader} style={{ width: TIME_COL_WIDTH }}>
+              时间
             </div>
-            {renderColResizer(li)}
-          </Fragment>
-        ))}
+          )}
+          {segments.map((seg) =>
+            renderSegmentColumns(
+              seg,
+              (f, li) => (
+                <div
+                  className={styles.laneHeader}
+                  style={{ width: colWidths[li] ?? MIN_LANE_WIDTH, borderLeftColor: f.color }}
+                >
+                  <span className={styles.laneDot} style={{ background: f.color }} />
+                  <span className={styles.laneTitle}>{f.label}</span>
+                  <span className={styles.lanePattern}>{f.pattern || '（空）'}</span>
+                </div>
+              ),
+              true,
+            ),
+          )}
+        </div>
       </div>
 
       {/* 主体 */}
@@ -508,8 +631,8 @@ export function LogStreamView() {
               )}
             </div>
 
-            {visibleFilters.map((f, li) => (
-              <Fragment key={f.id}>
+            {segments.map((seg) =>
+              renderSegmentColumns(seg, (f, li) => (
                 <GlobalLane
                   color={f.color}
                   width={colWidths[li] ?? MIN_LANE_WIDTH}
@@ -525,9 +648,8 @@ export function LogStreamView() {
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
-                {renderColResizer(li)}
-              </Fragment>
-            ))}
+              )),
+            )}
           </div>
         ) : mode === 'aligned' ? (
           /* —— 对齐模式：按时间戳并集分行，各列同时间行顶部对齐 —— */
@@ -548,8 +670,8 @@ export function LogStreamView() {
               )}
             </div>
 
-            {visibleFilters.map((f, li) => (
-              <Fragment key={f.id}>
+            {segments.map((seg) =>
+              renderSegmentColumns(seg, (f, li) => (
                 <LaneColumn
                   color={f.color}
                   width={colWidths[li] ?? MIN_LANE_WIDTH}
@@ -561,15 +683,14 @@ export function LogStreamView() {
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
-                {renderColResizer(li)}
-              </Fragment>
-            ))}
+              )),
+            )}
           </div>
         ) : (
           /* —— 独立模式：各列各自从上到下顺序排列，不按时间对齐 —— */
           <div className={styles.gridInner}>
-            {visibleFilters.map((f, li) => (
-              <Fragment key={f.id}>
+            {segments.map((seg) =>
+              renderSegmentColumns(seg, (f, li) => (
                 <LaneStream
                   color={f.color}
                   width={colWidths[li] ?? MIN_LANE_WIDTH}
@@ -582,9 +703,8 @@ export function LogStreamView() {
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
-                {renderColResizer(li)}
-              </Fragment>
-            ))}
+              )),
+            )}
           </div>
         )}
       </div>

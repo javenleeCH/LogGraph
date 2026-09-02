@@ -85,7 +85,7 @@
   white-space: nowrap;
 }
 
-/* 列头 */
+/* 列头（外层固定，overflow 隐藏，内部 inner 跟随横向滚动） */
 .columnHeader {
   display: flex;
   flex: 0 0 auto;
@@ -93,6 +93,15 @@
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
   overflow: hidden;
+  position: relative;
+}
+
+/* 列头内部包裹层：跟随主体横向滚动 */
+.columnHeaderInner {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  will-change: transform;
 }
 
 .timeColHeader {
@@ -100,6 +109,7 @@
   align-items: center;
   padding: 0 10px;
   flex: 0 0 auto;
+  align-self: stretch;
   font-size: 11px;
   font-weight: 600;
   color: var(--text-dim);
@@ -154,6 +164,85 @@
   overflow-y: auto;
   overflow-x: auto;
   position: relative;
+}
+
+/* —— group 分段包裹（列头 + 主体共用） —— */
+/* 行布局：左侧竖向标题列 + 右侧子 filter 列 */
+.segWrapper {
+  display: flex;
+  flex-direction: row;
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 折叠态：隐藏子列 */
+.segCollapsed .segCols {
+  display: none;
+}
+
+/* 左侧竖向标题列（整块实色，背景色由内联 style 注入 group 色） */
+.segHeader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 28px;
+  flex: 0 0 28px;
+  padding: 8px 0;
+  border-right: 1px solid rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  cursor: pointer;
+  user-select: none;
+  transition: filter 0.12s;
+}
+.segHeader:hover {
+  filter: brightness(1.08);
+}
+
+.segDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 10px;
+}
+
+/* 竖向文字（vertical-rl：中文从上往下正立）；白字叠在实色背景上 */
+.segTitleV {
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-height: 200px;
+  flex: 0 1 auto;
+}
+
+.segCount {
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.22);
+  padding: 0 4px;
+  border-radius: 7px;
+  line-height: 14px;
+  flex: 0 0 auto;
+}
+
+.segCaret {
+  font-size: 11px;
+  color: #fff;
+  flex: 0 0 auto;
+}
+
+.segCols {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
 }
 
 .gridInner {

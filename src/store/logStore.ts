@@ -4,7 +4,7 @@
  */
 
 import { create } from 'zustand';
-import type { Filter, FilterGroup, FilterMatch, LogEvent, TimeRange } from '../types';
+import type { Filter, FilterGroup, FilterMatch, LogEvent, NodePos, TimeRange } from '../types';
 import { FilterEngine } from '../filters/FilterEngine';
 import {
   pickDirectory,
@@ -66,6 +66,7 @@ function schedulePersist(get: () => LogState) {
       const data: PersistedFilters = {
         filters: get().filters.map((f) => ({ ...f })),
         groups: get().groups.map((g) => ({ ...g })),
+        graphNodes: { ...get().graphNodes },
         savedAt: Date.now(),
       };
       await writeFilters(persistDir, data);
@@ -103,6 +104,33 @@ interface LogState {
   addFilterToGroup: (filterId: string, groupId: string) => void;
   removeFilterFromGroup: (filterId: string, groupId: string) => void;
   reorderGroup: (id: string, toIndex: number) => void;
+
+  // --- 节点画布（draw.io 风格区域式） ---
+  /** 当前展开的 group 详情页（null=关闭抽屉） */
+  activeGroupId: string | null;
+  /** 当前编辑的 filter 详情弹窗（null=关闭弹窗） */
+  editingFilterId: string | null;
+  /** 节点坐标表 id → NodePos（持久化） */
+  graphNodes: Record<string, NodePos>;
+  /** 画布平移偏移（屏幕像素，会话级） */
+  graphPan: { x: number; y: number };
+  /** 画布缩放倍数（会话级） */
+  graphZoom: number;
+  setActiveGroup: (id: string | null) => void;
+  setEditingFilterId: (id: string | null) => void;
+  /** 设置/更新某节点坐标（可同时更新宽高） */
+  setNodePos: (
+    id: string,
+    x: number,
+    y: number,
+    wh?: { w?: number; h?: number },
+  ) => void;
+  /** 确保节点有坐标（无则按缺省网格/所属区域生成） */
+  ensureNodePos: (id: string, kind: 'group' | 'filterItem') => void;
+  /** 删除某节点坐标 */
+  removeNodePos: (id: string) => void;
+  setGraphPan: (x: number, y: number) => void;
+  setGraphZoom: (z: number) => void;
 
   // --- 视图 ---
   viewRange: TimeRange | null; // 当前可见时间窗
@@ -198,6 +226,81 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   splitOrientation: 'vertical',
   setSplitOrientation: (o) => set({ splitOrientation: o }),
+
+  // --- 节点画布 ---
+  activeGroupId: null,
+  editingFilterId: null,
+  graphNodes: {},
+  graphPan: { x: 0, y: 0 },
+  graphZoom: 1,
+  setActiveGroup: (id) => set({ activeGroupId: id }),
+  setEditingFilterId: (id) => set({ editingFilterId: id }),
+  setNodePos: (id, x, y, wh) =>
+    set({
+      graphNodes: {
+        ...get().graphNodes,
+        [id]: {
+          ...get().graphNodes[id],
+          id,
+          x,
+          y,
+          ...(wh?.w !== undefined ? { w: wh.w } : {}),
+          ...(wh?.h !== undefined ? { h: wh.h } : {}),
+        },
+      },
+    }),
+  ensureNodePos: (id, kind) => {
+    if (get().graphNodes[id]) return; // 已有坐标
+    const nodes = get().graphNodes;
+    const groups = get().groups;
+    const filters = get().filters;
+    if (kind === 'group') {
+      // group 按网格：col*420, row*320，每行 3 个
+      const gIdx = groups.findIndex((g) => g.id === id);
+      const i = gIdx >= 0 ? gIdx : Object.values(nodes).filter((n) => n.kind === 'group').length;
+      const col = i % 3;
+      const row = Math.floor(i / 3);
+      const pos: NodePos = { id, kind, x: 40 + col * 420, y: 40 + row * 320, w: 400, h: 300 };
+      set({ graphNodes: { ...get().graphNodes, [id]: pos } });
+      return;
+    }
+    // filterItem：落在其「首个所属 group」区域内左上起始；无所属则顶层网格
+    const primary = groups.find((g) => g.filterIds.includes(id));
+    if (primary && nodes[primary.id]) {
+      const gp = nodes[primary.id];
+      // 区域内已有 filterItem 数量决定行列
+      const existing = Object.values(nodes).filter(
+        (n) => n.kind === 'filterItem' && n.x >= gp.x && n.x < gp.x + (gp.w ?? 400) && n.y >= gp.y && n.y < gp.y + (gp.h ?? 300),
+      ).length;
+      const col = existing % 3;
+      const row = Math.floor(existing / 3);
+      const pos: NodePos = {
+        id,
+        kind,
+        x: gp.x + 20 + col * 180,
+        y: gp.y + 50 + row * 60,
+      };
+      set({ graphNodes: { ...get().graphNodes, [id]: pos } });
+      return;
+    }
+    // 顶层无 group：网格排布在 group 区域下方
+    const topExisting = Object.values(nodes).filter(
+      (n) => n.kind === 'filterItem' && !groups.some((g) => g.filterIds.includes(n.id)),
+    ).length;
+    const fIdx = filters.findIndex((f) => f.id === id);
+    const i = fIdx >= 0 ? fIdx : topExisting;
+    const col = i % 6;
+    const row = Math.floor(i / 6);
+    const pos: NodePos = { id, kind, x: 40 + col * 180, y: 400 + row * 60 };
+    set({ graphNodes: { ...get().graphNodes, [id]: pos } });
+  },
+  removeNodePos: (id) => {
+    const next = { ...get().graphNodes };
+    delete next[id];
+    set({ graphNodes: next });
+  },
+  setGraphPan: (x, y) => set({ graphPan: { x, y } }),
+  setGraphZoom: (z) => set({ graphZoom: z }),
 
   setLog: (events, rawLines, meta) => {
     if (events.length === 0) {
@@ -296,6 +399,7 @@ export const useLogStore = create<LogState>((set, get) => ({
     const collapsed = new Set(get().collapsedGroups);
     collapsed.delete(id);
     set({ collapsedGroups: collapsed });
+    get().removeNodePos(id);
     schedulePersist(get);
   },
 
@@ -593,7 +697,37 @@ export const useLogStore = create<LogState>((set, get) => ({
         }));
         const collapsed = new Set<string>();
         for (const g of restoredGroups) if (g.collapsed) collapsed.add(g.id);
-        set({ filters: restored, groups: restoredGroups, collapsedGroups: collapsed });
+        // 恢复节点画布坐标：旧 group id → 新 group id 映射
+        const oldToNewGid = new Map<string, string>();
+        if (Array.isArray(saved.groups)) {
+          saved.groups.forEach((sg: any, i: number) => {
+            if (sg?.id && restoredGroups[i]) oldToNewGid.set(sg.id, restoredGroups[i].id);
+          });
+        }
+        const restoredGraphNodes: Record<string, NodePos> = {};
+        if (saved.graphNodes && typeof saved.graphNodes === 'object') {
+          for (const [oldKey, node] of Object.entries(saved.graphNodes) as [string, any][]) {
+            const newId = node.kind === 'group' ? oldToNewGid.get(oldKey) : oldToNewFid.get(oldKey);
+            if (!newId) continue; // 找不到映射（已删除），丢弃
+            restoredGraphNodes[newId] = {
+              id: newId,
+              kind: node.kind,
+              x: node.x ?? 0,
+              y: node.y ?? 0,
+              ...(node.w != null ? { w: node.w } : {}),
+              ...(node.h != null ? { h: node.h } : {}),
+            };
+          }
+        }
+        set({
+          filters: restored,
+          groups: restoredGroups,
+          collapsedGroups: collapsed,
+          graphNodes: restoredGraphNodes,
+        });
+        // 兜底：无坐标的 filter/group 补缺省坐标
+        for (const g of restoredGroups) get().ensureNodePos(g.id, 'group');
+        for (const f of restored) get().ensureNodePos(f.id, 'filterItem');
         get().recomputeMatches();
       }
     } catch (e) {

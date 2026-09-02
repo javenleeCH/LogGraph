@@ -70,6 +70,8 @@ export interface PersistedFilters {
   filters: Filter[];
   /** 分组列表（旧文件无此字段=空 groups，向后兼容） */
   groups?: FilterGroup[];
+  /** 节点画布坐标表（旧文件无此字段=自动生成缺省布局） */
+  graphNodes?: Record<string, import('../types').NodePos>;
   savedAt: number;
 }
 

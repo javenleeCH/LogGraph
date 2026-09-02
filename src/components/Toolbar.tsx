@@ -95,9 +95,9 @@ export function Toolbar() {
         }
       >
         {splitOrientation === 'vertical' ? '📋 表格流' : '📊 时间线'}
-      </button>
-
-      {persistSupported && (
+        </button>
+  
+        {persistSupported && (
         <>
           <div className={styles.sep} />
           <button

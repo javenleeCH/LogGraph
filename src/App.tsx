@@ -1,10 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Toolbar } from './components/Toolbar';
-import { FilterBar } from './components/FilterBar';
 import { LogStreamView } from './components/LogStreamView';
 import { TimelineCanvas } from './timeline/TimelineCanvas';
 import { DetailPanel } from './components/DetailPanel';
-import { FileTreePanel } from './components/FileTreePanel';
+import { SidePanel } from './components/SidePanel';
+import { GroupEditorPage, FilterDetailModal } from './components/NodeCanvasView';
 import { useLogStore } from './store/logStore';
 import { loadFromDataTransfer } from './io/fileLoader';
 import { LogParser } from './parser/LogParser';
@@ -19,6 +19,8 @@ export default function App() {
   const initLogsDir = useLogStore((s) => s.initLogsDir);
   const logsDirHandle = useLogStore((s) => s.logsDirHandle);
   const splitOrientation = useLogStore((s) => s.splitOrientation);
+  const activeGroupId = useLogStore((s) => s.activeGroupId);
+  const editingFilterId = useLogStore((s) => s.editingFilterId);
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const persistDirName = useLogStore((s) => s.persistDirName);
   const events = useLogStore((s) => s.events);
@@ -155,7 +157,6 @@ export default function App() {
       onDrop={onDrop}
     >
       <Toolbar />
-      <FilterBar />
       <div className={styles['main-row']}>
         {logsDirHandle && (
           <>
@@ -163,12 +164,12 @@ export default function App() {
               className={styles.treePane}
               style={{ flex: `${treeRatio} 1 0` }}
             >
-              <FileTreePanel />
+              <SidePanel />
             </div>
             <div
               className={styles['resizer-v']}
               onMouseDown={onTreeSplitMouseDown}
-              title="拖拽调节文件树宽度"
+              title="拖拽调节左侧栏宽度"
             />
           </>
         )}
@@ -193,6 +194,8 @@ export default function App() {
       {dragOver && (
         <div className={styles['drop-overlay']}>释放以加载日志文件</div>
       )}
+      {activeGroupId && <GroupEditorPage />}
+      {editingFilterId && <FilterDetailModal />}
     </div>
   );
 }

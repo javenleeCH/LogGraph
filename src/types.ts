@@ -59,6 +59,19 @@ export interface FilterMatch {
   events: LogEvent[];
 }
 
+// ===== 节点画布（draw.io 风格区域式画布）=====
+
+/** 节点画布上一个节点的位置与尺寸（世界坐标，非屏幕坐标） */
+export interface NodePos {
+  id: string; // filter id 或 group id
+  kind: 'group' | 'filterItem';
+  x: number;
+  y: number;
+  /** group 节点容器宽高（filterItem 可选，存了也兼容） */
+  w?: number;
+  h?: number;
+}
+
 // ===== 视图状态 =====
 
 /** 可见时间范围（epoch 毫秒） */

@@ -1,18 +1,7 @@
 {
   "filters": [
     {
-      "id": "f1788261657687_3",
-      "label": "Retry policy triggered",
-      "color": "#1a73e8",
-      "pattern": "Retry policy triggered",
-      "isRegex": false,
-      "caseSensitive": false,
-      "enabled": true,
-      "scope": "raw",
-      "groupId": null
-    },
-    {
-      "id": "f1788261657687_4",
+      "id": "f1788315638694_2",
       "label": "Slow query detected",
       "color": "#1e8e3e",
       "pattern": "Slow query detected",
@@ -23,7 +12,7 @@
       "groupId": null
     },
     {
-      "id": "f1788261657687_5",
+      "id": "f1788315638694_3",
       "label": "Startup phase complete",
       "color": "#e37400",
       "pattern": "Startup phase complete",
@@ -36,27 +25,56 @@
   ],
   "groups": [
     {
-      "id": "g1788261657687_2",
+      "id": "g1788315638694_2",
       "label": "qqq",
-      "color": "#1a73e8",
-      "collapsed": true,
-      "visible": true,
-      "filterIds": [
-        "f1788261657687_3",
-        "f1788261657687_4",
-        "f1788261657687_5"
-      ]
-    },
-    {
-      "id": "g1788261657687_3",
-      "label": "zzz",
       "color": "#1a73e8",
       "collapsed": false,
       "visible": true,
       "filterIds": [
-        "f1788261657687_4"
+        "f1788315638694_3",
+        "f1788315638694_2"
+      ]
+    },
+    {
+      "id": "g1788315638694_3",
+      "label": "zzz",
+      "color": "#1e8e3e",
+      "collapsed": false,
+      "visible": true,
+      "filterIds": [
+        "f1788315638694_2"
       ]
     }
   ],
-  "savedAt": 1788261779881
+  "graphNodes": {
+    "g1788315638694_2": {
+      "id": "g1788315638694_2",
+      "kind": "group",
+      "x": 40,
+      "y": 40,
+      "w": 400,
+      "h": 300
+    },
+    "g1788315638694_3": {
+      "id": "g1788315638694_3",
+      "kind": "group",
+      "x": 460,
+      "y": 40,
+      "w": 400,
+      "h": 300
+    },
+    "f1788315638694_2": {
+      "id": "f1788315638694_2",
+      "kind": "filterItem",
+      "x": 60,
+      "y": 90
+    },
+    "f1788315638694_3": {
+      "id": "f1788315638694_3",
+      "kind": "filterItem",
+      "x": 240,
+      "y": 90
+    }
+  },
+  "savedAt": 1788315771641
 }
