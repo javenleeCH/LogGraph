@@ -46,6 +46,21 @@ export async function loadFromDataTransfer(dt: DataTransfer): Promise<LoadedFile
 }
 
 /**
+ * 检测拖拽的 DataTransfer 是否包含目录（Chromium 的 webkitGetAsEntry）。
+ * 返回第一个目录 entry（FileSystemDirectoryEntry），没有则返回 null。
+ */
+export function getDroppedDirectoryEntry(dt: DataTransfer): any | null {
+  if (!dt || !dt.items) return null;
+  for (let i = 0; i < dt.items.length; i++) {
+    const item = dt.items[i] as any;
+    const entry =
+      typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+    if (entry && entry.isDirectory) return entry;
+  }
+  return null;
+}
+
+/**
  * Tauri：打开「选择日志文件」对话框并读取内容。
  * 浏览器下返回 null（由调用方走 <input type=file>）。
  */

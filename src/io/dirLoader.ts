@@ -249,11 +249,8 @@ const parser = new LogParser();
  * @param names 文件相对路径名列表（来自 listLogFiles 的 name）
  * @param onProgress 可选进度回调（已加载文件数）
  */
-export async function loadMultiple(
-  dirHandle: any,
-  names: string[],
-  onProgress?: (loaded: number, total: number, current: string) => void,
-): Promise<MultiLoadResult> {
+/** 把一组（文件名 + 文本）逐文件解析并合并为全局事件流（供多文件/目录加载共用） */
+function mergeParsed(files: { name: string; text: string }[]): MultiLoadResult {
   const allEvents: LogEvent[] = [];
   const allRawLines: string[] = [];
   let totalLines = 0;
@@ -261,11 +258,53 @@ export async function loadMultiple(
   const formatIds = new Set<string | null>();
   let firstFileName: string | null = null;
 
+  for (const { name, text } of files) {
+    const result = parser.parse(text);
+    if (!firstFileName) firstFileName = name;
+    formatIds.add(result.timestampFormatId);
+    totalLines += result.totalLines;
+    totalSkipped += result.skipped;
+
+    // 记录该文件原始行在全局 rawLines 中的起始偏移
+    const baseId = allRawLines.length;
+    const fileLines = text.split(/\r?\n/);
+    for (const l of fileLines) allRawLines.push(l);
+
+    // 把该文件 events 的 id 重编为全局行号，并标记 sourceFile
+    for (const ev of result.events) {
+      allEvents.push({
+        ...ev,
+        id: baseId + ev.id,
+        sourceFile: name,
+      });
+    }
+  }
+
+  // 全局按 ts 排序
+  allEvents.sort((a, b) => a.ts - b.ts);
+
+  const meta: LogMeta = {
+    fileName: firstFileName ?? '',
+    fileSize: 0,
+    totalLines,
+    skipped: totalSkipped,
+    timestampFormatId: formatIds.size === 1 ? [...formatIds][0] : null,
+  };
+
+  return { events: allEvents, rawLines: allRawLines, meta };
+}
+
+export async function loadMultiple(
+  dirHandle: any,
+  names: string[],
+  onProgress?: (loaded: number, total: number, current: string) => void,
+): Promise<MultiLoadResult> {
   const tauriRoot = isTauriDir(dirHandle)
     ? String(dirHandle.path).replace(/[\\/]+$/, '')
     : null;
   const fs = tauriRoot ? await loadFs() : null;
 
+  const files: { name: string; text: string }[] = [];
   for (let fi = 0; fi < names.length; fi++) {
     const name = names[fi];
     onProgress?.(fi, names.length, name);
@@ -288,40 +327,67 @@ export async function loadMultiple(
       }
       text = await file.text();
     }
-
-    const result = parser.parse(text);
-    if (!firstFileName) firstFileName = name;
-    formatIds.add(result.timestampFormatId);
-    totalLines += result.totalLines;
-    totalSkipped += result.skipped;
-
-    // 记录该文件原始行在全局 rawLines 中的起始偏移
-    const baseId = allRawLines.length;
-    const fileLines = text.split(/\r?\n/);
-    for (const l of fileLines) allRawLines.push(l);
-
-    // 把该文件 events 的 id 重编为全局行号，并标记 sourceFile
-    for (const ev of result.events) {
-      allEvents.push({
-        ...ev,
-        id: baseId + ev.id,
-        sourceFile: name,
-      });
-    }
+    files.push({ name, text });
   }
 
   onProgress?.(names.length, names.length, '');
 
-  // 全局按 ts 排序
-  allEvents.sort((a, b) => a.ts - b.ts);
+  return mergeParsed(files);
+}
 
-  const meta: LogMeta = {
-    fileName: firstFileName ?? '',
-    fileSize: 0,
-    totalLines,
-    skipped: totalSkipped,
-    timestampFormatId: formatIds.size === 1 ? [...formatIds][0] : null,
-  };
+/**
+ * 浏览器：从拖拽的目录 entry（FileSystemDirectoryEntry，来自 webkitGetAsEntry）
+ * 递归收集日志文件并合并解析。无日志文件返回 null。
+ */
+export async function loadDroppedDirectory(
+  rootEntry: any,
+): Promise<{ result: MultiLoadResult; count: number } | null> {
+  const fileEntries: { name: string; entry: any }[] = [];
 
-  return { events: allEvents, rawLines: allRawLines, meta };
+  async function walk(entry: any, prefix: string, depth: number) {
+    if (depth > 5) return;
+    if (entry.isFile) {
+      if (isLogFileName(entry.name)) {
+        fileEntries.push({ name: prefix ? `${prefix}/${entry.name}` : entry.name, entry });
+      }
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      // readEntries 每次至多返回 100 条，需循环直到读空
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const batch: any[] = await new Promise((resolve, reject) =>
+          reader.readEntries(resolve, reject),
+        );
+        if (!batch.length) break;
+        for (const child of batch) {
+          await walk(child, prefix ? `${prefix}/${entry.name}` : entry.name, depth + 1);
+        }
+      }
+    }
+  }
+
+  await walk(rootEntry, '', 0);
+  if (fileEntries.length === 0) return null;
+  fileEntries.sort((a, b) => a.name.localeCompare(b.name));
+
+  const files: { name: string; text: string }[] = [];
+  for (const fe of fileEntries) {
+    const file: File = await new Promise((resolve, reject) => fe.entry.file(resolve, reject));
+    files.push({ name: fe.name, text: await file.text() });
+  }
+
+  return { result: mergeParsed(files), count: files.length };
+}
+
+/** Tauri：判断路径是否为目录；是则返回可枚举的目录 handle，否则返回 null */
+export async function tauriPathAsDirectory(path: string): Promise<any | null> {
+  if (!isTauri()) return null;
+  const fs = await loadFs();
+  try {
+    const st = await fs.stat(path);
+    if (st.isDirectory) return { __tauriDir: true, path, name: basename(path) };
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
