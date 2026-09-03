@@ -31,9 +31,17 @@
 
 .fileTree-actions {
   display: flex;
+  align-items: center;
   gap: 6px;
-  margin-left: auto;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
   flex: 0 0 auto;
+}
+
+.fileTree-total {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-right: auto;
 }
 
 .fileTree-actions button {
@@ -95,7 +103,9 @@
 .tree-item .chevron {
   width: 14px;
   flex: 0 0 auto;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-dim);
   font-size: 10px;
 }
@@ -107,7 +117,9 @@
 .tree-item .icon {
   width: 16px;
   flex: 0 0 auto;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-dim);
 }
 

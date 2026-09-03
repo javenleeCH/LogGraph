@@ -5,3 +5,8 @@ dist-ssr
 .vite
 .DS_Store
 perfetto
+.opencode
+.agent
+.claude
+.qoder
+.roo

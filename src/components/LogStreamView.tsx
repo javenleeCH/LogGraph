@@ -2,6 +2,8 @@ import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'rea
 import { useLogStore } from '../store/logStore';
 import { bisectLeft } from '../timeline/correlation';
 import { formatTime, formatDuration, chooseTickStep } from '../utils/timeFormat';
+import { levelColor as getLevelColor } from '../constants';
+import { ChevronLeft, ChevronRight, AlignCenter, Columns, Globe } from './Icon';
 import type { LogEvent, Filter } from '../types';
 import styles from './LogStreamView.module.css';
 
@@ -13,17 +15,6 @@ const GLOBAL_TICK_H = 80; // 全局模式：每个刻度最小高度
 const GLOBAL_CASCADE = 16; // 全局模式：同时间事件级联偏移（略小于卡片高，形成层叠）
 const DENSITY_BUCKET_H = 3; // 全局模式密度桶高度（px）
 const DENSITY_CARD_THRESHOLD = 3; // 桶内事件数超过此值则只显示密度、不显示卡片
-
-const LEVEL_COLOR: Record<string, string> = {
-  ERROR: '#cc4125',
-  FATAL: '#cc4125',
-  CRITICAL: '#cc4125',
-  WARN: '#ed8526',
-  WARNING: '#ed8526',
-  INFO: '#1c66d4',
-  DEBUG: '#1b9949',
-  TRACE: '#8e44ad',
-};
 
 /** hex 颜色 -> [r, g, b] */
 function hexToRgb(hex: string): [number, number, number] {
@@ -533,7 +524,9 @@ export function LogStreamView() {
               <span className={styles.segDot} style={{ background: '#fff' }} />
               <span className={styles.segTitleV}>{seg.group!.label}</span>
               <span className={styles.segCount}>{seg.filters.length}</span>
-              <span className={styles.segCaret}>{collapsed ? '▶' : '◀'}</span>
+              <span className={styles.segCaret}>
+                {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
+              </span>
             </div>
           ) : (
             // 主体：sticky 纯色占位条（无文字，钉在可视区顶部），固定宽度整体
@@ -572,7 +565,9 @@ export function LogStreamView() {
             : `${rows.length} 个时间点 · ${visibleFilters.length} 列`}
         </span>
         <span className={styles.spacer} />
-        <span className={styles.hint} title="W/S 缩放时间窗，A/D 平移时间窗">WASD</span>
+        <span className={styles.hint} title="W/S 上下滚动，A/D 左右滚动">
+          <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
+        </span>
         <div
           className={styles.modeSwitch}
           title="时间轴模式：对齐=按事件时间戳分行对齐；独立=各列自由排列无时间轴；全局=固定刻度时间尺，按密度着色"
@@ -583,7 +578,10 @@ export function LogStreamView() {
               className={styles.modeBtn + (mode === m ? ' ' + styles.modeBtnActive : '')}
               onClick={() => setMode(m)}
             >
-              {MODE_LABEL[m]}
+              {m === 'aligned' && <AlignCenter size={12} />}
+              {m === 'independent' && <Columns size={12} />}
+              {m === 'global' && <Globe size={12} />}
+              <span>{MODE_LABEL[m]}</span>
             </button>
           ))}
         </div>
@@ -851,7 +849,7 @@ function GlobalLane({
         const isSel = ev.id === selectedEventId;
         const isHover = ev.id === hoveredEventId;
         const isCorr = correlatedEventIds.has(ev.id);
-        const levelColor = ev.level ? LEVEL_COLOR[ev.level.toUpperCase()] : undefined;
+        const levelColor = getLevelColor(ev.level);
         const evStyle = {
           top: y + cascade,
           '--ev-border': levelColor ?? color,
@@ -933,7 +931,7 @@ function LaneStream({
         const isSel = ev.id === selectedEventId;
         const isHover = ev.id === hoveredEventId;
         const isCorr = correlatedEventIds.has(ev.id);
-        const levelColor = ev.level ? LEVEL_COLOR[ev.level.toUpperCase()] : undefined;
+        const levelColor = getLevelColor(ev.level);
         return (
           <div
             key={ev.id}
@@ -1009,7 +1007,7 @@ function LaneColumn({
                 const isSel = ev.id === selectedEventId;
                 const isHover = ev.id === hoveredEventId;
                 const isCorr = correlatedEventIds.has(ev.id);
-                const levelColor = ev.level ? LEVEL_COLOR[ev.level.toUpperCase()] : undefined;
+                const levelColor = getLevelColor(ev.level);
                 return (
                   <div
                     key={ev.id}

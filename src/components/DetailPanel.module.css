@@ -38,14 +38,16 @@
   gap: 4px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 2px 7px;
   font-size: 11px;
   font-family: 'Roboto Mono', monospace;
+  color: var(--text-dim);
 }
 
 .detail-header .tag.level {
   border-color: transparent;
+  font-weight: 600;
 }
 
 .detail-header .linenum {
@@ -114,7 +116,7 @@
 }
 
 .detail-empty {
-  padding: 14px 16px;
+  padding: 24px 16px;
   color: var(--text-faint);
   text-align: center;
   font-size: 12px;

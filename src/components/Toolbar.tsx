@@ -3,6 +3,16 @@ import { useLogStore } from '../store/logStore';
 import { loadFile } from '../io/fileLoader';
 import { LogParser } from '../parser/LogParser';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
+import {
+  Diamond,
+  FolderOpen,
+  Folder,
+  Table,
+  BarChart,
+  Database,
+  Save,
+  Maximize,
+} from './Icon';
 import styles from './Toolbar.module.css';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -57,13 +67,16 @@ export function Toolbar() {
         }}
       />
       <div className={styles.brand}>
-        <span className={styles.logo}>◈</span>
+        <span className={styles.logo}>
+          <Diamond size={16} />
+        </span>
         <span>logGraph</span>
       </div>
 
       <div className={styles.sep} />
 
       <button className="primary" onClick={() => inputRef.current?.click()}>
+        <FolderOpen size={14} />
         打开日志
       </button>
 
@@ -77,27 +90,31 @@ export function Toolbar() {
               : '选择一个日志文件夹，像 VS Code 一样浏览全部日志'
           }
         >
-          {logsDirName ? `📂 ${logsDirName}` : '📂 打开目录'}
+          <Folder size={14} />
+          {logsDirName ?? '打开目录'}
         </button>
       )}
 
-      <button
-        className="ghost"
-        onClick={() =>
-          setSplitOrientation(
-            splitOrientation === 'vertical' ? 'horizontal' : 'vertical',
-          )
-        }
-        title={
-          splitOrientation === 'vertical'
-            ? '当前：表格流（LogStreamView）。点击切换为时间线画布'
-            : '当前：时间线画布（TimelineCanvas）。点击切换为表格流'
-        }
-      >
-        {splitOrientation === 'vertical' ? '📋 表格流' : '📊 时间线'}
+      <div className={styles['seg-control']} title="切换主视图模式">
+        <button
+          className={`${styles.segBtn} ${splitOrientation === 'vertical' ? styles.segBtnActive : ''}`}
+          onClick={() => setSplitOrientation('vertical')}
+          title="表格流（LogStreamView）"
+        >
+          <Table size={14} />
+          <span>表格流</span>
         </button>
-  
-        {persistSupported && (
+        <button
+          className={`${styles.segBtn} ${splitOrientation === 'horizontal' ? styles.segBtnActive : ''}`}
+          onClick={() => setSplitOrientation('horizontal')}
+          title="时间线画布（TimelineCanvas）"
+        >
+          <BarChart size={14} />
+          <span>时间线</span>
+        </button>
+      </div>
+
+      {persistSupported && (
         <>
           <div className={styles.sep} />
           <button
@@ -109,7 +126,8 @@ export function Toolbar() {
                 : '选择 .loggraph 目录以持久化过滤器'
             }
           >
-            {persistDirName ? `📁 ${persistDirName}` : '📁 持久化目录'}
+            <Database size={14} />
+            {persistDirName ?? '持久化目录'}
           </button>
           {persistDirName && (
             <button
@@ -117,6 +135,7 @@ export function Toolbar() {
               onClick={saveFiltersNow}
               title="立即保存过滤器到 filters.json"
             >
+              <Save size={14} />
               保存
             </button>
           )}
@@ -127,6 +146,7 @@ export function Toolbar() {
         <>
           <div className={styles.sep} />
           <div className={styles['file-info']}>
+            <FolderOpen size={13} className={styles['file-info-icon']} />
             <span className={styles.fname}>{meta.fileName}</span>
             <span className={styles.stats}>
               {events.length.toLocaleString()} 行
@@ -142,7 +162,7 @@ export function Toolbar() {
         <div className={styles['range-info']}>
           <span>
             <b>{formatDateTime(viewRange.start)}</b>
-            <span className={styles.divider}> → </span>
+            <span className={styles.divider}>→</span>
             <b>{formatDateTime(viewRange.end)}</b>
           </span>
           <span className={styles.divider}>|</span>
@@ -154,6 +174,7 @@ export function Toolbar() {
 
       {viewRange && fullRange && (
         <button className="ghost" onClick={resetView} title="重置视图为全量">
+          <Maximize size={14} />
           全量
         </button>
       )}

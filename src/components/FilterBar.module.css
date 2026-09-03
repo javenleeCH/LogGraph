@@ -44,7 +44,7 @@
 }
 
 .chip:hover {
-  background: #dde0e3;
+  background: var(--bg-elevated-hover);
 }
 
 .chip.disabled {
@@ -74,8 +74,8 @@
 .chip .count {
   font-size: 11px;
   color: var(--text-dim);
-  background: #e8eaed;
-  border-radius: 8px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-pill);
   padding: 0 6px;
   min-width: 20px;
   text-align: center;
@@ -84,10 +84,15 @@
 .chip .toggle {
   display: inline-flex;
   align-items: center;
-  width: 14px;
-  height: 14px;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   cursor: pointer;
   opacity: 0.6;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 0;
 }
 
 .chip .toggle:hover {
@@ -104,12 +109,13 @@
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
-  border-radius: 14px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: #fff;
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
+  border: none;
 }
 
 .addBtn:hover {
@@ -125,10 +131,10 @@
 .editor {
   position: fixed;
   z-index: 100;
-  background: #ffffff;
+  background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   padding: 12px;
   width: 320px;
   display: flex;
@@ -228,11 +234,19 @@
 }
 
 .group-arrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   cursor: pointer;
   color: var(--text-dim);
   font-size: 10px;
   padding: 0 2px;
   flex: 0 0 auto;
+}
+
+.group-arrow-text {
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .group-arrow:hover {
@@ -320,10 +334,10 @@
 .group-popover {
   position: fixed;
   z-index: 101;
-  background: #ffffff;
+  background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   padding: 10px;
   width: 280px;
   display: flex;
@@ -380,7 +394,7 @@
 }
 
 .group-popover-item:hover {
-  background: #dde0e3;
+  background: var(--bg-elevated-hover);
 }
 
 .group-popover-item-name {

@@ -40,6 +40,10 @@
   white-space: nowrap;
 }
 
+.spacer {
+  flex: 1 1 auto;
+}
+
 .labelInput {
   font-size: 13px;
   padding: 3px 8px;
@@ -101,12 +105,12 @@
   position: relative;
   border: 1px solid var(--border, #d0d3d8);
   border-left: 4px solid #ccc;
-  border-radius: 8px;
+  border-radius: var(--radius-lg, 8px);
   background: var(--bg, #fff);
   padding: 10px 12px;
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  transition: box-shadow 0.15s, transform 0.05s;
+  box-shadow: var(--shadow-sm, 0 1px 3px rgba(0, 0, 0, 0.05));
+  transition: box-shadow var(--transition, 0.15s), transform 0.05s;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -114,7 +118,7 @@
 
 .groupCard:hover,
 .filterCard:hover {
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-md, 0 2px 8px rgba(0, 0, 0, 0.12));
   transform: translateY(-1px);
 }
 
@@ -314,6 +318,8 @@
   color: var(--accent, #1a73e8);
   font-weight: 700;
   font-size: 13px;
+  display: inline-flex;
+  align-items: center;
 }
 
 /* ===== 画布区（pan/zoom 容器） ===== */
@@ -471,7 +477,7 @@
 
 /* filter 节点悬停时显示的移除按钮 */
 .filterRemoveBtn {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   position: absolute;
@@ -481,14 +487,15 @@
   height: 18px;
   border: none;
   border-radius: 50%;
-  background: #d93025;
+  background: var(--danger);
   color: #fff;
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.12s;
+  transition: opacity var(--transition, 0.15s);
   z-index: 10;
+  padding: 0;
 }
 
 .filterNode:hover .filterRemoveBtn {
@@ -496,7 +503,7 @@
 }
 
 .filterRemoveBtn:hover {
-  background: #b3261e;
+  background: #b34d00;
 }
 
 /* ===== Filter 详情弹窗 ===== */
@@ -576,7 +583,7 @@
 
 .error {
   font-size: 11px;
-  color: #d93025;
+  color: var(--danger);
 }
 
 .toggles {
@@ -653,7 +660,7 @@
   background: var(--bg, #fff);
   color: var(--text-dim, #666);
   font-size: 12px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm, 3px);
   cursor: pointer;
   line-height: 1;
 }

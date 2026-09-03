@@ -1,20 +1,11 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
+import { levelStyle } from '../constants';
+import { FileText } from './Icon';
 import styles from './DetailPanel.module.css';
 
 const CONTEXT_LINES = 4;
-
-const LEVEL_BG: Record<string, string> = {
-  ERROR: '#cc4125',
-  FATAL: '#cc4125',
-  CRITICAL: '#cc4125',
-  WARN: '#ed8526',
-  WARNING: '#ed8526',
-  INFO: '#1c66d4',
-  DEBUG: '#1b9949',
-  TRACE: '#8e44ad',
-};
 
 export function DetailPanel() {
   const selectedEventId = useLogStore((s) => s.selectedEventId);
@@ -67,7 +58,7 @@ export function DetailPanel() {
     ctxLines.push({ lineno: i + 1, text: rawLines[i] ?? '', lineId: i });
   }
 
-  const levelBg = selected.level ? LEVEL_BG[selected.level] : undefined;
+  const lvlStyle = levelStyle(selected.level);
 
   return (
     <div className={styles.detail}>
@@ -77,7 +68,8 @@ export function DetailPanel() {
         <span className={styles.ts}>{formatDateTime(selected.ts)}</span>
         {selected.sourceFile && (
           <span className={styles.tag} title={`来源文件：${selected.sourceFile}`}>
-            📄 {selected.sourceFile}
+            <FileText size={11} />
+            {selected.sourceFile}
           </span>
         )}
         {selected.thread && (
@@ -86,7 +78,7 @@ export function DetailPanel() {
         {selected.level && (
           <span
             className={`${styles.tag} ${styles.level}`}
-            style={levelBg ? { background: levelBg, color: '#fff' } : undefined}
+            style={lvlStyle}
           >
             {selected.level}
           </span>

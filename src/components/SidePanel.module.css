@@ -32,37 +32,45 @@
   min-height: 60px;
 }
 
-/* 折叠态：只保留 header，固定高度 */
+/* 折叠态：只保留 header，固定高度（置于上述规则之后，同特异性后者生效） */
 .section.collapsed {
-  flex: 0 0 34px !important;
+  flex: 0 0 34px;
   min-height: 34px;
 }
 
 .sectionHeader {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   height: 34px;
   padding: 0 8px;
   flex: 0 0 34px;
-  background: var(--bg-elev, var(--bg));
+  background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   user-select: none;
   font-size: 12px;
   font-weight: 600;
   color: var(--text);
-  transition: background 0.12s;
+  transition: background var(--transition-fast);
 }
 
 .sectionHeader:hover {
-  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+  background: var(--bg-hover);
 }
 
 .caret {
-  font-size: 9px;
-  opacity: 0.6;
-  width: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  color: var(--text-dim);
+  flex: 0 0 12px;
+}
+
+.sectionIcon {
+  color: var(--text-dim);
+  flex: 0 0 auto;
 }
 
 .sectionTitle {
@@ -72,11 +80,13 @@
 .sectionCount {
   flex: 0 0 auto;
   font-size: 11px;
-  opacity: 0.5;
-  background: rgba(128, 128, 128, 0.18);
-  padding: 0 5px;
-  border-radius: 8px;
+  color: var(--text-dim);
+  background: rgba(128, 128, 128, 0.16);
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
   line-height: 16px;
+  min-width: 18px;
+  text-align: center;
 }
 
 .spacer {
@@ -85,16 +95,17 @@
 
 .addBtn {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: rgba(128, 128, 128, 0.16);
   color: var(--text);
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  font-size: 14px;
-  line-height: 1;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .addBtn:hover {
   background: var(--accent);
@@ -116,10 +127,10 @@
   padding: 5px 8px;
   border-left: 3px solid transparent;
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--transition-fast);
 }
 .groupRow:hover {
-  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+  background: var(--bg-hover);
 }
 
 /* ── Filter 行 ── */
@@ -131,10 +142,10 @@
   padding: 5px 8px;
   border-left: 3px solid transparent;
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--transition-fast);
 }
 .filterRow:hover {
-  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+  background: var(--bg-hover);
 }
 
 .dot {
@@ -156,11 +167,13 @@
 .rowCount {
   flex: 0 0 auto;
   font-size: 11px;
-  opacity: 0.5;
+  color: var(--text-dim);
   background: rgba(128, 128, 128, 0.16);
   padding: 0 5px;
-  border-radius: 8px;
+  border-radius: var(--radius-pill);
   line-height: 16px;
+  min-width: 16px;
+  text-align: center;
 }
 
 .rowTitleInput {
@@ -171,7 +184,7 @@
   color: var(--text);
   font-size: 12px;
   padding: 2px 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   outline: none;
 }
 .rowTitleInput:hover,
@@ -180,26 +193,33 @@
   background: rgba(128, 128, 128, 0.08);
 }
 
+/* 操作按钮：常驻低透明度，行 hover 时高亮（提升可发现性） */
 .rowActions {
-  display: none;
+  display: flex;
   gap: 2px;
   margin-left: auto;
+  opacity: 0.35;
+  transition: opacity var(--transition-fast);
 }
-.groupRow:hover .rowActions {
-  display: flex;
+.groupRow:hover .rowActions,
+.filterRow:hover .rowActions {
+  opacity: 1;
 }
 
 .miniBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: transparent;
   color: var(--text);
-  width: 20px;
-  height: 20px;
-  border-radius: 3px;
-  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  opacity: 0.6;
-  transition: opacity 0.1s, background 0.1s;
+  opacity: 0.7;
+  transition: opacity var(--transition-fast), background var(--transition-fast);
+  padding: 0;
 }
 .miniBtn:hover {
   opacity: 1;
@@ -216,10 +236,10 @@
 
 .rowTag {
   font-size: 10px;
-  opacity: 0.65;
+  color: var(--text-dim);
   border: 1px solid var(--border);
   padding: 0 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   line-height: 14px;
   white-space: nowrap;
 }
@@ -229,8 +249,8 @@
 }
 
 .emptyHint {
-  padding: 10px 8px;
+  padding: 12px 8px;
   font-size: 11px;
-  opacity: 0.4;
+  color: var(--text-faint);
   text-align: center;
 }

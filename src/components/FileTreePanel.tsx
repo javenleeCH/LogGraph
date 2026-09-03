@@ -11,6 +11,7 @@ import {
   loadMultiple,
   type LogFileInfo,
 } from '../io/dirLoader';
+import { ChevronDown, ChevronRight, Folder, FileText } from './Icon';
 import styles from './FileTreePanel.module.css';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -181,8 +182,10 @@ export function FileTreePanel() {
             onClick={() => toggleCollapse(path)}
           >
             <span className={styles.indent} style={{ width: indent }} />
-            <span className={styles.chevron}>{isCollapsed ? '▶' : '▼'}</span>
-            <span className={styles.icon}>📁</span>
+            <span className={styles.chevron}>
+              {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+            </span>
+            <span className={styles.icon}><Folder size={14} /></span>
             <span className={styles.name}>{node.name}</span>
           </div>
           {!isCollapsed && node.children.length > 0 && (
@@ -209,7 +212,7 @@ export function FileTreePanel() {
           onChange={() => toggleCheck(node.fullPath ?? path)}
           onClick={(e) => e.stopPropagation()}
         />
-        <span className={styles.icon}>📄</span>
+        <span className={styles.icon}><FileText size={14} /></span>
         <span className={styles.name}>{node.name}</span>
         <span className={styles.size}>{fmtSize(node.size)}</span>
       </div>
@@ -260,8 +263,8 @@ export function FileTreePanel() {
       </div>
 
       {files.length > 0 && (
-        <div className={styles['fileTree-actions']} style={{ padding: '8px 12px', borderTop: '1px solid var(--border)' }}>
-          <span style={{ fontSize: 11, color: 'var(--text-faint)', marginRight: 'auto' }}>
+        <div className={styles['fileTree-actions']}>
+          <span className={styles['fileTree-total']}>
             {checkedCount > 0 ? `合计 ${fmtSize(totalSelectedSize)}` : ''}
           </span>
           <button

@@ -1,74 +1,46 @@
 {
   "filters": [
     {
-      "id": "f1788399873775_4",
+      "id": "f1788433868736_0",
       "label": "Filter 1",
-      "color": "#1a73e8",
-      "pattern": "Retry policy triggered for upstream",
+      "color": "#0072b2",
+      "pattern": "INFO  Schema migration step",
       "isRegex": false,
       "caseSensitive": false,
       "enabled": true,
-      "scope": "raw",
-      "groupId": null
+      "scope": "raw"
     },
     {
-      "id": "f1788399873775_5",
+      "id": "f1788433894393_1",
       "label": "Filter 2",
-      "color": "#1e8e3e",
-      "pattern": "Cache refresh triggered",
+      "color": "#009e73",
+      "pattern": "",
       "isRegex": false,
       "caseSensitive": false,
       "enabled": true,
-      "scope": "raw",
-      "groupId": null
-    },
-    {
-      "id": "f1788399873775_6",
-      "label": "Filter 3",
-      "color": "#e37400",
-      "pattern": "Upstream response slow",
-      "isRegex": false,
-      "caseSensitive": false,
-      "enabled": true,
-      "scope": "raw",
-      "groupId": null
-    },
-    {
-      "id": "f1788399873775_7",
-      "label": "Filter 4",
-      "color": "#d93025",
-      "pattern": "Application starting up",
-      "isRegex": false,
-      "caseSensitive": false,
-      "enabled": true,
-      "scope": "raw",
-      "groupId": null
+      "scope": "raw"
     }
   ],
   "groups": [
     {
-      "id": "g1788399873775_2",
-      "label": "zzz",
-      "color": "#1a73e8",
+      "id": "g1788433866552_0",
+      "label": "Group 1",
+      "color": "#0072b2",
       "collapsed": false,
       "visible": true,
       "filterIds": [
-        "f1788399873775_4",
-        "f1788399873775_5"
+        "f1788433868736_0"
       ]
     },
     {
-      "id": "g1788399873775_3",
-      "label": "qqq",
-      "color": "#1e8e3e",
+      "id": "g1788433892049_1",
+      "label": "Group 2",
+      "color": "#009e73",
       "collapsed": false,
       "visible": true,
-      "filterIds": [
-        "f1788399873775_6",
-        "f1788399873775_7",
-        "f1788399873775_4"
-      ]
+      "filterIds": []
     }
   ],
-  "savedAt": 1788399911518
+  "graphNodes": {},
+  "savedAt": 1788433894802
 }

@@ -2,12 +2,12 @@
   position: absolute;
   pointer-events: none;
   z-index: 20;
-  background: #ffffff;
-  border: 1px solid #dadce0;
-  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 8px 10px;
   max-width: 480px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-md);
   font-family: 'Roboto Mono', 'SFMono-Regular', Consolas, monospace;
   font-size: 11px;
   line-height: 1.5;
@@ -26,26 +26,26 @@
 .tooltip .tip-dot {
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   flex: 0 0 8px;
 }
 
 .tooltip .tip-ts {
-  color: #1a73e8;
+  color: var(--accent);
   font-weight: 500;
 }
 
 .tooltip .tip-meta {
-  color: #5f6368;
-  background: #f1f3f4;
-  border-radius: 2px;
+  color: var(--text-dim);
+  background: var(--bg-track);
+  border-radius: var(--radius-sm);
   padding: 0 4px;
 }
 
 .tooltip .tip-msg {
-  color: #202124;
+  color: var(--text);
   max-height: 6em;
   overflow: hidden;
   padding-top: 2px;
-  border-top: 1px solid #e8eaed;
+  border-top: 1px solid var(--border-light);
 }

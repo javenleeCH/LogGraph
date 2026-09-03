@@ -10,6 +10,18 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FileTreePanel } from './FileTreePanel';
 import type { FilterGroup } from '../types';
+import {
+  ChevronRight,
+  ChevronDown,
+  Plus,
+  Pencil,
+  Eye,
+  EyeOff,
+  X,
+  Layers,
+  Filter as FilterIcon,
+  FolderTree,
+} from './Icon';
 import styles from './SidePanel.module.css';
 
 type SectionKey = 'files' | 'groups' | 'filters';
@@ -46,7 +58,10 @@ export function SidePanel() {
       {/* ── 上：文件树 ── */}
       <section className={`${styles.section} ${collapsed.files ? styles.collapsed : ''}`}>
         <header className={styles.sectionHeader} onClick={() => toggle('files')}>
-          <span className={styles.caret}>{collapsed.files ? '▶' : '▼'}</span>
+          <span className={styles.caret}>
+            {collapsed.files ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          </span>
+          <FolderTree size={13} className={styles.sectionIcon} />
           <span className={styles.sectionTitle}>日志文件</span>
         </header>
         {!collapsed.files && (
@@ -59,7 +74,10 @@ export function SidePanel() {
       {/* ── 中：Group 列表 ── */}
       <section className={`${styles.section} ${collapsed.groups ? styles.collapsed : ''}`}>
         <header className={styles.sectionHeader} onClick={() => toggle('groups')}>
-          <span className={styles.caret}>{collapsed.groups ? '▶' : '▼'}</span>
+          <span className={styles.caret}>
+            {collapsed.groups ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          </span>
+          <Layers size={13} className={styles.sectionIcon} />
           <span className={styles.sectionTitle}>分组 Groups</span>
           <span className={styles.sectionCount}>{groups.length}</span>
           <div className={styles.spacer} />
@@ -71,7 +89,7 @@ export function SidePanel() {
               addGroup({});
             }}
           >
-            ＋
+            <Plus size={13} />
           </button>
         </header>
         {!collapsed.groups && (
@@ -88,7 +106,7 @@ export function SidePanel() {
               />
             ))}
             {groups.length === 0 && (
-              <div className={styles.emptyHint}>暂无分组，点击「＋」新建</div>
+              <div className={styles.emptyHint}>暂无分组，点击 ＋ 新建</div>
             )}
           </div>
         )}
@@ -97,7 +115,10 @@ export function SidePanel() {
       {/* ── 下：Filter 列表 ── */}
       <section className={`${styles.section} ${collapsed.filters ? styles.collapsed : ''}`}>
         <header className={styles.sectionHeader} onClick={() => toggle('filters')}>
-          <span className={styles.caret}>{collapsed.filters ? '▶' : '▼'}</span>
+          <span className={styles.caret}>
+            {collapsed.filters ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          </span>
+          <FilterIcon size={13} className={styles.sectionIcon} />
           <span className={styles.sectionTitle}>过滤器 Filters</span>
           <span className={styles.sectionCount}>{filters.length}</span>
           <div className={styles.spacer} />
@@ -110,7 +131,7 @@ export function SidePanel() {
               setEditingFilterId(id);
             }}
           >
-            ＋
+            <Plus size={13} />
           </button>
         </header>
         {!collapsed.filters && (
@@ -142,7 +163,7 @@ export function SidePanel() {
               );
             })}
             {filters.length === 0 && (
-              <div className={styles.emptyHint}>暂无过滤器，点击「＋」新建</div>
+              <div className={styles.emptyHint}>暂无过滤器，点击 ＋ 新建</div>
             )}
           </div>
         )}
@@ -218,15 +239,17 @@ function GroupRow({
           title="重命名"
           onClick={(e) => { e.stopPropagation(); setEditing(true); }}
         >
-          ✎
+          <Pencil size={12} />
         </button>
         <button className={styles.miniBtn} title={hidden ? '显示' : '隐藏'} onClick={onToggleVisible}>
-          {hidden ? '∅' : '👁'}
+          {hidden ? <EyeOff size={12} /> : <Eye size={12} />}
         </button>
         <button className={styles.miniBtn} title={group.collapsed ? '展开' : '折叠'} onClick={onToggleCollapsed}>
-          {group.collapsed ? '▶' : '▼'}
+          {group.collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         </button>
-        <button className={styles.miniBtn} title="删除分组" onClick={onRemove}>×</button>
+        <button className={styles.miniBtn} title="删除分组" onClick={onRemove}>
+          <X size={12} />
+        </button>
       </div>
     </div>
   );

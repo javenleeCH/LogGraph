@@ -2,6 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FilterEngine } from '../filters/FilterEngine';
 import type { Filter, FilterGroup } from '../types';
+import {
+  ChevronDown,
+  ChevronRight,
+  Eye,
+  EyeOff,
+  X,
+  ArrowRight,
+  ArrowUturnLeft,
+  Plus,
+} from './Icon';
 import styles from './FilterBar.module.css';
 
 function FilterEditor({
@@ -211,7 +221,7 @@ function FilterChip({
       <span className={styles.count}>{count}</span>
       {count > 0 && (
         <button className={styles.toggle} onClick={onJump} title="跳到首个匹配">
-          →
+          <ArrowRight size={12} />
         </button>
       )}
     </div>
@@ -274,7 +284,7 @@ function GroupHeaderChip({
         }}
         title={group.collapsed ? '点击展开' : '点击折叠'}
       >
-        {group.collapsed ? '▶' : '▼'}
+        {group.collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
       </span>
       <span className={styles.name}>{group.label}</span>
       <span className={styles.count}>{childCount}</span>
@@ -286,7 +296,7 @@ function GroupHeaderChip({
         }}
         title={hidden ? '点击显示该组' : '点击隐藏该组'}
       >
-        {hidden ? '∅' : '👁'}
+        {hidden ? <EyeOff size={12} /> : <Eye size={12} />}
       </button>
       <button
         className={styles.toggle}
@@ -296,7 +306,7 @@ function GroupHeaderChip({
         }}
         title="删除分组（组内过滤器移至顶层）"
       >
-        ×
+        <X size={12} />
       </button>
     </div>
   );
@@ -434,14 +444,16 @@ function GroupDetailsPopover({
           }}
           title={group.collapsed ? '展开' : '折叠'}
         >
-          {group.collapsed ? '▶ 展开' : '▼ 折叠'}
+          {group.collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          <span className={styles['group-arrow-text']}>{group.collapsed ? '展开' : '折叠'}</span>
         </span>
         <span
           className={styles['group-arrow']}
           onClick={() => toggleGroupVisible(group.id)}
           title={group.visible === false ? '显示该组' : '隐藏该组'}
         >
-          {group.visible === false ? '∅ 显示' : '👁 隐藏'}
+          {group.visible === false ? <EyeOff size={12} /> : <Eye size={12} />}
+          <span className={styles['group-arrow-text']}>{group.visible === false ? '显示' : '隐藏'}</span>
         </span>
       </div>
 
@@ -483,7 +495,7 @@ function GroupDetailsPopover({
                       onClose();
                     }}
                   >
-                    →
+                    <ArrowRight size={12} />
                   </button>
                 )}
                 <button
@@ -493,7 +505,7 @@ function GroupDetailsPopover({
                     removeFilterFromGroup(f.id, group.id);
                   }}
                 >
-                  ↩
+                  <ArrowUturnLeft size={12} />
                 </button>
               </div>
             );
@@ -750,7 +762,7 @@ export function FilterBar() {
         onClick={() => addFilter()}
         disabled={events.length === 0}
       >
-        + 过滤
+        <Plus size={12} /> 过滤
       </button>
       <button
         className={styles.addBtn}
@@ -758,7 +770,7 @@ export function FilterBar() {
         disabled={events.length === 0}
         title="新建分组（类比 Perfetto 进程）"
       >
-        + 组
+        <Plus size={12} /> 组
       </button>
 
       {editingFilter && (

@@ -14,6 +14,7 @@ import {
   drawMinimap,
   drawGroupHeader,
   drawGroupDensity,
+  readVar,
   type RenderContext,
 } from './renderers';
 import { bisectLeft, nearestEvent } from './correlation';
@@ -138,7 +139,7 @@ export function TimelineCanvas() {
     ctx.clearRect(0, 0, w, h);
 
     if (!viewRange || !fullRange) {
-      ctx.fillStyle = '#5f6368';
+      ctx.fillStyle = readVar('--text-faint', '#80868b');
       ctx.font = '13px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';

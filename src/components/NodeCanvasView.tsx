@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FilterEngine } from '../filters/FilterEngine';
 import type { FilterGroup, NodePos } from '../types';
+import { ChevronLeft, X, Check } from './Icon';
 import styles from './NodeCanvasView.module.css';
 
 interface Rect {
@@ -214,7 +215,7 @@ export function GroupEditorPage() {
     return (
       <div className={styles.overlay}>
         <div className={styles.toolbar}>
-          <button className="ghost" onClick={() => setActiveGroup(null)}>← 返回</button>
+        <button className="ghost" onClick={() => setActiveGroup(null)}><ChevronLeft size={14} /> 返回</button>
           <span className={styles.crumbs}>分组不存在</span>
         </div>
       </div>
@@ -226,7 +227,7 @@ export function GroupEditorPage() {
       <div className={styles.toolbar}>
         <button className="ghost" onClick={() => setActiveGroup(null)}>← 返回</button>
         <span className={styles.crumbs}>分组编辑 / {group.label}</span>
-        <div style={{ flex: 1 }} />
+        <div className={styles.spacer} />
         <input
           className={`${styles.labelInput} mono`}
           type="text"
@@ -235,8 +236,8 @@ export function GroupEditorPage() {
           placeholder="分组名称"
         />
         <span className={styles.hint}>从左侧拖 filter 到画布即归属 · 拖出画布即脱离 · 滚轮缩放 · 空白拖拽平移</span>
-        <div style={{ flex: 1 }} />
-        <button className="ghost" onClick={() => setActiveGroup(null)} title="关闭分组编辑，回到数据视图">✕ 关闭</button>
+        <div className={styles.spacer} />
+        <button className="ghost" onClick={() => setActiveGroup(null)} title="关闭分组编辑，回到数据视图"><X size={14} /> 关闭</button>
       </div>
       <div className={styles.editorLayout}>
         {/* 左侧 filter 调色板 */}
@@ -263,7 +264,7 @@ export function GroupEditorPage() {
                   <span className={styles.paletteDot} style={{ background: f.color }} />
                   <span className={styles.paletteLabel}>{f.label}</span>
                   <span className={styles.paletteCount}>{matchCount(f.id)}</span>
-                  {isMember && <span className={styles.paletteCheck}>✓</span>}
+                  {isMember && <span className={styles.paletteCheck}><Check size={13} /></span>}
                 </div>
               );
             })}
@@ -308,7 +309,7 @@ export function GroupEditorPage() {
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => { e.stopPropagation(); removeFilterFromGroup(f.id, group.id); }}
                 >
-                  ×
+                  <X size={12} />
                 </button>
               </div>
             );
@@ -364,7 +365,7 @@ export function FilterDetailModal() {
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div className={styles.modalHeader}>
           <span className={styles.modalTitle}>编辑过滤器</span>
-          <button className="ghost" onClick={onClose}>✕</button>
+          <button className="ghost" onClick={onClose}><X size={14} /></button>
         </div>
         <div className={styles.modalBody}>
           <div className={styles.modalRow}>

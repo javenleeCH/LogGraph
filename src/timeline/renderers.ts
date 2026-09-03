@@ -18,32 +18,41 @@ export interface RenderContext {
   mouseRowY: number | null;
 }
 
-// 浅色主题调色板（硬编码，避免与 CSS 变量耦合）
-const C = {
-  axisBg: '#f1f3f4',
-  headerColBg: '#ffffff',
-  trackAlt: '#f8f9fa',
-  trackEven: '#f1f3f4',
-  trackHover: '#e8f0fe',
-  headerBorder: '#dadce0',
-  text: '#202124',
-  textDim: '#5f6368',
-  textFaint: '#9aa0a6',
-  tickLine: '#9aa0a6',
-  gridLine: 'rgba(60,64,67,0.08)',
-  trackBottom: '#e8eaed',
-  selectedFill: '#202124',
-  corrStroke: '#e37400',
-  scrubberStroke: 'rgba(26,115,232,0.5)',
-  scrubberBubble: '#1a73e8',
-  minimapBg: '#f8f9fa',
-  minimapBorder: '#dadce0',
-  minimapViewFill: 'rgba(26,115,232,0.12)',
-  minimapViewStroke: '#1a73e8',
-  corrLink: 'rgba(233,116,0,0.45)',
-  tooltipBg: '#ffffff',
-  tooltipBorder: '#dadce0',
+// 浅色主题调色板：运行时从 CSS 变量读取（带 fallback），与 DOM 样式共享同一套 token
+export const readVar = (name: string, fallback: string): string => {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch {
+    return fallback;
+  }
 };
+
+const C = (() => ({
+  axisBg: readVar('--bg-track', '#f1f3f4'),
+  headerColBg: readVar('--bg', '#ffffff'),
+  trackAlt: readVar('--bg-track-alt', '#f8f9fa'),
+  trackEven: readVar('--bg-track', '#f1f3f4'),
+  trackHover: readVar('--bg-track-hover', '#e8f0fe'),
+  headerBorder: readVar('--border', '#dadce0'),
+  text: readVar('--text', '#202124'),
+  textDim: readVar('--text-dim', '#5f6368'),
+  textFaint: readVar('--text-faint', '#80868b'),
+  tickLine: readVar('--text-faint', '#80868b'),
+  gridLine: 'rgba(60,64,67,0.08)',
+  trackBottom: readVar('--border-light', '#e8eaed'),
+  selectedFill: readVar('--text', '#202124'),
+  corrStroke: readVar('--track-orange', '#e69f00'),
+  scrubberStroke: 'rgba(26,115,232,0.5)',
+  scrubberBubble: readVar('--accent', '#1a73e8'),
+  minimapBg: readVar('--bg-panel', '#f8f9fa'),
+  minimapBorder: readVar('--border', '#dadce0'),
+  minimapViewFill: 'rgba(26,115,232,0.12)',
+  minimapViewStroke: readVar('--accent', '#1a73e8'),
+  corrLink: 'rgba(230,159,0,0.45)',
+  tooltipBg: readVar('--bg', '#ffffff'),
+  tooltipBorder: readVar('--border', '#dadce0'),
+}))();
 
 // ---- 颜色工具 ----
 function withAlpha(hex: string, alpha: number): string {
@@ -556,7 +565,7 @@ export function drawGroupHeader(
   ctx.save();
 
   // 背景（比 filter 行略深，区分层次）
-  ctx.fillStyle = hovered ? C.trackHover : '#e8eaed';
+  ctx.fillStyle = hovered ? C.trackHover : C.trackBottom;
   ctx.fillRect(0, headerY, width, headerH);
 
   // 左侧标题列底色
