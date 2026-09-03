@@ -6,7 +6,8 @@ import { DetailPanel } from './components/DetailPanel';
 import { SidePanel } from './components/SidePanel';
 import { GroupEditorPage, FilterDetailModal } from './components/NodeCanvasView';
 import { useLogStore } from './store/logStore';
-import { loadFromDataTransfer } from './io/fileLoader';
+import { loadFromDataTransfer, loadTauriPaths, type LoadedFile } from './io/fileLoader';
+import { setupTauriDragDrop } from './lib/tauri';
 import { LogParser } from './parser/LogParser';
 import styles from './App.module.css';
 
@@ -119,11 +120,9 @@ export default function App() {
     };
   }, []);
 
-  const onDrop = useCallback(
-    async (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      const loaded = await loadFromDataTransfer(e.dataTransfer);
+  // 解析并载入一段日志文本（浏览器拖拽 / Tauri 原生拖拽共用）
+  const handleLoaded = useCallback(
+    async (loaded: LoadedFile | null) => {
       if (!loaded) return;
       try {
         const result = parser.parse(loaded.text);
@@ -140,6 +139,38 @@ export default function App() {
       }
     },
     [setLog],
+  );
+
+  // Tauri 原生拖拽：浏览器下为 no-op，不注册任何监听
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    setupTauriDragDrop({
+      onDragOver: () => setDragOver(true),
+      onDragLeave: () => setDragOver(false),
+      onDrop: async (paths) => {
+        setDragOver(false);
+        try {
+          await handleLoaded(await loadTauriPaths(paths));
+        } catch (err) {
+          console.error(err);
+          alert('加载日志失败：' + (err as Error).message);
+        }
+      },
+    }).then((fn) => {
+      cleanup = fn;
+    });
+    return () => cleanup?.();
+  }, [handleLoaded]);
+
+  const onDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragOver(false);
+      const loaded = await loadFromDataTransfer(e.dataTransfer);
+      if (!loaded) return;
+      await handleLoaded(loaded);
+    },
+    [handleLoaded],
   );
 
   const topFlex = 1 - splitRatio;

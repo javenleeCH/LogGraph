@@ -1,0 +1,5 @@
+# Rust 编译产物
+/target/
+
+# 生成的 schema（由 tauri-build 自动生成）
+/gen/schemas/

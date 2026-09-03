@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import { useLogStore } from '../store/logStore';
-import { loadFile } from '../io/fileLoader';
+import { loadFile, openLogFileDialog, type LoadedFile } from '../io/fileLoader';
+import { isTauri } from '../lib/tauri';
 import { LogParser } from '../parser/LogParser';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
 import styles from './Toolbar.module.css';
@@ -26,9 +27,8 @@ export function Toolbar() {
   const splitOrientation = useLogStore((s) => s.splitOrientation);
   const setSplitOrientation = useLogStore((s) => s.setSplitOrientation);
 
-  async function onFile(file: File) {
+  async function handleLoaded(loaded: LoadedFile) {
     try {
-      const loaded = await loadFile(file);
       const result = parser.parse(loaded.text);
       setLog(result.events, loaded.text.split(/\r?\n/), {
         fileName: loaded.name,
@@ -41,6 +41,20 @@ export function Toolbar() {
       console.error('解析日志失败', e);
       alert('解析日志失败：' + (e as Error).message);
     }
+  }
+
+  async function onFile(file: File) {
+    const loaded = await loadFile(file);
+    await handleLoaded(loaded);
+  }
+
+  async function onOpenClick() {
+    if (isTauri()) {
+      const loaded = await openLogFileDialog();
+      if (loaded) await handleLoaded(loaded);
+      return;
+    }
+    inputRef.current?.click();
   }
 
   return (
@@ -63,7 +77,7 @@ export function Toolbar() {
 
       <div className={styles.sep} />
 
-      <button className="primary" onClick={() => inputRef.current?.click()}>
+      <button className="primary" onClick={onOpenClick}>
         打开日志
       </button>
 

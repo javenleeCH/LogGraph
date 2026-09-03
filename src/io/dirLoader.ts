@@ -1,9 +1,9 @@
 /**
- * 目录式日志加载：基于 File System Access API。
+ * 目录式日志加载：统一抽象浏览器 / Tauri 两种运行时。
  *
  * 流程：
- * 1. pickLogDirectory() → showDirectoryPicker() 选目录 → 授权 → 句柄存 IndexedDB
- * 2. listLogFiles(dirHandle) → 枚举目录下日志文件（递归可选）
+ * 1. pickLogDirectory() → 选目录 → 浏览器存 IndexedDB 句柄，Tauri 存 localStorage 路径
+ * 2. listLogFiles(dirHandle) → 枚举目录下日志文件（递归）
  * 3. loadMultiple(dirHandle, names) → 逐文件解析 → 合并成带 sourceFile 的全局事件流
  *
  * 合并规则：
@@ -18,14 +18,16 @@ import type { LogEvent } from '../types';
 import type { LogMeta } from '../store/logStore';
 import { LogParser } from '../parser/LogParser';
 import { isLogFileName } from './fileLoader';
+import { isTauri, loadDialog, loadFs, basename } from '../lib/tauri';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const DB_NAME = 'loggraph';
 const STORE = 'handles';
 const KEY_LOGS_DIR = 'logsDir';
+const LS_KEY_LOGS_DIR = 'loggraph.logsDir';
 
-// ---- IndexedDB（复用 filterPersist 的数据库，不同 key） ----
+// ---- IndexedDB（仅浏览器路径，复用 filterPersist 的数据库不同 key） ----
 
 function idbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -59,10 +61,15 @@ async function idbSet(key: string, val: unknown): Promise<void> {
   });
 }
 
-// ---- 目录权限 ----
+// ---- 能力检测 / 权限 ----
 
 export function isFSASupported(): boolean {
+  if (isTauri()) return true;
   return typeof (window as any).showDirectoryPicker === 'function';
+}
+
+function isTauriDir(handle: any): boolean {
+  return !!handle && handle.__tauriDir === true;
 }
 
 async function verifyPermission(handle: any, write: boolean): Promise<boolean> {
@@ -73,14 +80,27 @@ async function verifyPermission(handle: any, write: boolean): Promise<boolean> {
 }
 
 export async function ensureReadPermission(handle: any): Promise<boolean> {
+  if (isTauriDir(handle)) return true;
   return verifyPermission(handle, false);
 }
 
 /**
- * 让用户选择日志目录（会触发权限弹窗），成功后句柄存 IndexedDB。
- * 返回句柄；用户取消返回 null。
+ * 让用户选择日志目录。
+ * - Tauri：系统目录选择框，返回 { name, path } 并存 localStorage。
+ * - 浏览器：showDirectoryPicker + IndexedDB 存句柄。
  */
 export async function pickLogDirectory(): Promise<any | null> {
+  if (isTauri()) {
+    const { open } = await loadDialog();
+    const selected = await open({ directory: true, multiple: false, title: '选择日志文件夹' });
+    if (!selected || Array.isArray(selected)) return null;
+    const path = selected as string;
+    try {
+      localStorage.setItem(LS_KEY_LOGS_DIR, path);
+    } catch { /* noop */ }
+    return { __tauriDir: true, path, name: basename(path) };
+  }
+
   if (!isFSASupported()) {
     alert('当前浏览器不支持 File System Access API，请使用 Chrome/Edge 等 Chromium 浏览器');
     return null;
@@ -98,8 +118,14 @@ export async function pickLogDirectory(): Promise<any | null> {
   return handle;
 }
 
-/** 从 IndexedDB 取回已存的日志目录句柄（不弹窗） */
+/** 从 IndexedDB / localStorage 取回已存的日志目录（不弹窗） */
 export async function getSavedLogDirectory(): Promise<any | null> {
+  if (isTauri()) {
+    let path: string | null = null;
+    try { path = localStorage.getItem(LS_KEY_LOGS_DIR); } catch { /* noop */ }
+    if (!path) return null;
+    return { __tauriDir: true, path, name: basename(path) };
+  }
   const h = await idbGet<any>(KEY_LOGS_DIR);
   return h ?? null;
 }
@@ -111,7 +137,7 @@ export interface LogFileInfo {
   name: string;
   /** 文件大小（字节） */
   size: number;
-  /** 仅供内部使用：该文件在目录树中的路径段数组 */
+  /** 该文件在目录树中的路径段数组 */
   path: string[];
 }
 
@@ -123,6 +149,44 @@ export async function listLogFiles(
   const { recursive = true, maxDepth = 5 } = opts;
   const results: LogFileInfo[] = [];
 
+  if (isTauriDir(dirHandle)) {
+    const fs = await loadFs();
+    const root = String(dirHandle.path).replace(/[\\/]+$/, '');
+
+    async function walk(dirPath: string, pathPrefix: string[], depth: number) {
+      if (depth > maxDepth) return;
+      let entries;
+      try {
+        entries = await fs.readDir(dirPath);
+      } catch {
+        return; // 无权限/目录不存在则跳过
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory) {
+          if (recursive) await walk(`${dirPath}/${entry.name}`, [...pathPrefix, entry.name], depth + 1);
+        } else if (entry.isFile) {
+          if (isLogFileName(entry.name)) {
+            let size = 0;
+            try {
+              const st = await fs.stat(`${dirPath}/${entry.name}`);
+              size = st.size;
+            } catch { /* 忽略读取失败的文件 */ }
+            results.push({
+              name: pathPrefix.length ? `${pathPrefix.join('/')}/${entry.name}` : entry.name,
+              size,
+              path: [...pathPrefix, entry.name],
+            });
+          }
+        }
+      }
+    }
+
+    await walk(root, [], 0);
+    results.sort((a, b) => a.name.localeCompare(b.name));
+    return results;
+  }
+
+  // 浏览器 FSA 路径
   async function walk(dir: any, pathPrefix: string[], depth: number) {
     if (depth > maxDepth) return;
     for await (const entry of dir.values()) {
@@ -146,15 +210,11 @@ export async function listLogFiles(
   }
 
   await walk(dirHandle, [], 0);
-  // 按路径名排序，便于展示
   results.sort((a, b) => a.name.localeCompare(b.name));
   return results;
 }
 
-/**
- * 在目录中按相对路径取文件句柄（支持 "a/b/c.log"）。
- * 注意：path 可能含目录段，需逐段 resolve。
- */
+/** 在目录中按相对路径取文件句柄（浏览器 FSA，支持 "a/b/c.log"） */
 async function getFileHandleByPath(dirHandle: any, name: string): Promise<any | null> {
   const segs = name.split('/');
   let cur = dirHandle;
@@ -185,7 +245,7 @@ const parser = new LogParser();
 /**
  * 加载多个日志文件，合并成单一事件流。
  *
- * @param dirHandle 目录句柄
+ * @param dirHandle 目录句柄（浏览器 FSA 或 Tauri {__tauriDir, path}）
  * @param names 文件相对路径名列表（来自 listLogFiles 的 name）
  * @param onProgress 可选进度回调（已加载文件数）
  */
@@ -201,18 +261,34 @@ export async function loadMultiple(
   const formatIds = new Set<string | null>();
   let firstFileName: string | null = null;
 
+  const tauriRoot = isTauriDir(dirHandle)
+    ? String(dirHandle.path).replace(/[\\/]+$/, '')
+    : null;
+  const fs = tauriRoot ? await loadFs() : null;
+
   for (let fi = 0; fi < names.length; fi++) {
     const name = names[fi];
     onProgress?.(fi, names.length, name);
-    const fh = await getFileHandleByPath(dirHandle, name);
-    if (!fh) continue;
-    let file: File;
-    try {
-      file = await fh.getFile();
-    } catch {
-      continue;
+
+    let text: string | null = null;
+    if (tauriRoot) {
+      try {
+        text = await fs!.readTextFile(`${tauriRoot}/${name}`);
+      } catch {
+        continue;
+      }
+    } else {
+      const fh = await getFileHandleByPath(dirHandle, name);
+      if (!fh) continue;
+      let file: File;
+      try {
+        file = await fh.getFile();
+      } catch {
+        continue;
+      }
+      text = await file.text();
     }
-    const text = await file.text();
+
     const result = parser.parse(text);
     if (!firstFileName) firstFileName = name;
     formatIds.add(result.timestampFormatId);
