@@ -109,8 +109,10 @@ interface ColumnSegment {
   kind: 'group' | 'top';
   /** group 段的组对象（top 段为 null） */
   group?: import('../types').FilterGroup;
-  /** 该段内的 filter 列表（含在 visibleFilters 中的全局索引） */
-  filters: { filter: Filter; index: number }[];
+  /** 该段内的 filter 列表：
+   *  - index: 该 filter 在 visibleFilters 中的全局索引（用于取 laneEvents/matches 等数据，同一 filter 多位置共享）
+   *  - slot: 列实例位置（全局递增，不去重；用于取 colWidths，同一 filter 在不同 group 出现时宽度独立） */
+  filters: { filter: Filter; index: number; slot: number }[];
 }
 
 /**
@@ -124,6 +126,9 @@ function buildVisibleColumns(
   groups: import('../types').FilterGroup[],
 ): ColumnSegment[] {
   const segments: ColumnSegment[] = [];
+  // 列实例计数器：每个出现在界面上的 filter 列实例递增分配一个 slot，
+  // 用于 colWidths 索引。同一 filter 被多个 group 引用时各位置 slot 不同 → 宽度独立
+  let slotCounter = 0;
   // 不可见 filter 的集合（所属 group 全部隐藏 → 真隐藏）
   const visibleGroupIds = new Set(
     groups.filter((g) => g.visible !== false).map((g) => g.id),
@@ -139,11 +144,11 @@ function buildVisibleColumns(
   // 1. 按 groups 顺序
   for (const g of groups) {
     if (g.visible === false) continue;
-    const cols: { filter: Filter; index: number }[] = [];
+    const cols: { filter: Filter; index: number; slot: number }[] = [];
     for (const fid of g.filterIds) {
       const idx = globalIdx(fid);
       if (idx < 0) continue; // 不在可见 filter 列表里（可能被隐藏或已删除）
-      cols.push({ filter: visibleFilters[idx], index: idx });
+      cols.push({ filter: visibleFilters[idx], index: idx, slot: slotCounter++ });
     }
     if (cols.length > 0) {
       segments.push({ kind: 'group', group: g, filters: cols });
@@ -155,12 +160,12 @@ function buildVisibleColumns(
   for (const g of groups) {
     for (const fid of g.filterIds) referencedByAnyGroup.add(fid);
   }
-  const topCols: { filter: Filter; index: number }[] = [];
+  const topCols: { filter: Filter; index: number; slot: number }[] = [];
   for (let i = 0; i < visibleFilters.length; i++) {
     const f = visibleFilters[i];
     if (referencedByAnyGroup.has(f.id)) continue;
     if (isInvisible(f)) continue;
-    topCols.push({ filter: f, index: i });
+    topCols.push({ filter: f, index: i, slot: slotCounter++ });
   }
   if (topCols.length > 0) {
     segments.push({ kind: 'top', group: undefined, filters: topCols });
@@ -233,10 +238,15 @@ export function LogStreamView() {
     () => segments.filter((s) => s.kind === 'group').length * 28,
     [segments],
   );
-  // 列间 resizer 总宽（每相邻两列一个 5px）
+  // 列实例总数（同一 filter 多处出现各算一个 slot），用于 colWidths 初始化和 resizer 总宽
+  const totalSlots = useMemo(
+    () => segments.reduce((sum, s) => sum + s.filters.length, 0),
+    [segments],
+  );
+  // 列 resizer 总宽（每列右侧一个 5px）
   const resizersW = useMemo(
-    () => Math.max(0, visibleFilters.length - 1) * 5,
-    [visibleFilters.length],
+    () => totalSlots * 5,
+    [totalSlots],
   );
   const { rows, laneEvents } = useMemo(
     () => buildRows(visibleMatches, viewRange),
@@ -249,19 +259,20 @@ export function LogStreamView() {
   // 列宽：绝对像素数组（每列独立宽度，允许总宽超出容器→横向滚动）
   const measureRef = useRef<HTMLDivElement>(null);
   const [viewportW, setViewportW] = useState(800);
-  // colWidths 为 state（直接像素），不再走 ratio；拖动列 i 边界仅改 colWidths[i]，
+  // colWidths 为 state（直接像素，按列实例 slot 索引）；
+  // 同一 filter 在多个 group 出现时各 slot 独立宽度。拖动列 slot 边界仅改 colWidths[slot]，
   // 后续列宽度不变 → 它们整体位置随 flex 排列自然右移（即"整体平移跟随"）
   const [colWidths, setColWidths] = useState<number[]>([]);
-  // 过滤器数量变化时重置为等分填充可用宽
+  // 列实例数量变化时重置为等分填充可用宽
   useEffect(() => {
     setColWidths((prev) => {
-      const n = visibleFilters.length;
+      const n = totalSlots;
       if (prev.length === n) return prev;
       const w = Math.max(MIN_LANE_WIDTH, Math.floor(viewportW / Math.max(1, n)));
       return new Array(n).fill(w);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleFilters.length]);
+  }, [totalSlots]);
   useEffect(() => {
     const el = measureRef.current;
     if (!el) return;
@@ -275,9 +286,10 @@ export function LogStreamView() {
     return () => ro.disconnect();
   }, [segHeadersW, resizersW]);
 
-  // 列间拖拽（方案A）：resizer 在每个 filter 左侧，拖动改该 filter 自身宽度（idx=自身 li），
-  // 仅 colWidths[idx] 改变（±dx），后面所有列宽度不变 → 随 flex 排列整体平移跟随，
-  // 超出容器宽度则由 .body 的 overflow-x:auto 横向滚动
+  // 列拖拽：resizer 在每个 filter 右侧，拖动改该 slot（列实例）宽度（idx=slot），
+  // 仅 colWidths[slot] 改变（±dx），后面所有列宽度不变 → 随 flex 排列整体平移跟随，
+  // 超出容器宽度则由 .body 的 overflow-x:auto 横向滚动。
+  // 同一 filter 在多个 group 出现时各 slot 独立，互不影响。
   const colDrag = useRef<{ idx: number; startX: number; startWidths: number[] } | null>(null);
   const onColResizeDown = useCallback(
     (idx: number, e: React.MouseEvent) => {
@@ -291,7 +303,7 @@ export function LogStreamView() {
   );
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
-      // filter 列拖拽（resizer 在右侧改自身 li）：拖右 dx>0 → 自身变宽，
+      // filter 列拖拽（resizer 在右侧改自身 slot）：拖右 dx>0 → 该 slot 变宽，
       // 后面所有列宽度不变 → 随 flex 排列整体右移平移，resizer 位于 lane 右边界跟随鼠标
       const d = colDrag.current;
       if (!d) return;
@@ -479,24 +491,25 @@ export function LogStreamView() {
 
   const showTimeCol = mode !== 'independent';
 
-  /** 渲染 filter 右侧竖向 resizer：拖动改第 i 列（该 filter 自身）宽度，
+  /** 渲染 filter 右侧竖向 resizer：拖动改该 slot（列实例）宽度，
    *  后面所有列随 flex 排列整体平移跟随。每个 filter 右侧都有一个（含末列），
    *  resizer 位于 lane 右边界，拖动时跟随鼠标，手感直观。 */
-  const renderColResizer = (i: number) => (
+  const renderColResizer = (slot: number) => (
     <div
-      key={'rs' + i}
+      key={'rs' + slot}
       className={styles.colResizer}
-      onMouseDown={(e) => onColResizeDown(i, e)}
+      onMouseDown={(e) => onColResizeDown(slot, e)}
       title="拖拽调节列宽"
     />
   );
 
   /** 渲染一个分段的子列：filters 为该段的列列表
    *  group 段：左侧竖向标题列（可点击左右折叠）+ 右侧子 filter 列
-   *  top 段：无标题列，仅子 filter 列 */
+   *  top 段：无标题列，仅子 filter 列
+   *  renderLane 同时接收 li（取数据，同 filter 多位置共享）和 slot（取宽度，独立） */
   const renderSegmentColumns = (
     seg: ColumnSegment,
-    renderLane: (f: Filter, li: number) => React.ReactNode,
+    renderLane: (f: Filter, li: number, slot: number) => React.ReactNode,
     // true=列头上下文（渲染完整标题：文字/caret/计数/可点击折叠）
     // false=主体上下文（仅渲染 sticky 纯色占位条，纵向滚动时钉在顶部不跟随）
     isHeaderCtx = false,
@@ -531,10 +544,10 @@ export function LogStreamView() {
             />
           ))}
         <div className={styles.segCols}>
-          {seg.filters.map(({ filter: f, index: li }) => (
-            <Fragment key={f.id}>
-              {renderLane(f, li)}
-              {renderColResizer(li)}
+          {seg.filters.map(({ filter: f, index: li, slot }) => (
+            <Fragment key={gid + '-' + slot}>
+              {renderLane(f, li, slot)}
+              {renderColResizer(slot)}
             </Fragment>
           ))}
         </div>
@@ -590,10 +603,10 @@ export function LogStreamView() {
           {segments.map((seg) =>
             renderSegmentColumns(
               seg,
-              (f, li) => (
+              (f, _li, slot) => (
                 <div
                   className={styles.laneHeader}
-                  style={{ width: colWidths[li] ?? MIN_LANE_WIDTH, borderLeftColor: f.color }}
+                  style={{ width: colWidths[slot] ?? MIN_LANE_WIDTH, borderLeftColor: f.color }}
                 >
                   <span className={styles.laneDot} style={{ background: f.color }} />
                   <span className={styles.laneTitle}>{f.label}</span>
@@ -630,10 +643,10 @@ export function LogStreamView() {
             </div>
 
             {segments.map((seg) =>
-              renderSegmentColumns(seg, (f, li) => (
+              renderSegmentColumns(seg, (f, li, slot) => (
                 <GlobalLane
                   color={f.color}
-                  width={colWidths[li] ?? MIN_LANE_WIDTH}
+                  width={colWidths[slot] ?? MIN_LANE_WIDTH}
                   events={laneEvents[li] ?? []}
                   viewRange={viewRange}
                   pxPerMs={globalData.pxPerMs}
@@ -669,10 +682,10 @@ export function LogStreamView() {
             </div>
 
             {segments.map((seg) =>
-              renderSegmentColumns(seg, (f, li) => (
+              renderSegmentColumns(seg, (f, li, slot) => (
                 <LaneColumn
                   color={f.color}
-                  width={colWidths[li] ?? MIN_LANE_WIDTH}
+                  width={colWidths[slot] ?? MIN_LANE_WIDTH}
                   visibleRows={visibleRows}
                   laneByTs={laneByTs[li] ?? new Map()}
                   selectedEventId={selectedEventId}
@@ -688,10 +701,10 @@ export function LogStreamView() {
           /* —— 独立模式：各列各自从上到下顺序排列，不按时间对齐 —— */
           <div className={styles.gridInner}>
             {segments.map((seg) =>
-              renderSegmentColumns(seg, (f, li) => (
+              renderSegmentColumns(seg, (f, li, slot) => (
                 <LaneStream
                   color={f.color}
-                  width={colWidths[li] ?? MIN_LANE_WIDTH}
+                  width={colWidths[slot] ?? MIN_LANE_WIDTH}
                   events={laneEvents[li] ?? []}
                   scrollTop={scrollTop}
                   viewportH={viewportH}
