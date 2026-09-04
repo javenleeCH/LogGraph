@@ -184,18 +184,69 @@
 }
 
 .drop-overlay {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  background: rgba(26, 115, 232, 0.10);
-  border: 2px dashed var(--accent);
+  z-index: 999;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
-  font-weight: 500;
-  color: var(--accent);
+  background: var(--drop-overlay-bg);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   pointer-events: none;
-  z-index: 50;
-  border-radius: var(--radius-md);
-  backdrop-filter: blur(1px);
+  animation: drop-fade-in 0.18s ease;
+}
+
+.drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 44px 76px;
+  border-radius: 20px;
+  border: 2px dashed var(--accent);
+  background: var(--drop-card-bg);
+  box-shadow: var(--shadow-lg);
+  animation: drop-pulse 1.3s ease-in-out infinite;
+}
+
+.drop-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+  color: var(--accent);
+}
+
+.drop-title {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.5px;
+}
+
+.drop-sub {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+@keyframes drop-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes drop-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    border-color: var(--accent);
+  }
+  50% {
+    transform: scale(1.015);
+    border-color: var(--accent-light);
+  }
 }

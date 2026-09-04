@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口能力：对话框 + 文件系统读写（用于打开/浏览日志与过滤器持久化）",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "fs:default",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "**",
+        "$HOME/**",
+        "$DOCUMENT/**",
+        "$DESKTOP/**",
+        "$DOWNLOAD/**"
+      ]
+    }
+  ]
+}

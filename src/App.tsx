@@ -6,7 +6,20 @@ import { DetailPanel } from './components/DetailPanel';
 import { SidePanel } from './components/SidePanel';
 import { GroupEditorPage, FilterDetailModal } from './components/NodeCanvasView';
 import { useLogStore } from './store/logStore';
-import { loadFromDataTransfer } from './io/fileLoader';
+import {
+  loadFromDataTransfer,
+  loadTauriPaths,
+  getDroppedDirectoryEntry,
+  type LoadedFile,
+} from './io/fileLoader';
+import {
+  listLogFiles,
+  loadMultiple,
+  loadDroppedDirectory,
+  tauriPathAsDirectory,
+  type MultiLoadResult,
+} from './io/dirLoader';
+import { setupTauriDragDrop } from './lib/tauri';
 import { LogParser } from './parser/LogParser';
 import styles from './App.module.css';
 
@@ -119,11 +132,9 @@ export default function App() {
     };
   }, []);
 
-  const onDrop = useCallback(
-    async (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      const loaded = await loadFromDataTransfer(e.dataTransfer);
+  // 解析并载入一段日志文本（浏览器拖拽 / Tauri 原生拖拽共用）
+  const handleLoaded = useCallback(
+    async (loaded: LoadedFile | null) => {
       if (!loaded) return;
       try {
         const result = parser.parse(loaded.text);
@@ -142,6 +153,93 @@ export default function App() {
     [setLog],
   );
 
+  // 把目录合并结果写入 store（浏览器拖拽目录 / Tauri 拖拽目录共用展示名）
+  const applyDirectoryResult = useCallback(
+    (result: MultiLoadResult, dirName: string, count: number) => {
+      setLog(result.events, result.rawLines, {
+        ...result.meta,
+        fileName: `${dirName} (${count} 文件)`,
+      });
+    },
+    [setLog],
+  );
+
+  // 加载一个目录句柄（Tauri 拖拽目录）：枚举 + 合并 + 写入 store
+  const handleDirectory = useCallback(
+    async (dirHandle: any, dirName: string) => {
+      try {
+        const list = await listLogFiles(dirHandle, { recursive: true });
+        if (list.length === 0) {
+          alert('该文件夹下没有可识别的日志文件（.log / .txt / .out / .csv / .tsv）');
+          return;
+        }
+        const names = list.map((f) => f.name);
+        const result = await loadMultiple(dirHandle, names);
+        setLog(result.events, result.rawLines, {
+          ...result.meta,
+          fileName: `${dirName} (${names.length} 文件)`,
+          fileSize: list.reduce((s, f) => s + f.size, 0),
+        });
+      } catch (err) {
+        console.error(err);
+        alert('加载文件夹失败：' + (err as Error).message);
+      }
+    },
+    [setLog],
+  );
+
+  // Tauri 原生拖拽：浏览器下为 no-op，不注册任何监听
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    setupTauriDragDrop({
+      onDragOver: () => setDragOver(true),
+      onDragLeave: () => setDragOver(false),
+      onDrop: async (paths) => {
+        setDragOver(false);
+        try {
+          if (!paths.length) return;
+          const dirHandle = await tauriPathAsDirectory(paths[0]);
+          if (dirHandle) {
+            await handleDirectory(dirHandle, dirHandle.name);
+            return;
+          }
+          await handleLoaded(await loadTauriPaths(paths));
+        } catch (err) {
+          console.error(err);
+          alert('加载失败：' + (err as Error).message);
+        }
+      },
+    }).then((fn) => {
+      cleanup = fn;
+    });
+    return () => cleanup?.();
+  }, [handleLoaded, handleDirectory]);
+
+  const onDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragOver(false);
+      // 目录拖拽（Chromium webkitGetAsEntry）
+      const dirEntry = getDroppedDirectoryEntry(e.dataTransfer);
+      if (dirEntry) {
+        try {
+          const res = await loadDroppedDirectory(dirEntry);
+          if (res) applyDirectoryResult(res.result, dirEntry.name, res.count);
+          else alert('该文件夹下没有可识别的日志文件（.log / .txt / .out / .csv / .tsv）');
+        } catch (err) {
+          console.error(err);
+          alert('加载文件夹失败：' + (err as Error).message);
+        }
+        return;
+      }
+      // 单文件拖拽
+      const loaded = await loadFromDataTransfer(e.dataTransfer);
+      if (!loaded) return;
+      await handleLoaded(loaded);
+    },
+    [handleLoaded, applyDirectoryResult],
+  );
+
   const topFlex = 1 - splitRatio;
 
   return (
@@ -152,7 +250,8 @@ export default function App() {
         setDragOver(true);
       }}
       onDragLeave={(e) => {
-        if (e.relatedTarget === null) setDragOver(false);
+        const next = e.relatedTarget as Node | null;
+        if (!next || !e.currentTarget.contains(next)) setDragOver(false);
       }}
       onDrop={onDrop}
     >
@@ -192,7 +291,35 @@ export default function App() {
         </div>
       </div>
       {dragOver && (
-        <div className={styles['drop-overlay']}>释放以加载日志文件</div>
+        <div className={styles['drop-overlay']}>
+          <div className={styles['drop-card']}>
+            <div className={styles['drop-icon']}>
+              <svg width="56" height="56" viewBox="0 0 56 56" fill="none" aria-hidden="true">
+                <circle
+                  cx="28"
+                  cy="28"
+                  r="25"
+                  stroke="#8ab4f8"
+                  strokeWidth="2"
+                  strokeDasharray="6 6"
+                />
+                <path d="M28 14v20" stroke="#fff" strokeWidth="3" strokeLinecap="round" />
+                <path
+                  d="M19 27l9 9 9-9"
+                  stroke="#fff"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path d="M18 42h20" stroke="#8ab4f8" strokeWidth="3" strokeLinecap="round" />
+              </svg>
+            </div>
+            <div className={styles['drop-title']}>释放以加载日志</div>
+            <div className={styles['drop-sub']}>
+              支持 .log / .txt / .out / .csv / .tsv 文件或整个文件夹
+            </div>
+          </div>
+        </div>
       )}
       {activeGroupId && <GroupEditorPage />}
       {editingFilterId && <FilterDetailModal />}

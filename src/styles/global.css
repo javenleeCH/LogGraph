@@ -36,6 +36,10 @@
   --event-bg-sel: rgba(26, 115, 232, 0.18);
   --global-event-bg: rgba(255, 255, 255, 0.92);
 
+  /* 拖拽遮罩 — 浅色 */
+  --drop-overlay-bg: rgba(255, 255, 255, 0.72);
+  --drop-card-bg: rgba(255, 255, 255, 0.92);
+
   /* log level colors — color-blind safe (Okabe-Ito), UI + Canvas shared via constants.ts */
   --level-error: #d55e00;    /* vermillion (ERROR/FATAL/CRITICAL) */
   --level-warn: #e69f00;     /* orange (WARN/WARNING) */
@@ -130,6 +134,10 @@
   --event-bg-hover: rgba(59, 130, 246, 0.20);
   --event-bg-sel: rgba(59, 130, 246, 0.30);
   --global-event-bg: rgba(26, 36, 54, 0.92);
+
+  /* 拖拽遮罩 — 暗底 */
+  --drop-overlay-bg: rgba(10, 18, 30, 0.65);
+  --drop-card-bg: rgba(20, 30, 48, 0.88);
 
   /* log level — 暗底提亮版本 */
   --level-error: #ff7b42;

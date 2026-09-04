@@ -10,3 +10,9 @@ perfetto
 .claude
 .qoder
 .roo
+
+# 构建缓存
+tsconfig.tsbuildinfo
+
+# WorkBuddy 工作区数据
+.workbuddy/

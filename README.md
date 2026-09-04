@@ -30,6 +30,29 @@ npm run dev      # 开发服务器 http://localhost:5180
 npm run build    # 生产构建到 dist/
 ```
 
+## 🖥️ Tauri 桌面版
+
+本项目已 Tauri 化（Tauri v2 + Rust + WebView2 / WKWebView）。桌面版与浏览器版共用同一套 React 代码，
+`src/lib/tauri.ts` 在运行时检测是否处于 Tauri 容器，并据此切换文件读写后端：
+
+| 能力 | 浏览器 | Tauri 桌面 |
+|---|---|---|
+| 打开日志 | `<input type=file>` | 系统文件对话框（`plugin-dialog`） |
+| 拖拽加载 | HTML5 Drag & Drop | 原生文件拖放（`onDragDropEvent`） |
+| 打开目录 | File System Access API | 系统目录对话框 + `plugin-fs` 递归枚举 |
+| 过滤器持久化 | FSA + IndexedDB 句柄 | `plugin-fs` 读写 `filters.json` + localStorage 记路径 |
+
+前置要求：Rust 工具链（`rustc`/`cargo`）与平台对应的 WebView（Windows 10/11 自带 WebView2）。
+
+```bash
+npm install
+npm run tauri:dev     # 桌面开发模式（自动起 vite + cargo build 后打开窗口）
+npm run tauri:build   # 打包桌面安装包（产物在 src-tauri/target/release/bundle/）
+```
+
+Rust 侧入口在 `src-tauri/`（`main.rs` / `lib.rs` / `tauri.conf.json` / `capabilities/`）。
+首次 `tauri:build` 会下载编译 Rust 依赖，耗时较长属正常现象。
+
 打开浏览器后：
 1. 点击 **「📂 打开日志」** 或把日志文件拖进窗口（可用 `sample/sample.log` 测试）。
 2. 在左侧 **过滤器** 面板点击 **「+ 新增」**，输入关键词或正则。
@@ -45,23 +68,26 @@ npm run build    # 生产构建到 dist/
 | 时间线渲染 | 原生 HTML5 Canvas 2D（自定义 RAF 渲染循环）|
 | 状态管理 | Zustand |
 | 样式 | CSS Modules |
-| 桌面打包（可选）| Electron |
+| 桌面打包 | Tauri v2（Rust + WebView2）|
 
 ## 🗂️ 项目结构
 
 ```
 src/
   main.tsx                      # 入口
-  App.tsx                       # 布局壳 + 拖拽加载
+  App.tsx                       # 布局壳 + 拖拽加载（含 Tauri 原生拖放）
   types.ts                      # 核心数据模型
   store/logStore.ts             # Zustand 全局状态
+  lib/tauri.ts                  # Tauri 运行时检测 + 动态加载
   parser/
     LogParser.ts                # 文本 -> LogEvent[]
     timestampFormats.ts         # 时间戳格式预设与自动探测
   filters/
     FilterEngine.ts             # 事件 <-> 过滤器匹配
   io/
-    fileLoader.ts               # FileReader + 拖拽
+    fileLoader.ts               # 文件加载（浏览器/Tauri 双后端）
+    dirLoader.ts                # 目录枚举 + 多文件合并（双后端）
+    filterPersist.ts            # 过滤器持久化（双后端）
   timeline/
     TimelineCanvas.tsx          # Canvas 宿主 + 交互
     renderers.ts               # 轴/lane/事件/minimap/连线绘制
@@ -71,6 +97,12 @@ src/
     Toolbar.tsx                 # 打开文件 + 范围信息
     FiltersSidebar.tsx          # 过滤器列表与编辑
     DetailPanel.tsx             # 选中事件详情 + 上下文行
+src-tauri/                      # Tauri v2 Rust 脚手架
+  Cargo.toml / build.rs
+  src/main.rs / lib.rs
+  tauri.conf.json               # 窗口 / 构建 / 打包配置
+  capabilities/default.json     # 对话框 + 文件系统权限
+  icons/                        # 应用图标（tauri icon 生成）
 ```
 
 ## 🔗 关联逻辑说明
