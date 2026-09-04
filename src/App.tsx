@@ -4,6 +4,7 @@ import { LogStreamView } from './components/LogStreamView';
 import { TimelineCanvas } from './timeline/TimelineCanvas';
 import { DetailPanel } from './components/DetailPanel';
 import { SidePanel } from './components/SidePanel';
+import { FilterChips } from './components/FilterChips';
 import { GroupEditorPage, FilterDetailModal } from './components/NodeCanvasView';
 import { useLogStore } from './store/logStore';
 import {
@@ -51,7 +52,7 @@ export default function App() {
 
   // 上方视图组件切换：横排(init版)=TimelineCanvas，竖排(当前)=LogStreamView
   // splitOrientation 来自 store（Toolbar 切换）；splitRatio = 详情面板占比 [0.12, 0.85]
-  const [splitRatio, setSplitRatio] = useState(0.34);
+  const [splitRatio, setSplitRatio] = useState(0.40);
   const centerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
   const showTimeline = splitOrientation === 'horizontal';
@@ -278,7 +279,14 @@ export default function App() {
           style={{ flex: `${logsDirHandle ? (1 - treeRatio) : 1} 1 0` }}
         >
           <div className={styles.paneTop} style={{ flex: `${topFlex} 1 0` }}>
-            {showTimeline ? <TimelineCanvas /> : <LogStreamView />}
+            {showTimeline ? (
+              <>
+                <FilterChips />
+                <TimelineCanvas />
+              </>
+            ) : (
+              <LogStreamView />
+            )}
           </div>
           <div
             className={styles.resizer}

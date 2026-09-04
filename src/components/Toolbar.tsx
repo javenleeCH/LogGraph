@@ -71,7 +71,8 @@ export function Toolbar() {
   }
 
   return (
-    <div className={styles.toolbar}>
+    <div className={styles.wrap}>
+      <div className={styles.toolbar}>
       <input
         ref={inputRef}
         type="file"
@@ -167,42 +168,9 @@ export function Toolbar() {
         </>
       )}
 
-      {meta && (
-        <>
-          <div className={styles.sep} />
-          <div className={styles['file-info']}>
-            <FolderOpen size={13} className={styles['file-info-icon']} />
-            <span className={styles.fname}>{meta.fileName}</span>
-            <span className={styles.stats}>
-              {events.length.toLocaleString()} 行
-              {meta.skipped > 0 ? ` · 跳过 ${meta.skipped}` : ''}
-            </span>
-          </div>
-        </>
-      )}
 
       <div className={styles.spacer} />
 
-      {viewRange && fullRange && (
-        <div className={styles['range-info']}>
-          <span>
-            <b>{formatDateTime(viewRange.start)}</b>
-            <span className={styles.divider}>→</span>
-            <b>{formatDateTime(viewRange.end)}</b>
-          </span>
-          <span className={styles.divider}>|</span>
-          <span>窗宽 {formatDuration(viewRange.end - viewRange.start)}</span>
-          <span className={styles.divider}>|</span>
-          <span>总跨度 {formatDuration(fullRange.end - fullRange.start)}</span>
-        </div>
-      )}
-
-      {viewRange && fullRange && (
-        <button className="ghost" onClick={resetView} title="重置视图为全量">
-          <Maximize size={14} />
-          全量
-        </button>
-      )}
 
       <button
         className="ghost"
@@ -212,6 +180,33 @@ export function Toolbar() {
       >
         {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
       </button>
+      </div>
+
+      {viewRange && fullRange && (
+        <div className={styles.statusbar}>
+          <div className={styles['status-left']}>
+            {meta && (
+              <span className={styles['status-file']}>
+                {meta.fileName} · {events.length.toLocaleString()} 行
+                {meta.skipped > 0 ? ` · 跳过 ${meta.skipped}` : ''}
+              </span>
+            )}
+          </div>
+          <div className={styles['status-right']}>
+            <span className={styles['status-range']}>
+              <b>{formatDateTime(viewRange.start)}</b>
+              <span className={styles.divider}>→</span>
+              <b>{formatDateTime(viewRange.end)}</b>
+            </span>
+            <span className={styles['status-pill']}>窗宽 {formatDuration(viewRange.end - viewRange.start)}</span>
+            <span className={styles['status-pill']}>总跨度 {formatDuration(fullRange.end - fullRange.start)}</span>
+            <button className={styles['status-btn']} onClick={resetView} title="重置视图为全量">
+              <Maximize size={12} />
+              全量
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

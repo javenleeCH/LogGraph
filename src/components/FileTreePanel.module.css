@@ -45,8 +45,20 @@
 }
 
 .fileTree-actions button {
-  font-size: 11px;
-  padding: 2px 8px;
+  font-size: 12px;
+  padding: 5px 14px;
+  font-weight: 500;
+  background: var(--accent-grad);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(124, 92, 255, 0.3);
+  transition: all 0.15s ease;
+}
+
+.fileTree-actions button:hover {
+  filter: brightness(1.1);
+  box-shadow: 0 3px 12px rgba(124, 92, 255, 0.45);
 }
 
 .fileTree-body {

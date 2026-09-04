@@ -963,7 +963,6 @@ function LaneStream({
                 {ev.level}
               </span>
             )}
-            <span className={styles.eventTs}>{formatTime(ev.ts)}</span>
             <span className={styles.eventRaw} title={ev.raw}>
               {ev.raw}
             </span>
@@ -1039,8 +1038,7 @@ function LaneColumn({
                         {ev.level}
                       </span>
                     )}
-                    <span className={styles.eventTs}>{formatTime(ev.ts)}</span>
-                    <span className={styles.eventRaw} title={ev.raw}>
+                            <span className={styles.eventRaw} title={ev.raw}>
                       {ev.raw}
                     </span>
                   </div>
