@@ -28,7 +28,8 @@ export const readVar = (name: string, fallback: string): string => {
   }
 };
 
-const C = (() => ({
+function buildPalette() {
+  return {
   axisBg: readVar('--bg-track', '#f1f3f4'),
   headerColBg: readVar('--bg', '#ffffff'),
   trackAlt: readVar('--bg-track-alt', '#f8f9fa'),
@@ -52,7 +53,14 @@ const C = (() => ({
   corrLink: 'rgba(230,159,0,0.45)',
   tooltipBg: readVar('--bg', '#ffffff'),
   tooltipBorder: readVar('--border', '#dadce0'),
-}))();
+}}
+
+let C = buildPalette();
+
+/** 每帧调用：重新从 CSS 变量读取色板，保证主题切换后画布实时更新 */
+export function refreshPalette() {
+  C = buildPalette();
+}
 
 // ---- 颜色工具 ----
 function withAlpha(hex: string, alpha: number): string {

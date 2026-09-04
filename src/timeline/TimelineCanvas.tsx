@@ -15,6 +15,7 @@ import {
   drawGroupHeader,
   drawGroupDensity,
   readVar,
+  refreshPalette,
   type RenderContext,
 } from './renderers';
 import { bisectLeft, nearestEvent } from './correlation';
@@ -136,7 +137,12 @@ export function TimelineCanvas() {
     } = st;
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // 每帧重读 CSS 变量色板（主题切换 / CSS 注入时序）
+    refreshPalette();
     ctx.clearRect(0, 0, w, h);
+    // 填满画布背景，避免轨道下方出现透明黑框
+    ctx.fillStyle = readVar('--bg-canvas', '#0b0e14');
+    ctx.fillRect(0, 0, w, h);
 
     if (!viewRange || !fullRange) {
       ctx.fillStyle = readVar('--text-faint', '#80868b');
