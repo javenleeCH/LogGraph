@@ -6,7 +6,6 @@ import { isTauri } from '../lib/tauri';
 import { LogParser } from '../parser/LogParser';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
 import {
-  Diamond,
   FolderOpen,
   Folder,
   Table,
@@ -86,7 +85,15 @@ export function Toolbar() {
       />
       <div className={styles.brand}>
         <span className={styles.logo}>
-          <Diamond size={16} />
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M3 13h4l2-6 3 10 2-8 1.5 4H21"
+              stroke="#fff"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
         </span>
         <span>logGraph</span>
       </div>

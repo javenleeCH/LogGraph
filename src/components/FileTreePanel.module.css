@@ -21,7 +21,7 @@
 }
 
 .fileTree-header .dir-name {
-  color: var(--text-dim);
+  color: var(--accent-light);
   font-weight: 400;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -124,7 +124,7 @@
 }
 
 .tree-item.dir > .icon {
-  color: var(--accent);
+  color: var(--accent-light);
 }
 
 .tree-item .name {
@@ -138,7 +138,7 @@
   padding-left: 8px;
   color: var(--text-faint);
   font-size: 10px;
-  font-family: 'Roboto Mono', monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   flex: 0 0 auto;
 }
 
@@ -171,5 +171,5 @@
 }
 
 .tree-checkbox-col label:hover {
-  color: var(--text);
+  color: var(--accent-light);
 }

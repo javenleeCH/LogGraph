@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Canvas 绘制函数（浅色主题，Perfetto 风格）：
  * 轴网格、lane、事件、minimap、关联连线。
  * 纯函数式，不持有状态，由 TimelineCanvas 调用。

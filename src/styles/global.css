@@ -1,63 +1,61 @@
+/* ============================================================
+   logGraph — 全局设计令牌
+   双主题：:root 浅色（Perfetto-light） + [data-theme='dark'] 深色霓虹
+   ============================================================ */
 :root {
-  /* Light (Perfetto-light-inspired) palette — 现代精致浅色 */
-  --bg: #ffffff;             /* app background */
-  --bg-panel: #f8f9fa;       /* top bar / detail */
-  --bg-elevated: #eef1f4;    /* buttons, inputs */
-  --bg-elevated-hover: #e1e5ea; /* elevated hover (buttons, chips) */
-  --bg-canvas: #ffffff;      /* timeline canvas */
-  --bg-track: #f4f6f8;       /* track row */
+  /* Light (Perfetto-light-inspired) palette */
+  --bg: #ffffff;
+  --bg-panel: #f8f9fa;
+  --bg-elevated: #eef1f4;
+  --bg-elevated-hover: #e1e5ea;
+  --bg-canvas: #ffffff;
+  --bg-track: #f4f6f8;
   --bg-track-alt: #fafbfc;
-  --bg-track-hover: #e8f0fe; /* hover row - light blue */
-  --bg-hover: #f1f3f4;       /* generic hover (rows, items) */
+  --bg-track-hover: #e8f0fe;
+  --bg-hover: #f1f3f4;
   --border: #dadce0;
   --border-light: #e8eaed;
-  --text: #1f2329;           /* primary text - near black */
-  --text-dim: #4e5969;       /* secondary text */
-  --text-faint: #80868b;     /* AA-compliant on white (was #9aa0a6) */
-  --accent: #1a73e8;         /* blue */
+  --text: #1f2329;
+  --text-dim: #4e5969;
+  --text-faint: #80868b;
+  --accent: #1a73e8;
   --accent-light: #4285f4;
   --accent-dim: #d2e3fc;
-  --accent-contrast: #ffffff; /* accent 上的文字色 */
-  --danger: #d55e00;        /* vermillion — color-blind safe "error" (was red) */
-  --warn: #e69f00;           /* orange — caution */
-  --ok: #009e73;             /* bluish green — color-blind safe (was green) */
-  --cta: #22c55e;           /* CTA green (run/成功) */
+  --accent-contrast: #ffffff;
+  --danger: #d55e00;
+  --warn: #e69f00;
+  --ok: #009e73;
+  --cta: #22c55e;
   --link: #1a73e8;
 
-  /* 交互态 */
-  --button-active: #d3d7dc;  /* button:active 背景 */
-  --ghost-hover: rgba(60, 64, 67, 0.08); /* ghost button hover */
+  --button-active: #d3d7dc;
+  --ghost-hover: rgba(60, 64, 67, 0.08);
   --scrollbar-thumb: #c4c7c9;
   --scrollbar-thumb-hover: #a8abb0;
 
-  /* 事件卡片背景 — 浅色：半透明白底 + 深字 */
   --event-bg: rgba(255, 255, 255, 0.72);
   --event-bg-hover: rgba(26, 115, 232, 0.10);
   --event-bg-sel: rgba(26, 115, 232, 0.18);
   --global-event-bg: rgba(255, 255, 255, 0.92);
 
-  /* 拖拽遮罩 — 浅色 */
   --drop-overlay-bg: rgba(255, 255, 255, 0.72);
   --drop-card-bg: rgba(255, 255, 255, 0.92);
 
-  /* log level colors — color-blind safe (Okabe-Ito), UI + Canvas shared via constants.ts */
-  --level-error: #d55e00;    /* vermillion (ERROR/FATAL/CRITICAL) */
-  --level-warn: #e69f00;     /* orange (WARN/WARNING) */
-  --level-info: #0072b2;     /* blue */
-  --level-debug: #009e73;    /* bluish green */
-  --level-trace: #cc79a7;    /* reddish purple */
+  --level-error: #d55e00;
+  --level-warn: #e69f00;
+  --level-info: #0072b2;
+  --level-debug: #009e73;
+  --level-trace: #cc79a7;
 
-  /* track palette — color-blind safe (Okabe-Ito based), 8 mutually distinguishable hues */
   --track-blue: #0072b2;
   --track-green: #009e73;
   --track-orange: #e69f00;
-  --track-red: #d55e00;      /* vermillion (red substitute) */
+  --track-red: #d55e00;
   --track-purple: #cc79a7;
   --track-cyan: #56b4e9;
-  --track-pink: #b5179e;     /* magenta */
-  --track-lime: #9c8a00;     /* dark olive-yellow (contrast on white) */
+  --track-pink: #b5179e;
+  --track-lime: #9c8a00;
 
-  /* spacing scale */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -65,25 +63,20 @@
   --space-5: 20px;
   --space-6: 24px;
 
-  /* radius — 更圆润现代 */
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-pill: 999px;
 
-  /* shadows — 更柔和分层 */
   --shadow-sm: 0 1px 2px rgba(60, 64, 67, 0.06), 0 1px 3px rgba(60, 64, 67, 0.04);
   --shadow-md: 0 4px 12px rgba(60, 64, 67, 0.1), 0 2px 4px rgba(60, 64, 67, 0.06);
   --shadow-lg: 0 12px 32px rgba(60, 64, 67, 0.16), 0 4px 8px rgba(60, 64, 67, 0.08);
 
-  /* focus ring */
   --focus-ring: 0 0 0 2px rgba(26, 115, 232, 0.4);
 
-  /* transitions */
   --transition-fast: 0.12s cubic-bezier(0.4, 0, 0.2, 1);
   --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* timeline layout metrics */
   --track-header-w: 200px;
   --axis-h: 28px;
   --track-h: 40px;
@@ -91,78 +84,74 @@
   --minimap-h: 44px;
 
   color-scheme: light;
-  /* 字体：Fira Sans(UI) + Fira Code(等宽) + 中文回退 */
-  --font-ui: 'Fira Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI',
-    'Microsoft YaHei', 'PingFang SC', 'Hiragino Sans GB', Arial, sans-serif;
-  --font-mono: 'Fira Code', 'SFMono-Regular', Consolas, 'Liberation Mono',
-    'Microsoft YaHei', Menlo, monospace;
+  --font-ui: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont,
+    'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'SFMono-Regular', 'Cascadia Code', Consolas, 'Roboto Mono',
+    'Liberation Mono', Menlo, monospace;
   font-family: var(--font-ui);
 }
 
-/* ===== 暗黑主题（默认）—— Code dark + run green =====
-   ui-ux-pro-max 推荐：bg #0F172A / panel #1E293B / elevated #334155 / text #F8FAFC */
+/* ===== 深色霓虹主题（默认）—— 深空炭黑 + 紫→青渐变 ===== */
 :root[data-theme='dark'] {
-  --bg: #0f172a;            /* app background — slate-900 */
-  --bg-panel: #1e293b;      /* top bar / detail — slate-800 */
-  --bg-elevated: #334155;   /* buttons, inputs — slate-700 */
-  --bg-elevated-hover: #3f4a5e; /* elevated hover */
-  --bg-canvas: #0b1020;     /* timeline canvas — 更深 */
-  --bg-track: #1a2436;      /* track row */
-  --bg-track-alt: #16203300;
-  --bg-track-hover: #1e3a5f; /* hover row - 蓝 */
-  --bg-hover: #1e293b;      /* generic hover */
-  --border: #334155;
-  --border-light: #283447;
-  --text: #f8fafc;          /* primary text — slate-50 */
-  --text-dim: #94a3b8;      /* secondary text — slate-400 */
-  --text-faint: #64748b;     /* slate-500 */
-  --accent: #3b82f6;         /* blue-500（暗底下更亮） */
-  --accent-light: #60a5fa;
-  --accent-dim: #1e3a5f;
+  --bg: #0b0e14;
+  --bg-panel: #11151f;
+  --bg-elevated: #1a2130;
+  --bg-elevated-hover: #232c3f;
+  --bg-canvas: #0b0e14;
+  --bg-track: #131827;
+  --bg-track-alt: #0f1420;
+  --bg-track-hover: rgba(124, 92, 255, 0.15);
+  --bg-hover: rgba(255, 255, 255, 0.055);
+  --border: #232b3b;
+  --border-light: #1a2130;
+  --text: #e9edf5;
+  --text-dim: #9aa5b8;
+  --text-faint: #5f6b80;
+  --accent: #7c5cff;
+  --accent-2: #22d3ee;
+  --accent-light: #9d8bff;
+  --accent-dim: rgba(124, 92, 255, 0.15);
   --accent-contrast: #ffffff;
-  --cta: #22c55e;           /* CTA green */
-  --link: #60a5fa;
+  --accent-grad: linear-gradient(135deg, #7c5cff 0%, #22d3ee 100%);
+  --danger: #f87171;
+  --warn: #fbbf24;
+  --ok: #34d399;
+  --cta: #34d399;
+  --link: #8ab4f8;
 
-  /* 交互态（暗底） */
-  --button-active: #475569;  /* slate-600 */
-  --ghost-hover: rgba(148, 163, 184, 0.12);
-  --scrollbar-thumb: #475569;
-  --scrollbar-thumb-hover: #64748b;
+  --button-active: rgba(124, 92, 255, 0.25);
+  --ghost-hover: rgba(255, 255, 255, 0.06);
+  --scrollbar-thumb: #2a3346;
+  --scrollbar-thumb-hover: #3b4660;
 
-  /* 事件卡片背景 — 暗底：半透明深底 + 白字（与浅色相反） */
-  --event-bg: rgba(15, 23, 42, 0.72);
-  --event-bg-hover: rgba(59, 130, 246, 0.20);
-  --event-bg-sel: rgba(59, 130, 246, 0.30);
-  --global-event-bg: rgba(26, 36, 54, 0.92);
+  --event-bg: rgba(17, 21, 31, 0.72);
+  --event-bg-hover: rgba(124, 92, 255, 0.12);
+  --event-bg-sel: rgba(124, 92, 255, 0.22);
+  --global-event-bg: rgba(26, 33, 48, 0.92);
 
-  /* 拖拽遮罩 — 暗底 */
-  --drop-overlay-bg: rgba(10, 18, 30, 0.65);
-  --drop-card-bg: rgba(20, 30, 48, 0.88);
+  --drop-overlay-bg: rgba(11, 14, 20, 0.7);
+  --drop-card-bg: rgba(26, 33, 48, 0.9);
 
-  /* log level — 暗底提亮版本 */
-  --level-error: #ff7b42;
-  --level-warn: #ffb02e;
-  --level-info: #4dabf7;
-  --level-debug: #2dd4a7;
-  --level-trace: #e07bb0;
+  --level-error: #f87171;
+  --level-warn: #fbbf24;
+  --level-info: #60a5fa;
+  --level-debug: #34d399;
+  --level-trace: #c084fc;
 
-  /* track palette — 暗底提亮 */
-  --track-blue: #4dabf7;
-  --track-green: #2dd4a7;
-  --track-orange: #ffb02e;
-  --track-red: #ff7b42;
-  --track-purple: #e07bb0;
-  --track-cyan: #7dd3fc;
-  --track-pink: #ec6bd0;
-  --track-lime: #d4b341;
+  --track-blue: #4ea2ff;
+  --track-green: #34d399;
+  --track-orange: #fb923c;
+  --track-red: #f87171;
+  --track-purple: #a78bfa;
+  --track-cyan: #22d3ee;
+  --track-pink: #f472b6;
+  --track-lime: #a3e635;
 
-  /* shadows — 暗底用更深阴影 + 微光晕 */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.2);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5), 0 4px 8px rgba(0, 0, 0, 0.3);
 
-  /* focus ring */
-  --focus-ring: 0 0 0 2px rgba(59, 130, 246, 0.5);
+  --focus-ring: 0 0 0 2px rgba(124, 92, 255, 0.45);
 
   color-scheme: dark;
 }
@@ -189,22 +178,36 @@ body {
   transition: background var(--transition), color var(--transition);
 }
 
+:root[data-theme='dark'] body {
+  background-image:
+    radial-gradient(1100px 540px at 12% -12%, rgba(124, 92, 255, 0.11), transparent 60%),
+    radial-gradient(900px 460px at 108% -6%, rgba(34, 211, 238, 0.08), transparent 55%);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: rgba(124, 92, 255, 0.35);
+  color: #fff;
+}
+
 #root {
   display: flex;
   flex-direction: column;
 }
 
+/* ---- 按钮 ---- */
 button {
   font-family: inherit;
   font-size: 12px;
   font-weight: 500;
   color: var(--text);
   background: var(--bg-elevated);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 5px 12px;
   cursor: pointer;
-  transition: background var(--transition-fast), box-shadow var(--transition-fast), border-color var(--transition-fast);
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+    box-shadow var(--transition-fast), transform 0.06s ease;
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
@@ -213,10 +216,12 @@ button {
 
 button:hover {
   background: var(--bg-elevated-hover);
+  border-color: var(--border);
 }
 
 button:active {
   background: var(--button-active);
+  transform: translateY(0.5px);
 }
 
 button:focus-visible {
@@ -232,6 +237,12 @@ button:disabled {
 button.primary {
   background: var(--accent);
   color: var(--accent-contrast);
+  border-color: transparent;
+}
+
+:root[data-theme='dark'] button.primary {
+  background: var(--accent-grad);
+  box-shadow: 0 2px 10px rgba(124, 92, 255, 0.35);
 }
 
 button.primary:hover {
@@ -239,14 +250,21 @@ button.primary:hover {
   box-shadow: var(--shadow-sm);
 }
 
+:root[data-theme='dark'] button.primary:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 4px 16px rgba(124, 92, 255, 0.45);
+}
+
 button.ghost {
   background: transparent;
+  border-color: transparent;
 }
 
 button.ghost:hover {
   background: var(--ghost-hover);
 }
 
+/* ---- 输入控件 ---- */
 input[type='text'],
 input[type='search'],
 select,
@@ -256,8 +274,8 @@ textarea {
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 5px 8px;
+  border-radius: var(--radius-md);
+  padding: 5px 10px;
   outline: none;
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
@@ -266,7 +284,7 @@ input[type='text']:focus,
 input[type='search']:focus,
 textarea:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
 input[type='checkbox'] {
@@ -274,7 +292,14 @@ input[type='checkbox'] {
   cursor: pointer;
 }
 
-/* scrollbars */
+input[type='color'] {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+/* ---- 滚动条 ---- */
 ::-webkit-scrollbar {
   width: 12px;
   height: 12px;
@@ -308,6 +333,7 @@ input[type='checkbox'] {
 *::after {
   transition-property: background-color, border-color, color, box-shadow, fill, stroke;
 }
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

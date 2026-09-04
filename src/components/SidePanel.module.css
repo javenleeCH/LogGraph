@@ -6,7 +6,7 @@
   min-height: 0;
   overflow: hidden;
   gap: 1px;
-  background: var(--border);
+  background: var(--border-light);
 }
 
 /* 三段可折叠区块 */
@@ -14,7 +14,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--bg);
+  background: var(--bg-panel);
   overflow: hidden;
 }
 
@@ -32,45 +32,41 @@
   min-height: 60px;
 }
 
-/* 折叠态：只保留 header，固定高度（置于上述规则之后，同特异性后者生效） */
+/* 折叠态：只保留 header，固定高度 */
 .section.collapsed {
-  flex: 0 0 34px;
-  min-height: 34px;
+  flex: 0 0 36px !important;
+  min-height: 36px;
 }
 
 .sectionHeader {
   display: flex;
   align-items: center;
-  gap: 7px;
-  height: 34px;
-  padding: 0 8px;
-  flex: 0 0 34px;
-  background: var(--bg-elevated);
+  gap: 6px;
+  height: 36px;
+  padding: 0 10px;
+  flex: 0 0 36px;
+  background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   user-select: none;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  color: var(--text);
-  transition: background var(--transition-fast);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  transition: background 0.15s, color 0.15s;
 }
 
 .sectionHeader:hover {
   background: var(--bg-hover);
+  color: var(--text);
 }
 
 .caret {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 12px;
-  color: var(--text-dim);
-  flex: 0 0 12px;
-}
-
-.sectionIcon {
-  color: var(--text-dim);
-  flex: 0 0 auto;
+  font-size: 9px;
+  opacity: 0.6;
+  width: 10px;
+  color: var(--accent-light);
 }
 
 .sectionTitle {
@@ -79,37 +75,41 @@
 
 .sectionCount {
   flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--text-dim);
-  background: rgba(128, 128, 128, 0.16);
+  font-size: 10px;
+  opacity: 0.9;
+  background: var(--accent-soft);
+  color: var(--accent-light);
   padding: 0 6px;
-  border-radius: var(--radius-pill);
+  border-radius: 10px;
   line-height: 16px;
-  min-width: 18px;
-  text-align: center;
 }
 
 .spacer {
   flex: 1 1 auto;
 }
 
+/* 标题栏加号按钮：CSS 绘制细加号，精确居中，悬停渐变 */
 .addBtn {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: none;
-  background: rgba(128, 128, 128, 0.16);
-  color: var(--text);
+  position: relative;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
   width: 22px;
   height: 22px;
-  border-radius: var(--radius-sm);
+  border-radius: 7px;
   cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast);
+  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
+
 .addBtn:hover {
-  background: var(--accent);
+  background: var(--accent-grad);
   color: #fff;
+  border-color: transparent;
+  box-shadow: 0 2px 8px rgba(124, 92, 255, 0.4);
 }
 
 .sectionBody {
@@ -117,6 +117,7 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  padding: 3px 0;
 }
 
 /* ── Group 行 ── */
@@ -127,7 +128,7 @@
   padding: 5px 8px;
   border-left: 3px solid transparent;
   cursor: pointer;
-  transition: background var(--transition-fast);
+  transition: background 0.12s;
 }
 .groupRow:hover {
   background: var(--bg-hover);
@@ -142,7 +143,7 @@
   padding: 5px 8px;
   border-left: 3px solid transparent;
   cursor: pointer;
-  transition: background var(--transition-fast);
+  transition: background 0.12s;
 }
 .filterRow:hover {
   background: var(--bg-hover);
@@ -153,6 +154,7 @@
   width: 9px;
   height: 9px;
   border-radius: 50%;
+  box-shadow: 0 0 6px currentColor;
 }
 
 .rowLabel {
@@ -162,18 +164,19 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 60%;
+  color: var(--text);
 }
 
 .rowCount {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: 10px;
+  opacity: 0.9;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
   color: var(--text-dim);
-  background: rgba(128, 128, 128, 0.16);
-  padding: 0 5px;
-  border-radius: var(--radius-pill);
+  padding: 0 6px;
+  border-radius: 10px;
   line-height: 16px;
-  min-width: 16px;
-  text-align: center;
 }
 
 .rowTitleInput {
@@ -184,46 +187,40 @@
   color: var(--text);
   font-size: 12px;
   padding: 2px 4px;
-  border-radius: var(--radius-sm);
+  border-radius: 5px;
   outline: none;
 }
 .rowTitleInput:hover,
 .rowTitleInput:focus {
-  border-color: var(--border);
-  background: rgba(128, 128, 128, 0.08);
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
 }
 
-/* 操作按钮：常驻低透明度，行 hover 时高亮（提升可发现性） */
 .rowActions {
-  display: flex;
+  display: none;
   gap: 2px;
   margin-left: auto;
-  opacity: 0.35;
-  transition: opacity var(--transition-fast);
 }
-.groupRow:hover .rowActions,
-.filterRow:hover .rowActions {
-  opacity: 1;
+.groupRow:hover .rowActions {
+  display: flex;
 }
 
 .miniBtn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   border: none;
   background: transparent;
-  color: var(--text);
+  color: var(--text-dim);
   width: 22px;
   height: 22px;
-  border-radius: var(--radius-sm);
+  border-radius: 5px;
+  font-size: 12px;
   cursor: pointer;
-  opacity: 0.7;
-  transition: opacity var(--transition-fast), background var(--transition-fast);
-  padding: 0;
+  opacity: 0.6;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
 }
 .miniBtn:hover {
   opacity: 1;
-  background: rgba(128, 128, 128, 0.18);
+  background: var(--bg-elevated);
+  color: var(--accent-light);
 }
 
 .rowTags {
@@ -236,21 +233,24 @@
 
 .rowTag {
   font-size: 10px;
-  color: var(--text-dim);
+  opacity: 0.75;
   border: 1px solid var(--border);
-  padding: 0 4px;
-  border-radius: var(--radius-sm);
-  line-height: 14px;
+  color: var(--text-dim);
+  padding: 0 5px;
+  border-radius: 4px;
+  line-height: 15px;
   white-space: nowrap;
+  background: var(--bg-elevated);
 }
 
 .dim {
-  opacity: 0.45;
+  opacity: 0.4;
 }
 
 .emptyHint {
-  padding: 12px 8px;
+  padding: 10px 8px;
   font-size: 11px;
-  color: var(--text-faint);
+  opacity: 0.45;
   text-align: center;
+  color: var(--text-dim);
 }

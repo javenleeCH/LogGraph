@@ -1,10 +1,10 @@
-/* 节点画布视图（draw.io 风格两级导航） */
+/* 节点画布视图（draw.io 风格两级导航）— Dark Neo 主题 */
 
 .overlay {
   position: fixed;
   inset: 48px 0 0 0;
   z-index: 1000;
-  background: var(--bg-panel, #f5f6f8);
+  background: var(--bg);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -18,40 +18,41 @@
   gap: 10px;
   padding: 6px 12px;
   height: 38px;
-  background: var(--bg, #fff);
-  border-bottom: 1px solid var(--border, #e0e0e0);
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
   flex: 0 0 38px;
 }
 
 .title {
   font-weight: 600;
   font-size: 13px;
-  color: var(--text, #333);
+  color: var(--text);
 }
 
 .crumbs {
   font-size: 12px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
 }
 
 .hint {
   font-size: 11px;
-  color: var(--text-dim, #888);
+  color: var(--text-faint);
   white-space: nowrap;
-}
-
-.spacer {
-  flex: 1 1 auto;
 }
 
 .labelInput {
   font-size: 13px;
   padding: 3px 8px;
-  border: 1px solid var(--border, #d0d3d8);
-  border-radius: 4px;
-  background: var(--bg, #fff);
-  color: var(--text, #333);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
   width: 160px;
+}
+
+.labelInput:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 /* ===== 概览页 ===== */
@@ -80,17 +81,18 @@
 .sectionTitle {
   font-size: 14px;
   font-weight: 600;
-  color: var(--text, #333);
+  color: var(--text);
 }
 
 .sectionCount {
   font-size: 11px;
-  color: var(--text-dim, #888);
-  background: var(--bg-panel, #eceef1);
-  border-radius: 8px;
+  color: var(--text-dim);
+  background: var(--accent-soft);
+  border-radius: 10px;
   padding: 0 6px;
   min-width: 18px;
   text-align: center;
+  color: var(--accent-light);
 }
 
 .cardGrid {
@@ -103,14 +105,14 @@
 .groupCard,
 .filterCard {
   position: relative;
-  border: 1px solid var(--border, #d0d3d8);
+  border: 1px solid var(--border);
   border-left: 4px solid #ccc;
-  border-radius: var(--radius-lg, 8px);
-  background: var(--bg, #fff);
+  border-radius: 10px;
+  background: var(--bg-panel);
   padding: 10px 12px;
   cursor: pointer;
-  box-shadow: var(--shadow-sm, 0 1px 3px rgba(0, 0, 0, 0.05));
-  transition: box-shadow var(--transition, 0.15s), transform 0.05s;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  transition: box-shadow 0.15s, transform 0.05s, border-color 0.15s;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -118,7 +120,8 @@
 
 .groupCard:hover,
 .filterCard:hover {
-  box-shadow: var(--shadow-md, 0 2px 8px rgba(0, 0, 0, 0.12));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  border-color: var(--border-strong);
   transform: translateY(-1px);
 }
 
@@ -137,13 +140,14 @@
   height: 10px;
   border-radius: 50%;
   flex: 0 0 auto;
+  box-shadow: 0 0 6px currentColor;
 }
 
 .cardTitle {
   flex: 1;
   font-size: 13px;
   font-weight: 600;
-  color: var(--text, #333);
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -155,29 +159,30 @@
   min-width: 0;
   font-size: 13px;
   font-weight: 600;
-  color: var(--text, #333);
+  color: var(--text);
   border: 1px solid transparent;
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   padding: 1px 4px;
   outline: none;
 }
 
 .cardTitleInput:hover {
-  border-color: var(--border, #d0d3d8);
-  background: var(--bg-panel, #f7f8fa);
+  border-color: var(--border);
+  background: var(--bg-elevated);
 }
 
 .cardTitleInput:focus {
-  border-color: var(--accent, #1a73e8);
-  background: var(--bg, #fff);
+  border-color: var(--accent);
+  background: var(--bg);
 }
 
 .cardBadge {
   font-size: 11px;
-  color: var(--text-dim, #888);
-  background: var(--bg-panel, #f0f1f3);
-  border-radius: 8px;
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
   padding: 0 6px;
   min-width: 18px;
   text-align: center;
@@ -185,13 +190,13 @@
 
 .cardDesc {
   font-size: 11px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
 }
 
 .cardMono {
-  font-family: 'SF Mono', Consolas, 'Liberation Mono', monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   font-size: 11px;
-  color: var(--text-dim, #666);
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -206,10 +211,10 @@
 .cardTag {
   font-size: 10px;
   padding: 1px 6px;
-  border: 1px solid var(--border, #d0d3d8);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: var(--text-dim, #666);
-  background: var(--bg-panel, #f7f8fa);
+  color: var(--text-dim);
+  background: var(--bg-elevated);
 }
 
 .cardActions {
@@ -231,8 +236,8 @@
 .palette {
   width: 240px;
   flex: 0 0 240px;
-  background: var(--bg, #fff);
-  border-right: 1px solid var(--border, #e0e0e0);
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -242,13 +247,13 @@
   padding: 10px 12px 2px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--text, #333);
+  color: var(--text);
 }
 
 .paletteHint {
   padding: 0 12px 8px;
   font-size: 10px;
-  color: var(--text-dim, #aaa);
+  color: var(--text-faint);
 }
 
 .paletteList {
@@ -265,19 +270,20 @@
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  border: 1px solid var(--border, #e4e6ea);
+  border: 1px solid var(--border);
   border-left: 3px solid #ccc;
-  border-radius: 4px;
-  background: var(--bg, #fff);
+  border-radius: 7px;
+  background: var(--bg);
   font-size: 12px;
-  color: var(--text, #333);
+  color: var(--text);
   cursor: grab;
   user-select: none;
-  transition: background 0.1s;
+  transition: background 0.1s, border-color 0.1s;
 }
 
 .paletteItem:hover {
-  background: var(--bg-panel, #f0f2f5);
+  background: var(--bg-elevated);
+  border-color: var(--border-strong);
 }
 
 .paletteItem:active {
@@ -285,8 +291,8 @@
 }
 
 .paletteActive {
-  background: rgba(26, 115, 232, 0.08);
-  border-color: var(--accent, #1a73e8);
+  background: var(--accent-soft);
+  border-color: var(--accent);
 }
 
 .paletteDot {
@@ -294,6 +300,7 @@
   height: 8px;
   border-radius: 50%;
   flex: 0 0 auto;
+  box-shadow: 0 0 5px currentColor;
 }
 
 .paletteLabel {
@@ -306,20 +313,19 @@
 
 .paletteCount {
   font-size: 11px;
-  color: var(--text-dim, #888);
-  background: var(--bg-panel, #f0f1f3);
-  border-radius: 8px;
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
   padding: 0 5px;
   min-width: 16px;
   text-align: center;
 }
 
 .paletteCheck {
-  color: var(--accent, #1a73e8);
+  color: var(--accent-light);
   font-weight: 700;
   font-size: 13px;
-  display: inline-flex;
-  align-items: center;
 }
 
 /* ===== 画布区（pan/zoom 容器） ===== */
@@ -328,10 +334,10 @@
   position: relative;
   flex: 1 1 auto;
   overflow: hidden;
-  background: #fafbfc;
+  background: #0d1119;
   background-image:
-    linear-gradient(rgba(0, 0, 0, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 0, 0, 0.04) 1px, transparent 1px);
+    linear-gradient(rgba(148, 163, 184, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.06) 1px, transparent 1px);
   background-size: 20px 20px;
   cursor: grab;
 }
@@ -344,8 +350,8 @@
 .canvasIsGroup {
   border-left: 4px solid #ccc;
   background-image:
-    linear-gradient(rgba(0, 0, 0, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 0, 0, 0.03) 1px, transparent 1px);
+    linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.05) 1px, transparent 1px);
 }
 
 /* 画布标题条（group 名 + 计数） */
@@ -361,23 +367,24 @@
   color: #fff;
   font-size: 12px;
   font-weight: 600;
-  border-radius: 4px;
+  border-radius: 7px;
   pointer-events: none;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
 }
 
 /* ===== group 容器节点 ===== */
 
 .groupNode {
   position: absolute;
-  border: 2px solid var(--border, #c0c4cc);
+  border: 2px solid var(--border-strong);
   border-left-width: 4px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.65);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: rgba(17, 21, 31, 0.75);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  backdrop-filter: blur(4px);
 }
 
 .groupHeader {
@@ -422,7 +429,7 @@
   align-items: center;
   justify-content: center;
   font-size: 11px;
-  color: var(--text-dim, #aaa);
+  color: var(--text-faint);
   pointer-events: none;
 }
 
@@ -435,14 +442,14 @@
   gap: 4px;
   padding: 4px 6px;
   height: 36px;
-  border: 1px solid var(--border, #d0d3d8);
+  border: 1px solid var(--border-strong);
   border-left: 3px solid #ccc;
-  border-radius: 4px;
-  background: #fff;
+  border-radius: 7px;
+  background: var(--bg-elevated);
   font-size: 12px;
-  color: var(--text, #333);
+  color: var(--text);
   cursor: grab;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
   user-select: none;
 }
 
@@ -455,6 +462,7 @@
   height: 8px;
   border-radius: 50%;
   flex: 0 0 auto;
+  box-shadow: 0 0 5px currentColor;
 }
 
 .filterLabel {
@@ -467,9 +475,10 @@
 
 .filterCount {
   font-size: 11px;
-  color: var(--text-dim, #888);
-  background: var(--bg-panel, #f0f1f3);
-  border-radius: 8px;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
   padding: 0 5px;
   min-width: 16px;
   text-align: center;
@@ -477,7 +486,7 @@
 
 /* filter 节点悬停时显示的移除按钮 */
 .filterRemoveBtn {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: center;
   position: absolute;
@@ -493,9 +502,9 @@
   line-height: 1;
   cursor: pointer;
   opacity: 0;
-  transition: opacity var(--transition, 0.15s);
+  transition: opacity 0.12s;
   z-index: 10;
-  padding: 0;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
 
 .filterNode:hover .filterRemoveBtn {
@@ -503,7 +512,7 @@
 }
 
 .filterRemoveBtn:hover {
-  background: #b34d00;
+  background: #ef4444;
 }
 
 /* ===== Filter 详情弹窗 ===== */
@@ -512,7 +521,8 @@
   position: fixed;
   inset: 0;
   z-index: 1100;
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(4, 6, 10, 0.55);
+  backdrop-filter: blur(6px);
 }
 
 .modal {
@@ -524,9 +534,10 @@
   width: 360px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 64px);
-  background: var(--bg, #fff);
-  border-radius: 10px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -537,13 +548,13 @@
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--border, #e0e0e0);
+  border-bottom: 1px solid var(--border);
 }
 
 .modalTitle {
   font-size: 14px;
   font-weight: 600;
-  color: var(--text, #333);
+  color: var(--text);
 }
 
 .modalBody {
@@ -564,9 +575,9 @@
   width: 32px;
   height: 28px;
   padding: 0;
-  border: 1px solid var(--border, #d0d3d8);
-  border-radius: 4px;
-  background: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-elevated);
   cursor: pointer;
 }
 
@@ -574,11 +585,17 @@
   width: 100%;
   font-size: 12px;
   padding: 6px 8px;
-  border: 1px solid var(--border, #d0d3d8);
-  border-radius: 4px;
-  background: var(--bg, #fff);
-  color: var(--text, #333);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
   box-sizing: border-box;
+  outline: none;
+}
+
+.patternInput:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .error {
@@ -591,7 +608,7 @@
   flex-wrap: wrap;
   gap: 12px;
   font-size: 12px;
-  color: var(--text, #333);
+  color: var(--text);
 }
 
 .toggles label {
@@ -602,14 +619,14 @@
 }
 
 .modalSection {
-  border-top: 1px solid var(--border, #eaecef);
+  border-top: 1px solid var(--border);
   padding-top: 10px;
 }
 
 .modalSectionTitle {
   font-size: 12px;
   font-weight: 600;
-  color: var(--text, #333);
+  color: var(--text);
   margin-bottom: 8px;
 }
 
@@ -625,7 +642,7 @@
   gap: 6px;
   font-size: 12px;
   cursor: pointer;
-  color: var(--text, #333);
+  color: var(--text);
 }
 
 .groupColorDot {
@@ -633,6 +650,7 @@
   height: 10px;
   border-radius: 50%;
   flex: 0 0 auto;
+  box-shadow: 0 0 5px currentColor;
 }
 
 .groupCheckboxLabel {
@@ -644,7 +662,7 @@
   justify-content: flex-end;
   gap: 8px;
   padding: 10px 14px;
-  border-top: 1px solid var(--border, #e0e0e0);
+  border-top: 1px solid var(--border);
 }
 
 /* ===== 通用 ===== */
@@ -656,23 +674,24 @@
   min-width: 20px;
   height: 20px;
   padding: 0 4px;
-  border: 1px solid var(--border, #d0d3d8);
-  background: var(--bg, #fff);
-  color: var(--text-dim, #666);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
   font-size: 12px;
-  border-radius: var(--radius-sm, 3px);
+  border-radius: 5px;
   cursor: pointer;
   line-height: 1;
 }
 
 .miniBtn:hover {
-  background: var(--bg-panel, #f0f2f5);
-  color: var(--text, #333);
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-color: var(--border-strong);
 }
 
 .emptyHint {
   font-size: 12px;
-  color: var(--text-dim, #aaa);
+  color: var(--text-faint);
   padding: 16px;
   text-align: center;
 }

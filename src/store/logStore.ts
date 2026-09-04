@@ -32,16 +32,16 @@ function scheduleCorrRecompute(run: () => void) {
   });
 }
 
-// 色弱友好调色板（Okabe-Ito），8 色对所有色觉缺陷类型可区分；与 global.css 的 --track-* 同步
+// 浅色主题下调色板（颜色偏深，确保在白色背景上可见），循环使用
 const PALETTE = [
-  '#0072b2', // 蓝
-  '#009e73', // 蓝绿
-  '#e69f00', // 橙
-  '#d55e00', // 朱红（替代红）
-  '#cc79a7', // 紫红
-  '#56b4e9', // 天蓝
-  '#b5179e', // 品红
-  '#9c8a00', // 橄榄黄（白底高对比）
+  '#4ea2ff', // 蓝
+  '#34d399', // 绿
+  '#fb923c', // 橙
+  '#f87171', // 红
+  '#a78bfa', // 紫
+  '#22d3ee', // 青
+  '#f472b6', // 粉
+  '#a3e635', // 黄绿
 ];
 
 let filterSeq = 0;
@@ -740,14 +740,8 @@ export const useLogStore = create<LogState>((set, get) => ({
     if (!dir) return;
     persistDir = dir;
     set({ persistDirName: dir.name });
-    // 选择目录后：优先读取并加载目录中已有的 filters.json 配置；
-    // 若目录无配置（新建空目录），则把当前过滤器写一次作为初始持久化
-    const saved = await readFilters(dir);
-    if (saved && Array.isArray(saved.filters) && saved.filters.length > 0) {
-      await get().initPersistence();
-    } else {
-      await get().saveFiltersNow();
-    }
+    // 选择目录后立即把当前过滤器写一次
+    await get().saveFiltersNow();
   },
 
   saveFiltersNow: async () => {

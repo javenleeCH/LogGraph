@@ -1,4 +1,4 @@
- .wrap {
+.wrap {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -46,7 +46,7 @@
 }
 
 .headerInfo {
-  font-family: 'Roboto Mono', monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   color: var(--text-dim);
 }
 
@@ -75,24 +75,15 @@
 }
 
 .hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  white-space: nowrap;
-}
-
-.hint kbd {
-  font-family: 'Roboto Mono', monospace;
-  font-size: 9px;
-  font-weight: 600;
-  color: var(--text-dim);
-  background: var(--bg-elevated);
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  color: var(--text-faint);
   border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: var(--radius-sm);
-  padding: 0 4px;
-  line-height: 14px;
-  letter-spacing: 0.02em;
+  border-radius: 5px;
+  padding: 1px 6px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  background: var(--bg-elevated);
 }
 
 /* 列头（外层固定，高度 auto 让竖向 group 标题撑开；内部 inner 跟随横向滚动） */
@@ -127,6 +118,7 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   border-right: 1px solid var(--border);
+  background: var(--bg-panel);
 }
 
 .laneHeader {
@@ -138,10 +130,12 @@
   /* flex-basis 由 inline style 的 width 设定 */
   min-height: 30px;
   padding: 0 8px;
-  border-left: 3px solid var(--border);
+  border-left: 3px solid #999;
   border-right: 1px solid var(--border);
   overflow: hidden;
   box-sizing: border-box;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent),
+    var(--bg-panel);
 }
 
 .laneDot {
@@ -149,6 +143,7 @@
   height: 8px;
   border-radius: 50%;
   flex: 0 0 8px;
+  box-shadow: 0 0 6px currentColor;
 }
 
 .laneTitle {
@@ -162,7 +157,7 @@
 }
 
 .lanePattern {
-  font-family: 'Roboto Mono', monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   font-size: 10px;
   color: var(--text-faint);
   white-space: nowrap;
@@ -207,7 +202,7 @@
   flex: 0 0 28px;
   align-self: stretch;
   padding: 8px 0;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid rgba(0, 0, 0, 0.28);
   overflow: hidden;
   cursor: pointer;
   user-select: none;
@@ -215,7 +210,7 @@
   box-sizing: border-box;
 }
 .segHeader:hover {
-  filter: brightness(1.08);
+  filter: brightness(1.12);
 }
 
 /* 主体内 group 色条：sticky 钉在可视区顶部，纵向滚动时不跟随；固定 28px */
@@ -225,7 +220,7 @@
   position: sticky;
   top: 0;
   align-self: stretch;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid rgba(0, 0, 0, 0.28);
   z-index: 2;
   box-sizing: border-box;
 }
@@ -235,13 +230,14 @@
   height: 10px;
   border-radius: 50%;
   flex: 0 0 10px;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
 }
 
-/* 竖向文字（vertical-rl：中文从上往下正立）；文字色由 inline style 按背景亮度自动决定 */
+/* 竖向文字（vertical-rl：中文从上往下正立）；白字叠在实色背景上 */
 .segTitleV {
   font-size: 11px;
   font-weight: 700;
-  color: inherit;
+  color: #fff;
   writing-mode: vertical-rl;
   text-orientation: mixed;
   white-space: nowrap;
@@ -249,26 +245,25 @@
   text-overflow: ellipsis;
   max-height: 200px;
   flex: 0 1 auto;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
 .segCount {
   font-size: 10px;
   font-weight: 700;
-  color: inherit;
-  background: rgba(0, 0, 0, 0.22);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.25);
   padding: 0 4px;
-  border-radius: 7px;
+  border-radius: 8px;
   line-height: 14px;
   flex: 0 0 auto;
 }
 
 .segCaret {
   font-size: 11px;
-  color: inherit;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  color: #fff;
   flex: 0 0 auto;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 .segCols {
@@ -294,8 +289,8 @@
   cursor: col-resize;
   position: relative;
   z-index: 10;
-  background: var(--border);
-  transition: background var(--transition-fast);
+  background: #2a3346;
+  transition: background 0.12s;
 }
 
 /* 用伪元素扩大可点击区域（左右各延伸 4px） */
@@ -318,13 +313,13 @@
   width: 2px;
   height: 20px;
   border-radius: 1px;
-  background: rgba(255, 255, 255, 0.5);
-  opacity: 0.5;
-  transition: opacity var(--transition-fast);
+  background: rgba(255, 255, 255, 0.35);
+  opacity: 0.7;
+  transition: opacity 0.12s;
 }
 
 .colResizer:hover {
-  background: var(--accent);
+  background: var(--accent-grad);
 }
 
 .colResizer:hover::before {
@@ -353,7 +348,7 @@
 }
 
 .tickLabel {
-  font-family: 'Roboto Mono', monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   font-size: 11px;
   color: var(--accent-light);
   font-weight: 500;
@@ -366,7 +361,7 @@
 .tickLine {
   flex: 1 1 auto;
   height: 1px;
-  background: rgba(60, 64, 67, 0.12);
+  background: rgba(148, 163, 184, 0.16);
   margin-top: 8px;
 }
 
@@ -397,7 +392,7 @@
 }
 
 .laneRowAlt {
-  background: rgba(60, 64, 67, 0.035);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 /* 同时间多事件纵向堆叠 */
@@ -417,23 +412,25 @@
   gap: 5px;
   padding: 0 5px;
   box-sizing: border-box;
-  border-radius: 3px;
-  font-family: 'Roboto Mono', 'SFMono-Regular', Consolas, monospace;
+  border-radius: 5px;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   font-size: 11px;
   white-space: nowrap;
   cursor: pointer;
-  background: var(--event-bg);
+  background: rgba(255, 255, 255, 0.05);
   border-left: 2px solid transparent;
   overflow: hidden;
+  transition: background 0.1s;
 }
 
 .event:hover {
-  background: var(--event-bg-hover);
+  background: var(--accent-soft);
 }
 
 .eventSel {
-  background: var(--event-bg-sel);
+  background: var(--accent-soft);
   border-left-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .eventCorr {
@@ -451,7 +448,7 @@
   align-items: center;
   justify-content: center;
   padding: 0 3px;
-  border-radius: 2px;
+  border-radius: 3px;
   font-size: 8px;
   font-weight: 700;
   color: #fff;
@@ -480,11 +477,11 @@
 /* 模式切换按钮组 */
 .modeSwitch {
   display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
   overflow: hidden;
   flex: 0 0 auto;
-  background: var(--bg-panel);
+  background: var(--bg-elevated);
 }
 
 .modeBtn {
@@ -497,10 +494,7 @@
   border-right: 1px solid var(--border);
   line-height: 18px;
   font-family: inherit;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  transition: background var(--transition-fast), color var(--transition-fast);
+  transition: background 0.08s, color 0.08s;
 }
 
 .modeBtn:last-child {
@@ -508,17 +502,17 @@
 }
 
 .modeBtn:hover {
-  background: rgba(60, 64, 67, 0.06);
+  background: var(--bg-hover);
   color: var(--text);
 }
 
 .modeBtnActive {
-  background: var(--accent);
+  background: var(--accent-grad);
   color: #fff;
 }
 
 .modeBtnActive:hover {
-  background: var(--accent-light);
+  background: var(--accent-grad);
   color: #fff;
 }
 
@@ -528,7 +522,7 @@
   left: 0;
   right: 0;
   height: 1px;
-  background: rgba(60, 64, 67, 0.08);
+  background: rgba(148, 163, 184, 0.1);
   z-index: 0;
   pointer-events: none;
 }
@@ -544,11 +538,11 @@
 }
 
 .densityBar:hover {
-  filter: brightness(1.15);
+  filter: brightness(1.2);
 }
 
 .densityBarSel {
-  box-shadow: inset 0 0 0 1px rgba(26, 115, 232, 0.9);
+  box-shadow: inset 0 0 0 1px var(--accent);
   z-index: 1;
 }
 
@@ -562,39 +556,39 @@
   gap: 5px;
   padding: 0 5px 0 4px;
   box-sizing: border-box;
-  border-radius: 3px;
+  border-radius: 5px;
   height: 18px;
   line-height: 18px;
-  font-family: 'Roboto Mono', 'SFMono-Regular', Consolas, monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   font-size: 11px;
   white-space: nowrap;
   cursor: pointer;
-  background: var(--global-event-bg);
+  background: rgba(24, 30, 45, 0.95);
   border-left: 3px solid var(--ev-border, #999);
-  box-shadow: 0 1px 2px rgba(60, 64, 67, 0.14);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   overflow: hidden;
   z-index: 1;
   transition: background 0.08s, box-shadow 0.08s;
 }
 
 .globalEvent:hover {
-  background: var(--event-bg-hover);
+  background: var(--accent-soft);
   z-index: 5;
 }
 
 .globalEventHover {
-  background: var(--event-bg-hover);
+  background: var(--accent-soft);
   z-index: 5;
 }
 
 .globalEventSel {
-  background: var(--event-bg-sel);
-  box-shadow: 0 0 0 1.5px var(--accent), 0 2px 5px rgba(60, 64, 67, 0.22);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1.5px var(--accent), 0 2px 6px rgba(0, 0, 0, 0.45);
   z-index: 7;
 }
 
 .globalEventCorr {
-  box-shadow: 0 0 0 1.5px var(--warn), 0 1px 2px rgba(60, 64, 67, 0.14);
+  box-shadow: 0 0 0 1.5px var(--warn), 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 .globalEventSel.globalEventCorr {

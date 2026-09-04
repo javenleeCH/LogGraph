@@ -16,20 +16,22 @@
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   color: var(--text-dim);
-  background: var(--bg-panel);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent),
+    var(--bg-panel);
 }
 
 .detail-header .label {
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   color: var(--text-faint);
+  font-weight: 600;
 }
 
 .detail-header .ts {
   color: var(--accent-light);
   font-weight: 500;
-  font-family: 'Roboto Mono', monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
 }
 
 .detail-header .tag {
@@ -38,20 +40,19 @@
   gap: 4px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 2px 7px;
+  border-radius: 5px;
+  padding: 2px 8px;
   font-size: 11px;
-  font-family: 'Roboto Mono', monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   color: var(--text-dim);
 }
 
 .detail-header .tag.level {
   border-color: transparent;
-  font-weight: 600;
 }
 
 .detail-header .linenum {
-  font-family: 'Roboto Mono', monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   color: var(--text-dim);
 }
 
@@ -59,7 +60,7 @@
   flex: 1 1 auto;
   overflow: auto;
   padding: 4px 0;
-  font-family: 'Roboto Mono', 'SFMono-Regular', Consolas, monospace;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
   font-size: 12px;
   line-height: 1.6;
 }
@@ -73,7 +74,7 @@
 }
 
 .ctx-line:hover {
-  background: rgba(60, 64, 67, 0.05);
+  background: var(--bg-hover);
 }
 
 .ctx-line .lineno {
@@ -96,7 +97,7 @@
 }
 
 .ctx-line.selected {
-  background: rgba(26, 115, 232, 0.18);
+  background: var(--accent-soft);
   box-shadow: inset 3px 0 0 var(--accent);
   color: var(--text);
 }
@@ -108,7 +109,7 @@
 .ctx-line .level-tag {
   display: inline-block;
   padding: 0 4px;
-  border-radius: 2px;
+  border-radius: 3px;
   font-size: 10px;
   font-weight: 500;
   margin-right: 4px;
@@ -116,7 +117,7 @@
 }
 
 .detail-empty {
-  padding: 24px 16px;
+  padding: 14px 16px;
   color: var(--text-faint);
   text-align: center;
   font-size: 12px;

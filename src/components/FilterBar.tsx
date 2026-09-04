@@ -528,7 +528,7 @@ function GroupCreateModal({
   const modalRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const [label, setLabel] = useState('');
-  const [color, setColor] = useState('#1a73e8');
+  const [color, setColor] = useState('#7c5cff');
 
   useEffect(() => {
     const pw = 280;
