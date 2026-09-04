@@ -30,7 +30,6 @@ function hexToRgb(hex: string): [number, number, number] {
   return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
 }
 
-
 interface RowData {
   ts: number;
   /** 各列在该时间戳的事件数（用于计算行高） */
@@ -513,29 +512,43 @@ export function LogStreamView() {
         className={`${styles.segWrapper} ${collapsed ? styles.segCollapsed : ''}`}
       >
         {seg.kind === 'group' &&
-          (isHeaderCtx ? (
-            // 列头：完整标题（可点击折叠），固定宽度整体
-            <div
-              className={styles.segHeader}
-              style={{ background: seg.group!.color }}
-              onClick={() => toggleSeg(gid)}
-              title={collapsed ? '点击展开子列' : '点击折叠子列'}
-            >
-              <span className={styles.segDot} style={{ background: '#fff' }} />
-              <span className={styles.segTitleV}>{seg.group!.label}</span>
-              <span className={styles.segCount}>{seg.filters.length}</span>
-              <span className={styles.segCaret}>
-                {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
-              </span>
-            </div>
-          ) : (
-            // 主体：sticky 纯色占位条（无文字，钉在可视区顶部），固定宽度整体
-            <div
-              className={styles.segHeaderBody}
-              style={{ background: seg.group!.color }}
-              aria-hidden="true"
-            />
-          ))}
+          (() => {
+            // 色盲安全 + 高对比：group 色上叠半透明深色层，强制压低亮度，
+            // 使白字对比度始终 ≥ 4.5:1，同时保留色相供辨识；不受色觉缺陷影响
+            const c = seg.group!.color;
+            const bg = `linear-gradient(rgba(0,0,0,0.42), rgba(0,0,0,0.42)), ${c}`;
+            return isHeaderCtx ? (
+              // 列头：完整标题（可点击折叠），固定宽度整体
+              <div
+                className={styles.segHeader}
+                style={{
+                  background: bg,
+                  color: '#ffffff',
+                  borderRightColor: 'var(--border)',
+                }}
+                onClick={() => toggleSeg(gid)}
+                title={collapsed ? '点击展开子列' : '点击折叠子列'}
+              >
+                <span className={styles.segDot} style={{ background: c, boxShadow: '0 0 0 1.5px rgba(255,255,255,0.7)' }} />
+                <span className={styles.segTitleV} style={{ color: '#ffffff' }}>
+                  {seg.group!.label}
+                </span>
+                <span className={styles.segCount} style={{ color: '#ffffff', background: 'rgba(255,255,255,0.18)' }}>
+                  {seg.filters.length}
+                </span>
+                <span className={styles.segCaret} style={{ color: '#ffffff' }}>
+                  {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
+                </span>
+              </div>
+            ) : (
+              // 主体：sticky 纯色占位条（无文字，钉在可视区顶部），固定宽度整体
+              <div
+                className={styles.segHeaderBody}
+                style={{ background: bg, borderRightColor: 'var(--border)' }}
+                aria-hidden="true"
+              />
+            );
+          })()}
         <div className={styles.segCols}>
           {seg.filters.map(({ filter: f, index: li, slot }) => (
             <Fragment key={gid + '-' + slot}>

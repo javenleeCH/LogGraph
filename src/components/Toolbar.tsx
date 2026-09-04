@@ -1,5 +1,6 @@
 import { useRef } from 'react';
 import { useLogStore } from '../store/logStore';
+import { useTheme } from '../hooks/useTheme';
 import { loadFile } from '../io/fileLoader';
 import { LogParser } from '../parser/LogParser';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
@@ -12,6 +13,8 @@ import {
   Database,
   Save,
   Maximize,
+  Sun,
+  Moon,
 } from './Icon';
 import styles from './Toolbar.module.css';
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -35,6 +38,7 @@ export function Toolbar() {
   const chooseLogsDir = useLogStore((s) => s.chooseLogsDir);
   const splitOrientation = useLogStore((s) => s.splitOrientation);
   const setSplitOrientation = useLogStore((s) => s.setSplitOrientation);
+  const { theme, toggle } = useTheme();
 
   async function onFile(file: File) {
     try {
@@ -178,6 +182,15 @@ export function Toolbar() {
           全量
         </button>
       )}
+
+      <button
+        className="ghost"
+        onClick={toggle}
+        title={theme === 'dark' ? '切换到浅色主题' : '切换到暗黑主题'}
+        aria-label="切换主题"
+      >
+        {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+      </button>
     </div>
   );
 }

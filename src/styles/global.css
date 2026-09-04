@@ -1,26 +1,40 @@
 :root {
-  /* Light (Perfetto-light-inspired) palette */
+  /* Light (Perfetto-light-inspired) palette — 现代精致浅色 */
   --bg: #ffffff;             /* app background */
   --bg-panel: #f8f9fa;       /* top bar / detail */
-  --bg-elevated: #e8eaed;    /* buttons, inputs */
-  --bg-elevated-hover: #dde0e3; /* elevated hover (buttons, chips) */
+  --bg-elevated: #eef1f4;    /* buttons, inputs */
+  --bg-elevated-hover: #e1e5ea; /* elevated hover (buttons, chips) */
   --bg-canvas: #ffffff;      /* timeline canvas */
-  --bg-track: #f1f3f4;       /* track row */
-  --bg-track-alt: #f8f9fa;
+  --bg-track: #f4f6f8;       /* track row */
+  --bg-track-alt: #fafbfc;
   --bg-track-hover: #e8f0fe; /* hover row - light blue */
   --bg-hover: #f1f3f4;       /* generic hover (rows, items) */
   --border: #dadce0;
   --border-light: #e8eaed;
-  --text: #202124;           /* primary text - near black */
-  --text-dim: #5f6368;       /* secondary text */
+  --text: #1f2329;           /* primary text - near black */
+  --text-dim: #4e5969;       /* secondary text */
   --text-faint: #80868b;     /* AA-compliant on white (was #9aa0a6) */
   --accent: #1a73e8;         /* blue */
   --accent-light: #4285f4;
   --accent-dim: #d2e3fc;
+  --accent-contrast: #ffffff; /* accent 上的文字色 */
   --danger: #d55e00;        /* vermillion — color-blind safe "error" (was red) */
   --warn: #e69f00;           /* orange — caution */
   --ok: #009e73;             /* bluish green — color-blind safe (was green) */
+  --cta: #22c55e;           /* CTA green (run/成功) */
   --link: #1a73e8;
+
+  /* 交互态 */
+  --button-active: #d3d7dc;  /* button:active 背景 */
+  --ghost-hover: rgba(60, 64, 67, 0.08); /* ghost button hover */
+  --scrollbar-thumb: #c4c7c9;
+  --scrollbar-thumb-hover: #a8abb0;
+
+  /* 事件卡片背景 — 浅色：半透明白底 + 深字 */
+  --event-bg: rgba(255, 255, 255, 0.72);
+  --event-bg-hover: rgba(26, 115, 232, 0.10);
+  --event-bg-sel: rgba(26, 115, 232, 0.18);
+  --global-event-bg: rgba(255, 255, 255, 0.92);
 
   /* log level colors — color-blind safe (Okabe-Ito), UI + Canvas shared via constants.ts */
   --level-error: #d55e00;    /* vermillion (ERROR/FATAL/CRITICAL) */
@@ -47,23 +61,23 @@
   --space-5: 20px;
   --space-6: 24px;
 
-  /* radius */
-  --radius-sm: 3px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  /* radius — 更圆润现代 */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
   --radius-pill: 999px;
 
-  /* shadows */
-  --shadow-sm: 0 1px 2px rgba(60, 64, 67, 0.08);
-  --shadow-md: 0 2px 8px rgba(60, 64, 67, 0.12);
-  --shadow-lg: 0 8px 24px rgba(60, 64, 67, 0.18);
+  /* shadows — 更柔和分层 */
+  --shadow-sm: 0 1px 2px rgba(60, 64, 67, 0.06), 0 1px 3px rgba(60, 64, 67, 0.04);
+  --shadow-md: 0 4px 12px rgba(60, 64, 67, 0.1), 0 2px 4px rgba(60, 64, 67, 0.06);
+  --shadow-lg: 0 12px 32px rgba(60, 64, 67, 0.16), 0 4px 8px rgba(60, 64, 67, 0.08);
 
   /* focus ring */
-  --focus-ring: 0 0 0 2px rgba(26, 115, 232, 0.35);
+  --focus-ring: 0 0 0 2px rgba(26, 115, 232, 0.4);
 
   /* transitions */
-  --transition-fast: 0.1s ease;
-  --transition: 0.15s ease;
+  --transition-fast: 0.12s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 
   /* timeline layout metrics */
   --track-header-w: 200px;
@@ -73,8 +87,76 @@
   --minimap-h: 44px;
 
   color-scheme: light;
-  font-family: 'Roboto', -apple-system, BlinkMacSystemFont,
-    'Segoe UI', 'Microsoft YaHei', Arial, sans-serif;
+  /* 字体：Fira Sans(UI) + Fira Code(等宽) + 中文回退 */
+  --font-ui: 'Fira Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Microsoft YaHei', 'PingFang SC', 'Hiragino Sans GB', Arial, sans-serif;
+  --font-mono: 'Fira Code', 'SFMono-Regular', Consolas, 'Liberation Mono',
+    'Microsoft YaHei', Menlo, monospace;
+  font-family: var(--font-ui);
+}
+
+/* ===== 暗黑主题（默认）—— Code dark + run green =====
+   ui-ux-pro-max 推荐：bg #0F172A / panel #1E293B / elevated #334155 / text #F8FAFC */
+:root[data-theme='dark'] {
+  --bg: #0f172a;            /* app background — slate-900 */
+  --bg-panel: #1e293b;      /* top bar / detail — slate-800 */
+  --bg-elevated: #334155;   /* buttons, inputs — slate-700 */
+  --bg-elevated-hover: #3f4a5e; /* elevated hover */
+  --bg-canvas: #0b1020;     /* timeline canvas — 更深 */
+  --bg-track: #1a2436;      /* track row */
+  --bg-track-alt: #16203300;
+  --bg-track-hover: #1e3a5f; /* hover row - 蓝 */
+  --bg-hover: #1e293b;      /* generic hover */
+  --border: #334155;
+  --border-light: #283447;
+  --text: #f8fafc;          /* primary text — slate-50 */
+  --text-dim: #94a3b8;      /* secondary text — slate-400 */
+  --text-faint: #64748b;     /* slate-500 */
+  --accent: #3b82f6;         /* blue-500（暗底下更亮） */
+  --accent-light: #60a5fa;
+  --accent-dim: #1e3a5f;
+  --accent-contrast: #ffffff;
+  --cta: #22c55e;           /* CTA green */
+  --link: #60a5fa;
+
+  /* 交互态（暗底） */
+  --button-active: #475569;  /* slate-600 */
+  --ghost-hover: rgba(148, 163, 184, 0.12);
+  --scrollbar-thumb: #475569;
+  --scrollbar-thumb-hover: #64748b;
+
+  /* 事件卡片背景 — 暗底：半透明深底 + 白字（与浅色相反） */
+  --event-bg: rgba(15, 23, 42, 0.72);
+  --event-bg-hover: rgba(59, 130, 246, 0.20);
+  --event-bg-sel: rgba(59, 130, 246, 0.30);
+  --global-event-bg: rgba(26, 36, 54, 0.92);
+
+  /* log level — 暗底提亮版本 */
+  --level-error: #ff7b42;
+  --level-warn: #ffb02e;
+  --level-info: #4dabf7;
+  --level-debug: #2dd4a7;
+  --level-trace: #e07bb0;
+
+  /* track palette — 暗底提亮 */
+  --track-blue: #4dabf7;
+  --track-green: #2dd4a7;
+  --track-orange: #ffb02e;
+  --track-red: #ff7b42;
+  --track-purple: #e07bb0;
+  --track-cyan: #7dd3fc;
+  --track-pink: #ec6bd0;
+  --track-lime: #d4b341;
+
+  /* shadows — 暗底用更深阴影 + 微光晕 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5), 0 4px 8px rgba(0, 0, 0, 0.3);
+
+  /* focus ring */
+  --focus-ring: 0 0 0 2px rgba(59, 130, 246, 0.5);
+
+  color-scheme: dark;
 }
 
 * {
@@ -92,8 +174,11 @@ body {
   background: var(--bg);
   color: var(--text);
   font-size: 13px;
+  font-family: var(--font-ui);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
+  transition: background var(--transition), color var(--transition);
 }
 
 #root {
@@ -123,7 +208,7 @@ button:hover {
 }
 
 button:active {
-  background: #cfd2d5;
+  background: var(--button-active);
 }
 
 button:focus-visible {
@@ -138,7 +223,7 @@ button:disabled {
 
 button.primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-contrast);
 }
 
 button.primary:hover {
@@ -151,7 +236,7 @@ button.ghost {
 }
 
 button.ghost:hover {
-  background: rgba(60, 64, 67, 0.08);
+  background: var(--ghost-hover);
 }
 
 input[type='text'],
@@ -192,13 +277,13 @@ input[type='checkbox'] {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c4c7c9;
+  background: var(--scrollbar-thumb);
   border-radius: var(--radius-pill);
   border: 3px solid var(--bg);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #a8abb0;
+  background: var(--scrollbar-thumb-hover);
 }
 
 ::-webkit-scrollbar-corner {
@@ -206,6 +291,19 @@ input[type='checkbox'] {
 }
 
 .mono {
-  font-family: 'Roboto Mono', 'SFMono-Regular', Consolas, 'Liberation Mono',
-    Menlo, monospace;
+  font-family: var(--font-mono);
+}
+
+/* 主题切换：所有元素颜色属性平滑过渡；尊重 prefers-reduced-motion */
+*,
+*::before,
+*::after {
+  transition-property: background-color, border-color, color, box-shadow, fill, stroke;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
 }

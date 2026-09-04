@@ -6,9 +6,21 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@300;400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+    <script>
+      // 主题早期注入，避免 FOUC（闪烁）
+      (function () {
+        try {
+          var t = localStorage.getItem('loggraph-theme');
+          if (!t) t = 'dark'; // 默认暗黑
+          document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
     <title>logGraph — 日志时间线分析器</title>
   </head>
   <body>

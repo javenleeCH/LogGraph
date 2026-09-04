@@ -1,46 +1,49 @@
 {
   "filters": [
     {
-      "id": "f1788433868736_0",
+      "id": "f1788488224147_2",
       "label": "Filter 1",
       "color": "#0072b2",
       "pattern": "INFO  Schema migration step",
       "isRegex": false,
       "caseSensitive": false,
       "enabled": true,
-      "scope": "raw"
+      "scope": "raw",
+      "groupId": null
     },
     {
-      "id": "f1788433894393_1",
+      "id": "f1788488224147_3",
       "label": "Filter 2",
       "color": "#009e73",
-      "pattern": "",
+      "pattern": "INFO  Deadlock resolved after retry",
       "isRegex": false,
       "caseSensitive": false,
       "enabled": true,
-      "scope": "raw"
+      "scope": "raw",
+      "groupId": null
     }
   ],
   "groups": [
     {
-      "id": "g1788433866552_0",
+      "id": "g1788488224147_2",
       "label": "Group 1",
       "color": "#0072b2",
       "collapsed": false,
       "visible": true,
       "filterIds": [
-        "f1788433868736_0"
+        "f1788488224147_2"
       ]
     },
     {
-      "id": "g1788433892049_1",
+      "id": "g1788488224147_3",
       "label": "Group 2",
       "color": "#009e73",
       "collapsed": false,
       "visible": true,
-      "filterIds": []
+      "filterIds": [
+        "f1788488224147_3"
+      ]
     }
   ],
-  "graphNodes": {},
-  "savedAt": 1788433894802
+  "savedAt": 1788488225858
 }

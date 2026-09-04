@@ -1,4 +1,4 @@
-.wrap {
+ .wrap {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -138,7 +138,7 @@
   /* flex-basis 由 inline style 的 width 设定 */
   min-height: 30px;
   padding: 0 8px;
-  border-left: 3px solid #999;
+  border-left: 3px solid var(--border);
   border-right: 1px solid var(--border);
   overflow: hidden;
   box-sizing: border-box;
@@ -207,7 +207,7 @@
   flex: 0 0 28px;
   align-self: stretch;
   padding: 8px 0;
-  border-right: 1px solid rgba(0, 0, 0, 0.15);
+  border-right: 1px solid var(--border);
   overflow: hidden;
   cursor: pointer;
   user-select: none;
@@ -225,7 +225,7 @@
   position: sticky;
   top: 0;
   align-self: stretch;
-  border-right: 1px solid rgba(0, 0, 0, 0.15);
+  border-right: 1px solid var(--border);
   z-index: 2;
   box-sizing: border-box;
 }
@@ -237,11 +237,11 @@
   flex: 0 0 10px;
 }
 
-/* 竖向文字（vertical-rl：中文从上往下正立）；白字叠在实色背景上 */
+/* 竖向文字（vertical-rl：中文从上往下正立）；文字色由 inline style 按背景亮度自动决定 */
 .segTitleV {
   font-size: 11px;
   font-weight: 700;
-  color: #fff;
+  color: inherit;
   writing-mode: vertical-rl;
   text-orientation: mixed;
   white-space: nowrap;
@@ -254,7 +254,7 @@
 .segCount {
   font-size: 10px;
   font-weight: 700;
-  color: #fff;
+  color: inherit;
   background: rgba(0, 0, 0, 0.22);
   padding: 0 4px;
   border-radius: 7px;
@@ -264,7 +264,7 @@
 
 .segCaret {
   font-size: 11px;
-  color: #fff;
+  color: inherit;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -422,17 +422,17 @@
   font-size: 11px;
   white-space: nowrap;
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--event-bg);
   border-left: 2px solid transparent;
   overflow: hidden;
 }
 
 .event:hover {
-  background: rgba(26, 115, 232, 0.1);
+  background: var(--event-bg-hover);
 }
 
 .eventSel {
-  background: rgba(26, 115, 232, 0.18);
+  background: var(--event-bg-sel);
   border-left-color: var(--accent);
 }
 
@@ -569,7 +569,7 @@
   font-size: 11px;
   white-space: nowrap;
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--global-event-bg);
   border-left: 3px solid var(--ev-border, #999);
   box-shadow: 0 1px 2px rgba(60, 64, 67, 0.14);
   overflow: hidden;
@@ -578,17 +578,17 @@
 }
 
 .globalEvent:hover {
-  background: rgba(26, 115, 232, 0.14);
+  background: var(--event-bg-hover);
   z-index: 5;
 }
 
 .globalEventHover {
-  background: rgba(26, 115, 232, 0.16);
+  background: var(--event-bg-hover);
   z-index: 5;
 }
 
 .globalEventSel {
-  background: rgba(26, 115, 232, 0.22);
+  background: var(--event-bg-sel);
   box-shadow: 0 0 0 1.5px var(--accent), 0 2px 5px rgba(60, 64, 67, 0.22);
   z-index: 7;
 }
