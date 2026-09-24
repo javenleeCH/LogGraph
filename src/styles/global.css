@@ -22,6 +22,10 @@
   --accent-light: #4285f4;
   --accent-dim: #d2e3fc;
   --accent-contrast: #ffffff;
+  /* 浅色渐变令牌：与深色同名，避免 background: var(--accent-grad) 在浅色下
+     解析失败退化为透明背景（白字看不见） */
+  --accent-2: #56b4e9;
+  --accent-grad: linear-gradient(135deg, #1a73e8 0%, #56b4e9 100%);
   --danger: #d55e00;
   --warn: #e69f00;
   --ok: #009e73;

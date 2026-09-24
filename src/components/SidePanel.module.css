@@ -88,13 +88,16 @@
   flex: 1 1 auto;
 }
 
-/* 标题栏加号按钮：CSS 绘制细加号，精确居中，悬停渐变 */
+/* 标题栏加号按钮：<Plus/> 图标居中，悬停渐变。
+   必须显式 padding: 0 —— 全局 button 有 padding: 5px 12px，
+   22px 定宽按钮的内容区会被挤成 0，SVG 图标被压缩到宽度 0 而消失 */
 .addBtn {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   position: relative;
+  padding: 0;
   border: 1px solid var(--border);
   background: var(--bg-elevated);
   color: var(--text-dim);
@@ -211,6 +214,7 @@
   color: var(--text-dim);
   width: 22px;
   height: 22px;
+  padding: 0;
   border-radius: 5px;
   font-size: 12px;
   cursor: pointer;
