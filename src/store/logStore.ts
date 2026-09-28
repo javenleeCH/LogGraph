@@ -4,8 +4,9 @@
  */
 
 import { create } from 'zustand';
-import type { Filter, FilterGroup, FilterMatch, LogEvent, NodePos, TimeRange } from '../types';
+import type { Filter, FilterGroup, FilterMatch, LogEvent, NodePos, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
 import { FilterEngine } from '../filters/FilterEngine';
+import { runSequenceMatching } from '../sequence/SequenceMatcher';
 import {
   pickDirectory,
   getSavedDirectory,
@@ -49,6 +50,9 @@ const genFilterId = () => `f${Date.now()}_${filterSeq++}`;
 
 let groupSeq = 0;
 const genGroupId = () => `g${Date.now()}_${groupSeq++}`;
+
+let edgeSeq = 0;
+const genEdgeId = () => `e${Date.now()}_${edgeSeq++}`;
 
 // ---- 过滤器持久化（File System Access API） ----
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -104,6 +108,26 @@ interface LogState {
   addFilterToGroup: (filterId: string, groupId: string) => void;
   removeFilterFromGroup: (filterId: string, groupId: string) => void;
   reorderGroup: (id: string, toIndex: number) => void;
+
+  // --- 序列图关联（group 内 filter 串行时序） ---
+  /** 各 group 的序列匹配结果（groupId → result；未配置/无边的 group 不在内） */
+  sequenceResults: Record<string, SequenceMatchResult>;
+  recomputeSequences: () => void;
+  addSequenceEdge: (
+    groupId: string,
+    fromFilterId: string,
+    toFilterId: string,
+    maxGapMs?: number,
+    opts?: { kind?: SequenceEdge['kind']; toFilterIds?: string[]; periodMs?: number },
+  ) => string;
+  updateSequenceEdge: (
+    groupId: string,
+    edgeId: string,
+    patch: Partial<SequenceEdge>,
+  ) => void;
+  removeSequenceEdge: (groupId: string, edgeId: string) => void;
+  toggleSequenceAnomaly: (groupId: string) => void;
+  setSequenceScope: (groupId: string, scope: 'global' | 'thread') => void;
 
   // --- 节点画布（draw.io 风格区域式） ---
   /** 当前展开的 group 详情页（null=关闭抽屉） */
@@ -207,6 +231,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   matches: [],
   groups: [],
   collapsedGroups: new Set(),
+  sequenceResults: {},
 
   viewRange: null,
   fullRange: null,
@@ -456,14 +481,123 @@ export const useLogStore = create<LogState>((set, get) => ({
     schedulePersist(get);
   },
 
+  // ---- 序列图关联（group 内 filter 串行时序） ----
+
+  /** 重算所有 group 的序列匹配（依赖 matches + groups.sequence） */
+  recomputeSequences: () => {
+    const { groups, matches } = get();
+    const results = runSequenceMatching(groups, matches);
+    // 引用不变时避免无谓 set（runSequenceMatching 每次新对象，简单比较）
+    set({ sequenceResults: results });
+  },
+
+  addSequenceEdge: (groupId, fromFilterId, toFilterId, maxGapMs, opts) => {
+    const kind = opts?.kind ?? 'seq';
+    // periodic 允许自环；其余不允许 from === to 单目标
+    if (kind !== 'periodic' && fromFilterId === toFilterId) return '';
+    const newTargets =
+      kind === 'and' || kind === 'or'
+        ? (opts?.toFilterIds?.length ? opts.toFilterIds : [toFilterId]).slice().sort()
+        : null;
+    const groups = get().groups.map((g) => {
+      if (g.id !== groupId) return g;
+      const seq = g.sequence ?? { edges: [], anomalyEnabled: false };
+      // 去重：同 from + 同 kind + 同目标集合（periodic 只看 from+kind）
+      const dup = seq.edges.some((e) => {
+        if (e.fromFilterId !== fromFilterId || (e.kind ?? 'seq') !== kind) return false;
+        if (kind === 'periodic') return true;
+        const eTargets =
+          (kind === 'and' || kind === 'or') && e.toFilterIds?.length
+            ? [...e.toFilterIds].sort()
+            : [e.toFilterId];
+        return JSON.stringify(eTargets) === JSON.stringify(newTargets);
+      });
+      if (dup) return g;
+      const edge: SequenceEdge = {
+        id: genEdgeId(),
+        fromFilterId,
+        toFilterId,
+        ...(kind !== 'seq' ? { kind } : {}),
+        ...(newTargets && newTargets.length > 1 ? { toFilterIds: newTargets } : {}),
+        maxGapMs: maxGapMs ?? 1000,
+        ...(kind === 'periodic' ? { periodMs: opts?.periodMs ?? 1000 } : {}),
+      };
+      return { ...g, sequence: { ...seq, edges: [...seq.edges, edge] } };
+    });
+    set({ groups });
+    get().recomputeSequences();
+    schedulePersist(get);
+    const g = get().groups.find((x) => x.id === groupId);
+    const edge = g?.sequence?.edges.find(
+      (e) => e.fromFilterId === fromFilterId && (e.kind ?? 'seq') === kind,
+    );
+    return edge?.id ?? '';
+  },
+
+  updateSequenceEdge: (groupId, edgeId, patch) => {
+    const groups = get().groups.map((g) => {
+      if (g.id !== groupId || !g.sequence) return g;
+      return {
+        ...g,
+        sequence: {
+          ...g.sequence,
+          edges: g.sequence.edges.map((e) =>
+            e.id === edgeId ? { ...e, ...patch } : e,
+          ),
+        },
+      };
+    });
+    set({ groups });
+    get().recomputeSequences();
+    schedulePersist(get);
+  },
+
+  removeSequenceEdge: (groupId, edgeId) => {
+    const groups = get().groups.map((g) => {
+      if (g.id !== groupId || !g.sequence) return g;
+      return {
+        ...g,
+        sequence: {
+          ...g.sequence,
+          edges: g.sequence.edges.filter((e) => e.id !== edgeId),
+        },
+      };
+    });
+    set({ groups });
+    get().recomputeSequences();
+    schedulePersist(get);
+  },
+
+  toggleSequenceAnomaly: (groupId) => {
+    const groups = get().groups.map((g) => {
+      if (g.id !== groupId) return g;
+      const seq = g.sequence ?? { edges: [], anomalyEnabled: false };
+      return { ...g, sequence: { ...seq, anomalyEnabled: !seq.anomalyEnabled } };
+    });
+    set({ groups });
+    schedulePersist(get);
+  },
+
+  setSequenceScope: (groupId, scope) => {
+    const groups = get().groups.map((g) => {
+      if (g.id !== groupId) return g;
+      const seq = g.sequence ?? { edges: [], anomalyEnabled: false };
+      return { ...g, sequence: { ...seq, scope } };
+    });
+    set({ groups });
+    get().recomputeSequences();
+    schedulePersist(get);
+  },
+
   recomputeMatches: () => {
     const { events, filters } = get();
     if (events.length === 0 || filters.length === 0) {
-      set({ matches: [], correlatedEventIds: new Set() });
+      set({ matches: [], correlatedEventIds: new Set(), sequenceResults: {} });
       return;
     }
     const matches = FilterEngine.run(events, filters);
     set({ matches });
+    get().recomputeSequences();
     get().recomputeCorrelations();
   },
 

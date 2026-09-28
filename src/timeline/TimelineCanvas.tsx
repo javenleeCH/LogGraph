@@ -14,6 +14,8 @@ import {
   drawMinimap,
   drawGroupHeader,
   drawGroupDensity,
+  drawSequenceLinks,
+  drawSequenceDecorations,
   readVar,
   refreshPalette,
   type RenderContext,
@@ -134,6 +136,7 @@ export function TimelineCanvas() {
       hoveredEventId,
       scrubberTs,
       correlatedEventIds,
+      sequenceResults,
     } = st;
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -183,10 +186,54 @@ export function TimelineCanvas() {
 
     drawAxis(rc, fullRange);
 
+    // 序列链预计算：本行 filter 相关的链事件集合/异常集合/链号查询
+    //（按 group 展开结构，只给组内 filter 行传对应组的数据）
+    const chainDataOf = (fid: string) => {
+      for (const g of groups) {
+        if (!g.filterIds.includes(fid)) continue;
+        const r = sequenceResults[g.id];
+        if (!r) continue;
+        const chainIds = new Set<number>();
+        const chainIdx = new Map<number, number>();
+        for (const ch of r.chains) {
+          for (const stp of ch.steps) {
+            if (stp.filterId !== fid) continue;
+            chainIds.add(stp.event.id);
+            if (!chainIdx.has(stp.event.id)) chainIdx.set(stp.event.id, ch.chainIndex);
+          }
+        }
+        const anomalyIds = g.sequence?.anomalyEnabled
+          ? new Set(r.uncoveredEvents.map((u) => u.id))
+          : null;
+        // NOT 违规事件（from 与 to 都标红）
+        const violationIds = new Set<number>();
+        for (const v of r.notViolations) {
+          violationIds.add(v.fromEvent.id);
+          violationIds.add(v.toEvent.id);
+        }
+        // periodic 抖动事件（黄框）
+        const jitterIds = new Set<number>();
+        for (const hb of r.heartbeats) {
+          if (hb.filterId !== fid) continue;
+          for (const jt of hb.jitters) jitterIds.add(jt.ts); // 注：按 ts 存，事件标记时用 ts 匹配
+        }
+        return {
+          chainIds,
+          chainColor: g.color,
+          chainIndexOf: (id: number) => chainIdx.get(id) ?? null,
+          anomalyIds,
+          violationIds,
+          jitterTs: jitterIds,
+        };
+      }
+      return null;
+    };
+
     // 遍历可见行绘制（group-header / filter / group-density）
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       if (row.kind === 'group-header') {
+        const sr = sequenceResults[row.group.id];
         drawGroupHeader(
           rc,
           row.group,
@@ -194,6 +241,13 @@ export function TimelineCanvas() {
           row.height,
           row.childCount,
           i === hoveredRowIdx,
+          sr
+            ? {
+                chains: sr.chains.length,
+                anomalies: sr.uncoveredEvents.length,
+                anomalyEnabled: row.group.sequence?.anomalyEnabled ?? false,
+              }
+            : null,
         );
       } else if (row.kind === 'group-density') {
         drawGroupDensity(
@@ -217,6 +271,7 @@ export function TimelineCanvas() {
           evs.length,
           i === hoveredRowIdx,
         );
+        const cd = chainDataOf(row.filter.id);
         drawLaneEventsAt(
           rc,
           row.filter,
@@ -226,9 +281,20 @@ export function TimelineCanvas() {
           selectedEventId,
           hoveredEventId,
           correlatedEventIds,
+          cd?.chainIds ?? null,
+          cd?.anomalyIds ?? null,
+          cd?.chainColor ?? null,
+          cd?.chainIndexOf ?? null,
+          cd?.violationIds ?? null,
+          cd?.jitterTs ?? null,
         );
       }
     }
+
+    // 序列链跨 lane 箭头连线（在事件之上、游标之下）
+    drawSequenceLinks(rc, rows, groups, sequenceResults);
+    // NOT 违规红线 + periodic 段/缺口/抖动标记
+    drawSequenceDecorations(rc, rows, groups, sequenceResults);
 
     const centerTs =
       selectedEventId !== null

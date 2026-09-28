@@ -31,6 +31,11 @@
   --ok: #009e73;
   --cta: #22c55e;
   --link: #1a73e8;
+  --border-strong: #b6bcc4;
+  --accent-soft: rgba(26, 115, 232, 0.12);
+  --canvas-grid: rgba(60, 64, 67, 0.08);
+  --node-bg: rgba(255, 255, 255, 0.85);
+  --overlay-dim: rgba(30, 32, 36, 0.45);
 
   --button-active: #d3d7dc;
   --ghost-hover: rgba(60, 64, 67, 0.08);
@@ -122,6 +127,11 @@
   --ok: #34d399;
   --cta: #34d399;
   --link: #8ab4f8;
+  --border-strong: #3b4660;
+  --accent-soft: rgba(124, 92, 255, 0.15);
+  --canvas-grid: rgba(148, 163, 184, 0.06);
+  --node-bg: rgba(17, 21, 31, 0.75);
+  --overlay-dim: rgba(4, 6, 10, 0.55);
 
   --button-active: rgba(124, 92, 255, 0.25);
   --ghost-hover: rgba(255, 255, 255, 0.06);

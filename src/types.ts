@@ -50,6 +50,8 @@ export interface FilterGroup {
   visible: boolean;
   /** 组内 filter 引用列表（多对多：一个 filter 可属于多个 group） */
   filterIds: string[];
+  /** 串行序列关系配置；undefined=未配置（不参与匹配） */
+  sequence?: SequenceConfig;
 }
 
 /** 过滤器与其匹配到的事件集合 */
@@ -57,6 +59,100 @@ export interface FilterMatch {
   filterId: string;
   /** 按 ts 升序排列的匹配事件 */
   events: LogEvent[];
+}
+
+// ===== 串行序列匹配（group 图关联）=====
+
+/** 边类型（缺省 'seq'，v1 数据向后兼容） */
+export type EdgeKind = 'seq' | 'not' | 'and' | 'or' | 'periodic';
+
+/** 序列边：group 内 filter 间的时序约束 */
+export interface SequenceEdge {
+  id: string;
+  fromFilterId: string;
+  /** seq/not：单一目标；and/or：以 toFilterIds 为准（非空时优先） */
+  toFilterId: string;
+  /** and/or 专用：多目标列表 */
+  toFilterIds?: string[];
+  /** 边类型，缺省 'seq' */
+  kind?: EdgeKind;
+  /**
+   * seq/not/and/or：目标须在 (tsA, tsA+maxGapMs] 内；
+   * periodic：期望周期 P 的容差 δ（间隔 ∈ [P-δ, P+δ] 为正常）
+   */
+  maxGapMs: number;
+  /** periodic 专用：期望周期毫秒 */
+  periodMs?: number;
+}
+
+/** group 的序列匹配配置（挂在 FilterGroup 上） */
+export interface SequenceConfig {
+  edges: SequenceEdge[];
+  /** 异常开关：开启后未覆盖事件在视图中标红 */
+  anomalyEnabled: boolean;
+  /** 匹配作用域：global=全局时间轴（默认）；thread=按 thread 字段分桶隔离 */
+  scope?: 'global' | 'thread';
+}
+
+/** 一条完整匹配链（链上各步按时间序，与边一一对应） */
+export interface MatchedChain {
+  /** 递增链号（同一 group 内唯一，视图角标用） */
+  chainIndex: number;
+  /** 各步：第 0 步只有 filterId+event，后续步带进入它的边 */
+  steps: { edgeId: string | null; filterId: string; event: LogEvent }[];
+  startTs: number;
+  endTs: number;
+  /** 该链所属会话（scope='thread' 时的 thread 值；global 为 null） */
+  thread?: string | null;
+}
+
+/** 单条边的命中统计 */
+export interface SequenceEdgeStat {
+  edgeId: string;
+  /** 成功推进次数（作为某链中的一步被消耗） */
+  matchedCount: number;
+  /** 从源事件出发在窗口内找不到目标事件的断裂次数 */
+  missCount: number;
+  /** periodic 专用：间隔超期次数（心跳延迟/缺失） */
+  lateCount?: number;
+  /** periodic 专用：间隔过密次数（抖动） */
+  jitterCount?: number;
+}
+
+/** NOT 边违规：A 的窗口内出现了禁止的 B */
+export interface NotViolation {
+  edgeId: string;
+  /** 违规的源事件（A） */
+  fromEvent: LogEvent;
+  /** 违规目标事件（B） */
+  toEvent: LogEvent;
+}
+
+/** period 心跳断言结果（一组连续心跳 + 异常） */
+export interface HeartbeatGroup {
+  filterId: string;
+  thread?: string | null;
+  /** 连续心跳段的 [startTs, endTs]（间隔均在容差内） */
+  segments: { startTs: number; endTs: number }[];
+  /** 异常缺口：期望心跳时刻附近无心跳 */
+  gaps: { afterTs: number; expectedTs: number }[];
+  /** 异常抖动：间隔 < P-δ 的相邻对 */
+  jitters: { ts: number; interval: number }[];
+}
+
+/** group 的序列匹配结果 */
+export interface SequenceMatchResult {
+  groupId: string;
+  /** 完整匹配链（按 startTs 升序） */
+  chains: MatchedChain[];
+  /** 未被任何链覆盖的组内事件（异常候选） */
+  uncoveredEvents: LogEvent[];
+  /** 每条边命中统计 */
+  edgeStats: SequenceEdgeStat[];
+  /** NOT 边违规列表 */
+  notViolations: NotViolation[];
+  /** periodic 心跳断言（仅当组内有 periodic 边时非空） */
+  heartbeats: HeartbeatGroup[];
 }
 
 // ===== 节点画布（draw.io 风格区域式画布）=====

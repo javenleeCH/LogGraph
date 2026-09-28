@@ -594,3 +594,49 @@
 .globalEventSel.globalEventCorr {
   box-shadow: 0 0 0 1.5px var(--accent), 0 0 0 3px var(--warn);
 }
+
+/* ===== 序列链标记（graph 关联）===== */
+
+/* 链上卡片：组色外框高亮 */
+.eventChained {
+  box-shadow: inset 0 0 0 1px var(--chain-color, var(--accent));
+}
+
+/* 异常卡片：红色警示边 + 微红背景 */
+.eventAnomaly {
+  border-color: var(--danger, #e5484d) !important;
+  background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
+  box-shadow: 0 0 0 1px var(--danger, #e5484d);
+}
+
+/* 链号角标：卡片左上角 */
+.chainTag {
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  border-radius: 4px;
+  padding: 2px 3px;
+  margin-right: 3px;
+  font-family: 'Roboto Mono', Consolas, monospace;
+}
+
+/* group 列头链统计 */
+.segSeqStat {
+  font-size: 9px;
+  line-height: 1;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  padding: 2px 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.segSeqAnomaly {
+  color: #ffb4b9;
+  font-weight: 700;
+}

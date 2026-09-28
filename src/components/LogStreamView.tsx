@@ -195,6 +195,7 @@ export function LogStreamView() {
   const selectedEventId = useLogStore((s) => s.selectedEventId);
   const correlatedEventIds = useLogStore((s) => s.correlatedEventIds);
   const hoveredEventId = useLogStore((s) => s.hoveredEventId);
+  const sequenceResults = useLogStore((s) => s.sequenceResults);
   const selectEvent = useLogStore((s) => s.selectEvent);
   const setHovered = useLogStore((s) => s.setHovered);
   const resetView = useLogStore((s) => s.resetView);
@@ -223,6 +224,91 @@ export function LogStreamView() {
     () => buildVisibleColumns(visibleFilters, groups),
     [visibleFilters, groups],
   );
+
+  /**
+   * 序列链信息（卡片角标用）：filterId → (eventId → { chainIndex, color, anomaly })
+   * anomaly 只有在该 group 异常开关开启时才标记。
+   */
+  const chainInfoByFilter = useMemo(() => {
+    const m = new Map<
+      string,
+      Map<number, { chainIndex: number; color: string; anomaly: boolean; violation?: boolean; jitter?: boolean }>
+    >();
+    for (const g of groups) {
+      const r = sequenceResults[g.id];
+      if (!r) continue;
+      for (const fid of g.filterIds) {
+        let info = m.get(fid);
+        if (!info) {
+          info = new Map();
+          m.set(fid, info);
+        }
+        for (const ch of r.chains) {
+          for (const stp of ch.steps) {
+            if (stp.filterId !== fid) continue;
+            if (!info.has(stp.event.id)) {
+              info.set(stp.event.id, { chainIndex: ch.chainIndex, color: g.color, anomaly: false });
+            }
+          }
+        }
+        if (g.sequence?.anomalyEnabled) {
+          // 未覆盖事件 = 异常（仅标在该 filter 自己的卡片上）
+          const filterEvents = visibleMatches.find((mm) => mm.filterId === fid)?.events ?? [];
+          const covered = new Set(
+            r.chains.flatMap((ch) => ch.steps.filter((s2) => s2.filterId === fid).map((s2) => s2.event.id)),
+          );
+          for (const ev of filterEvents) {
+            if (!covered.has(ev.id) && !info.has(ev.id)) {
+              info.set(ev.id, { chainIndex: 0, color: g.color, anomaly: true });
+            }
+          }
+        }
+      }
+      // NOT 违规：按边定义的 from/to filter 标记（覆盖 chainInfo）
+      for (const edge of g.sequence?.edges ?? []) {
+        if ((edge.kind ?? 'seq') !== 'not') continue;
+        const vs = r.notViolations.filter((v) => v.edgeId === edge.id);
+        if (vs.length === 0) continue;
+        const fromInfo = m.get(edge.fromFilterId);
+        const toInfo = m.get(edge.toFilterId);
+        if (fromInfo) {
+          for (const v of vs) {
+            const prev = fromInfo.get(v.fromEvent.id);
+            fromInfo.set(v.fromEvent.id, {
+              chainIndex: prev?.chainIndex ?? 0,
+              color: g.color,
+              anomaly: true,
+              violation: true,
+            });
+          }
+        }
+        if (toInfo) {
+          for (const v of vs) {
+            const prev = toInfo.get(v.toEvent.id);
+            toInfo.set(v.toEvent.id, {
+              chainIndex: prev?.chainIndex ?? 0,
+              color: g.color,
+              anomaly: true,
+              violation: true,
+            });
+          }
+        }
+      }
+      // periodic 抖动标记
+      for (const hb of r.heartbeats) {
+        const info = m.get(hb.filterId);
+        if (!info) continue;
+        const filterEvents = visibleMatches.find((mm) => mm.filterId === hb.filterId)?.events ?? [];
+        for (const jt of hb.jitters) {
+          const ev = filterEvents.find((e) => e.ts === jt.ts);
+          if (ev && !info.get(ev.id)?.violation) {
+            info.set(ev.id, { chainIndex: 0, color: g.color, anomaly: false, jitter: true });
+          }
+        }
+      }
+    }
+    return m;
+  }, [groups, sequenceResults, visibleMatches]);
   // 所有 group 标题列总宽（每个固定 28px），需从可用宽度扣除
   const segHeadersW = useMemo(
     () => segments.filter((s) => s.kind === 'group').length * 28,
@@ -517,6 +603,7 @@ export function LogStreamView() {
             // 使白字对比度始终 ≥ 4.5:1，同时保留色相供辨识；不受色觉缺陷影响
             const c = seg.group!.color;
             const bg = `linear-gradient(rgba(0,0,0,0.42), rgba(0,0,0,0.42)), ${c}`;
+            const seqRes = sequenceResults[gid];
             return isHeaderCtx ? (
               // 列头：完整标题（可点击折叠），固定宽度整体
               <div
@@ -533,6 +620,17 @@ export function LogStreamView() {
                 <span className={styles.segTitleV} style={{ color: '#ffffff' }}>
                   {seg.group!.label}
                 </span>
+                {seqRes && seqRes.chains.length > 0 && (
+                  <span
+                    className={styles.segSeqStat}
+                    title={`序列链 ${seqRes.chains.length} 条${seg.group!.sequence?.anomalyEnabled ? ` · 异常 ${seqRes.uncoveredEvents.length} 条` : ''}`}
+                  >
+                    ⛓{seqRes.chains.length}
+                    {seg.group!.sequence?.anomalyEnabled && seqRes.uncoveredEvents.length > 0 && (
+                      <span className={styles.segSeqAnomaly}>⚠{seqRes.uncoveredEvents.length}</span>
+                    )}
+                  </span>
+                )}
                 <span className={styles.segCount} style={{ color: '#ffffff', background: 'rgba(255,255,255,0.18)' }}>
                   {seg.filters.length}
                 </span>
@@ -667,6 +765,7 @@ export function LogStreamView() {
                   selectedEventId={selectedEventId}
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
+                  chainInfo={chainInfoByFilter.get(f.id)}
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
@@ -702,6 +801,7 @@ export function LogStreamView() {
                   selectedEventId={selectedEventId}
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
+                  chainInfo={chainInfoByFilter.get(f.id)}
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
@@ -722,6 +822,7 @@ export function LogStreamView() {
                   selectedEventId={selectedEventId}
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
+                  chainInfo={chainInfoByFilter.get(f.id)}
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
@@ -732,6 +833,17 @@ export function LogStreamView() {
       </div>
     </div>
   );
+}
+
+/** 单事件的序列链标记信息 */
+interface ChainMark {
+  chainIndex: number;
+  color: string;
+  anomaly: boolean;
+  /** NOT 边违规（红 ⃠） */
+  violation?: boolean;
+  /** periodic 抖动（黄 ⚡） */
+  jitter?: boolean;
 }
 
 /** 全局时间轴模式：密度热力条（按过滤器色着色、深浅=事件密度）+ 稀疏时叠加卡片 */
@@ -747,6 +859,7 @@ interface GlobalLaneProps {
   selectedEventId: number | null;
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
+  chainInfo?: Map<number, ChainMark>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
 }
@@ -763,6 +876,7 @@ function GlobalLane({
   selectedEventId,
   hoveredEventId,
   correlatedEventIds,
+  chainInfo,
   onSelect,
   onHover,
 }: GlobalLaneProps) {
@@ -863,9 +977,11 @@ function GlobalLane({
         const isHover = ev.id === hoveredEventId;
         const isCorr = correlatedEventIds.has(ev.id);
         const levelColor = getLevelColor(ev.level);
+        const mark = chainInfo?.get(ev.id);
         const evStyle = {
           top: y + cascade,
           '--ev-border': levelColor ?? color,
+          ...(mark ? { '--chain-color': mark.color } : {}),
         } as React.CSSProperties;
         return (
           <div
@@ -875,11 +991,35 @@ function GlobalLane({
               isSel ? styles.globalEventSel : '',
               isHover ? styles.globalEventHover : '',
               isCorr ? styles.globalEventCorr : '',
+              mark ? (mark.anomaly ? styles.eventAnomaly : styles.eventChained) : '',
             ].join(' ')}
             style={evStyle}
             onClick={() => onSelect(ev.id)}
             onMouseEnter={() => onHover(ev.id)}
           >
+            {mark && (mark.anomaly || mark.chainIndex > 0) && (
+              <span
+                className={styles.chainTag}
+                style={{
+                  background: mark.violation
+                    ? 'var(--danger)'
+                    : mark.jitter
+                      ? 'var(--warn)'
+                      : mark.color,
+                }}
+                title={
+                  mark.violation
+                    ? '违规：NOT 禁止的目标在窗口内出现'
+                    : mark.jitter
+                      ? '抖动：心跳间隔过密'
+                      : mark.anomaly
+                        ? '异常：未被任何完整链覆盖'
+                        : `链 #${mark.chainIndex}`
+                }
+              >
+                {mark.violation ? '⃠' : mark.jitter ? '⚡' : mark.anomaly ? '⚠' : `#${mark.chainIndex}`}
+              </span>
+            )}
             {levelColor && (
               <span className={styles.eventLevel} style={{ background: levelColor }}>
                 {ev.level}
@@ -909,6 +1049,7 @@ interface LaneStreamProps {
   selectedEventId: number | null;
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
+  chainInfo?: Map<number, ChainMark>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
 }
@@ -922,6 +1063,7 @@ function LaneStream({
   selectedEventId,
   hoveredEventId,
   correlatedEventIds,
+  chainInfo,
   onSelect,
   onHover,
 }: LaneStreamProps) {
@@ -945,6 +1087,7 @@ function LaneStream({
         const isHover = ev.id === hoveredEventId;
         const isCorr = correlatedEventIds.has(ev.id);
         const levelColor = getLevelColor(ev.level);
+        const mark = chainInfo?.get(ev.id);
         return (
           <div
             key={ev.id}
@@ -953,11 +1096,38 @@ function LaneStream({
               isSel ? styles.eventSel : '',
               isHover ? styles.eventHover : '',
               isCorr ? styles.eventCorr : '',
+              mark ? (mark.anomaly ? styles.eventAnomaly : styles.eventChained) : '',
             ].join(' ')}
-            style={{ height: CARD_H - 2 }}
+            style={{
+              height: CARD_H - 2,
+              ...(mark ? { '--chain-color': mark.color } : {}),
+            }}
             onClick={() => onSelect(ev.id)}
             onMouseEnter={() => onHover(ev.id)}
           >
+            {mark && (mark.anomaly || mark.chainIndex > 0) && (
+              <span
+                className={styles.chainTag}
+                style={{
+                  background: mark.violation
+                    ? 'var(--danger)'
+                    : mark.jitter
+                      ? 'var(--warn)'
+                      : mark.color,
+                }}
+                title={
+                  mark.violation
+                    ? '违规：NOT 禁止的目标在窗口内出现'
+                    : mark.jitter
+                      ? '抖动：心跳间隔过密'
+                      : mark.anomaly
+                        ? '异常：未被任何完整链覆盖'
+                        : `链 #${mark.chainIndex}`
+                }
+              >
+                {mark.violation ? '⃠' : mark.jitter ? '⚡' : mark.anomaly ? '⚠' : `#${mark.chainIndex}`}
+              </span>
+            )}
             {levelColor && (
               <span className={styles.eventLevel} style={{ background: levelColor }}>
                 {ev.level}
@@ -983,6 +1153,7 @@ interface LaneColumnProps {
   selectedEventId: number | null;
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
+  chainInfo?: Map<number, ChainMark>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
 }
@@ -995,6 +1166,7 @@ function LaneColumn({
   selectedEventId,
   hoveredEventId,
   correlatedEventIds,
+  chainInfo,
   onSelect,
   onHover,
 }: LaneColumnProps) {
@@ -1020,6 +1192,7 @@ function LaneColumn({
                 const isHover = ev.id === hoveredEventId;
                 const isCorr = correlatedEventIds.has(ev.id);
                 const levelColor = getLevelColor(ev.level);
+                const mark = chainInfo?.get(ev.id);
                 return (
                   <div
                     key={ev.id}
@@ -1028,11 +1201,38 @@ function LaneColumn({
                       isSel ? styles.eventSel : '',
                       isHover ? styles.eventHover : '',
                       isCorr ? styles.eventCorr : '',
+                      mark ? (mark.anomaly ? styles.eventAnomaly : styles.eventChained) : '',
                     ].join(' ')}
-                    style={{ height: CARD_H - 2 }}
+                    style={{
+                      height: CARD_H - 2,
+                      ...(mark ? { '--chain-color': mark.color } : {}),
+                    }}
                     onClick={() => onSelect(ev.id)}
                     onMouseEnter={() => onHover(ev.id)}
                   >
+                    {mark && (mark.anomaly || mark.chainIndex > 0) && (
+                      <span
+                        className={styles.chainTag}
+                        style={{
+                          background: mark.violation
+                            ? 'var(--danger)'
+                            : mark.jitter
+                              ? 'var(--warn)'
+                              : mark.color,
+                        }}
+                        title={
+                          mark.violation
+                            ? '违规：NOT 禁止的目标在窗口内出现'
+                            : mark.jitter
+                              ? '抖动：心跳间隔过密'
+                              : mark.anomaly
+                                ? '异常：未被任何完整链覆盖'
+                                : `链 #${mark.chainIndex}`
+                        }
+                      >
+                        {mark.violation ? '⃠' : mark.jitter ? '⚡' : mark.anomaly ? '⚠' : `#${mark.chainIndex}`}
+                      </span>
+                    )}
                     {levelColor && (
                       <span className={styles.eventLevel} style={{ background: levelColor }}>
                         {ev.level}

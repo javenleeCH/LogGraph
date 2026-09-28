@@ -4,9 +4,10 @@
  * 纯函数式，不持有状态，由 TimelineCanvas 调用。
  */
 
-import type { Filter, FilterGroup, FilterMatch, LogEvent, TimeRange } from '../types';
+import type { Filter, FilterGroup, FilterMatch, LogEvent, MatchedChain, SequenceMatchResult, TimeRange } from '../types';
 import { LAYOUT } from './layout';
 import { chooseTickStep, formatTime, formatDateTime } from '../utils/timeFormat';
+import type { VisibleRow } from './layout';
 
 export interface RenderContext {
   ctx: CanvasRenderingContext2D;
@@ -51,6 +52,9 @@ function buildPalette() {
   minimapViewFill: 'rgba(26,115,232,0.12)',
   minimapViewStroke: readVar('--accent', '#1a73e8'),
   corrLink: 'rgba(230,159,0,0.45)',
+  anomalyFill: readVar('--danger', '#e5484d'),
+  anomalyStroke: readVar('--danger', '#e5484d'),
+  seqLinkAlpha: 0.75,
   tooltipBg: readVar('--bg', '#ffffff'),
   tooltipBorder: readVar('--border', '#dadce0'),
 }}
@@ -348,6 +352,12 @@ export function drawLaneEventsAt(
   selectedId: number | null,
   hoveredId: number | null,
   correlatedIds: Set<number>,
+  chainIds: Set<number> | null = null,
+  anomalyIds: Set<number> | null = null,
+  chainColor: string | null = null,
+  chainIndexOf: ((eventId: number) => number | null) | null = null,
+  violationIds: Set<number> | null = null,
+  jitterTs: Set<number> | null = null,
 ) {
   const { ctx, view, timeToX, width } = rc;
   const eventH = h * LAYOUT.EVENT_HEIGHT_RATIO;
@@ -365,12 +375,42 @@ export function drawLaneEventsAt(
     const isSel = ev.id === selectedId;
     const isHov = ev.id === hoveredId;
     const isCorr = correlatedIds.has(ev.id);
+    const isChain = chainIds?.has(ev.id) ?? false;
+    const isAnom = anomalyIds?.has(ev.id) ?? false;
+    const isViol = violationIds?.has(ev.id) ?? false;
+    const isJit = jitterTs?.has(ev.ts) ?? false;
     let fillColor = filter.color;
     if (isSel) fillColor = C.selectedFill;
+    else if (isAnom || isViol) fillColor = C.anomalyFill;
     else if (isCorr) fillColor = lightenHex(filter.color, 0.15);
     ctx.fillStyle = fillColor;
-    const w = isSel ? 3.5 : isHov ? 3 : LAYOUT.EVENT_MIN_WIDTH;
+    const w = isSel ? 3.5 : isHov || isChain ? 3 : LAYOUT.EVENT_MIN_WIDTH;
     ctx.fillRect(x - w / 2, eventY, w, eventH);
+    // 链上事件：组色描边（外框标记）；异常/违规：红框；抖动：黄框
+    if (isChain && !isSel) {
+      ctx.strokeStyle = chainColor ?? filter.color;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x - w / 2 - 1.5, eventY - 1.5, w + 3, eventH + 3);
+    } else if ((isAnom || isViol) && !isSel) {
+      ctx.strokeStyle = C.anomalyStroke;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x - w / 2 - 1.5, eventY - 1.5, w + 3, eventH + 3);
+    } else if (isJit && !isSel) {
+      ctx.strokeStyle = C.corrStroke;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x - w / 2 - 1.5, eventY - 1.5, w + 3, eventH + 3);
+    }
+    // 链号小标记：链上事件右侧标注链序号（选中或悬停时显示，避免全量噪声）
+    if ((isSel || isHov) && isChain && chainIndexOf) {
+      const ci = chainIndexOf(ev.id);
+      if (ci !== null) {
+        ctx.fillStyle = chainColor ?? filter.color;
+        ctx.font = `600 10px ${getMonoFont()}`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`#${ci}`, x + 5, eventY + eventH / 2);
+      }
+    }
     if (isSel) {
       ctx.strokeStyle = filter.color;
       ctx.lineWidth = 1.5;
@@ -568,6 +608,7 @@ export function drawGroupHeader(
   headerH: number,
   childCount: number,
   hovered: boolean,
+  seqStat: { chains: number; anomalies: number; anomalyEnabled: boolean } | null = null,
 ) {
   const { ctx, width } = rc;
   ctx.save();
@@ -606,6 +647,24 @@ export function drawGroupHeader(
   ctx.font = `11px ${getMonoFont()}`;
   ctx.textAlign = 'right';
   ctx.fillText(`${childCount}`, LAYOUT.LEFT_LABEL_WIDTH - 8, headerY + headerH / 2);
+
+  // 序列链统计（组名右侧，图表区内）：⛓ N 链 · M 异常
+  if (seqStat && seqStat.chains >= 0 && (seqStat.chains > 0 || seqStat.anomalyEnabled)) {
+    const parts: string[] = [`⛓ ${seqStat.chains} 链`];
+    if (seqStat.anomalyEnabled) parts.push(`${seqStat.anomalies} 异常`);
+    const label = parts.join(' · ');
+    ctx.save();
+    ctx.fillStyle = seqStat.anomalyEnabled && seqStat.anomalies > 0 ? C.anomalyFill : C.textDim;
+    ctx.font = `11px ${getSansFont()}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    // 裁剪到图表区，避免与右侧内容重叠
+    ctx.beginPath();
+    ctx.rect(LAYOUT.LEFT_LABEL_WIDTH + 8, headerY, rc.width - LAYOUT.LEFT_LABEL_WIDTH - 16, headerH);
+    ctx.clip();
+    ctx.fillText(label, LAYOUT.LEFT_LABEL_WIDTH + 10, headerY + headerH / 2);
+    ctx.restore();
+  }
 
   // 底线
   ctx.strokeStyle = C.trackBottom;
@@ -737,4 +796,203 @@ export function drawGroupDensity(
   ctx.lineTo(width, rowY + rowH + 0.5);
   ctx.stroke();
   ctx.restore();
+}
+
+// ---- 序列链（graph 关联）箭头连线 ----
+
+/**
+ * 绘制序列链跨 lane 箭头连线：
+ * 链上相邻步事件之间（从上行 lane 的步事件到下行 lane 的步事件）画带箭头的连线。
+ * 连线颜色 = group 色；同组多链用透明度与链号渐变区分。
+ * 只有相邻步都落在「展开的 filter 行」上才画（折叠 density 行不画，避免歧义）。
+ */
+export function drawSequenceLinks(
+  rc: RenderContext,
+  rows: VisibleRow[],
+  groups: FilterGroup[],
+  sequenceResults: Record<string, SequenceMatchResult>,
+) {
+  const { ctx, view, timeToX, width } = rc;
+  if (!sequenceResults || Object.keys(sequenceResults).length === 0) return;
+
+  // filterId → 行 y/h（只统计展开 filter 行）
+  const rowByFilter = new Map<string, { y: number; h: number }>();
+  for (const row of rows) {
+    if (row.kind === 'filter') {
+      rowByFilter.set(row.filter.id, { y: row.y, h: row.height });
+    }
+  }
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  for (const group of groups) {
+    const result = sequenceResults[group.id];
+    if (!result || result.chains.length === 0) continue;
+    if (group.visible === false) continue;
+
+    const chains: MatchedChain[] = result.chains;
+    const alphaBase = C.seqLinkAlpha;
+    // 多链时降低单链透明度，避免重叠糊成一团
+    const alpha = chains.length > 8 ? 0.35 : chains.length > 3 ? 0.5 : alphaBase;
+
+    for (const chain of chains) {
+      for (let i = 0; i + 1 < chain.steps.length; i++) {
+        const a = chain.steps[i];
+        const b = chain.steps[i + 1];
+        const ra = rowByFilter.get(a.filterId);
+        const rb = rowByFilter.get(b.filterId);
+        if (!ra || !rb) continue;
+        // 视口裁剪
+        if (
+          (a.event.ts < view.start && b.event.ts < view.start) ||
+          (a.event.ts > view.end && b.event.ts > view.end)
+        ) {
+          continue;
+        }
+        const x1 = timeToX(a.event.ts);
+        const x2 = timeToX(b.event.ts);
+        if (Math.max(x1, x2) < LAYOUT.LEFT_LABEL_WIDTH || Math.min(x1, x2) > width) continue;
+        const y1 = ra.y + ra.h / 2;
+        const y2 = rb.y + rb.h / 2;
+
+        // 垂直走向为主：从 a 事件点直接连到 b 事件点（水平+垂直二次贝塞尔）
+        const mx = (x1 + x2) / 2;
+        ctx.strokeStyle = withAlpha(group.color, alpha);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.quadraticCurveTo(mx, y1 + (y2 - y1) * 0.2, mx, (y1 + y2) / 2);
+        ctx.quadraticCurveTo(mx, y2 - (y2 - y1) * 0.2, x2, y2);
+        ctx.stroke();
+
+        // 箭头：终点方向由贝塞尔末端切线决定（近似用 (x2-mx, y2-y2) 即水平入射）
+        drawArrowHead(ctx, x2, y2, x2 >= mx ? 1 : -1, 0, group.color, alpha);
+      }
+    }
+  }
+  ctx.restore();
+}
+
+/**
+ * 序列装饰层：NOT 违规红连线 + periodic 心跳标记。
+ * - NOT 违规：A 事件与违规 B 事件间画红色短虚线（区别于链连线的组色实线）
+ * - periodic：正常段画 lane 下划线（组色细线）；缺口在期望时刻画 ⚠ 红标记；抖动画 ⚡ 黄标记
+ */
+export function drawSequenceDecorations(
+  rc: RenderContext,
+  rows: VisibleRow[],
+  groups: FilterGroup[],
+  sequenceResults: Record<string, SequenceMatchResult>,
+) {
+  const { ctx, view, timeToX, width } = rc;
+  if (!sequenceResults) return;
+
+  const rowByFilter = new Map<string, { y: number; h: number }>();
+  for (const row of rows) {
+    if (row.kind === 'filter') rowByFilter.set(row.filter.id, { y: row.y, h: row.height });
+  }
+
+  ctx.save();
+  for (const group of groups) {
+    const r = sequenceResults[group.id];
+    if (!r || group.visible === false) continue;
+
+    // ---- NOT 违规：红色短虚线 from → to（行取边定义的 from/to filter）----
+    for (const edge of group.sequence?.edges ?? []) {
+      if ((edge.kind ?? 'seq') !== 'not') continue;
+      const vs = r.notViolations.filter((v) => v.edgeId === edge.id);
+      if (vs.length === 0) continue;
+      const ra = rowByFilter.get(edge.fromFilterId);
+      const rb = rowByFilter.get(edge.toFilterId);
+      if (!ra || !rb) continue;
+      for (const v of vs) {
+        if (v.fromEvent.ts < view.start && v.toEvent.ts < view.start) continue;
+        if (v.fromEvent.ts > view.end && v.toEvent.ts > view.end) continue;
+        const x1 = timeToX(v.fromEvent.ts);
+        const x2 = timeToX(v.toEvent.ts);
+        if (Math.max(x1, x2) < LAYOUT.LEFT_LABEL_WIDTH || Math.min(x1, x2) > width) continue;
+        const y1 = ra.y + ra.h / 2;
+        const y2 = rb.y + rb.h / 2;
+        ctx.strokeStyle = C.anomalyStroke;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // B 事件上画 ×
+        ctx.strokeStyle = C.anomalyStroke;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x2 - 4, y2 - 4);
+        ctx.lineTo(x2 + 4, y2 + 4);
+        ctx.moveTo(x2 - 4, y2 + 4);
+        ctx.lineTo(x2 + 4, y2 - 4);
+        ctx.stroke();
+      }
+    }
+
+    // ---- periodic：段下划线 + 缺口 ⚠ + 抖动 ⚡ ----
+    for (const hb of r.heartbeats) {
+      const row = rowByFilter.get(hb.filterId);
+      if (!row) continue;
+      const yBase = row.y + row.h - 3;
+      // 正常段下划线
+      ctx.strokeStyle = withAlpha(group.color, 0.5);
+      ctx.lineWidth = 2;
+      for (const seg of hb.segments) {
+        const x1 = timeToX(Math.max(seg.startTs, view.start));
+        const x2 = timeToX(Math.min(seg.endTs, view.end));
+        if (x2 < LAYOUT.LEFT_LABEL_WIDTH || x1 > width) continue;
+        ctx.beginPath();
+        ctx.moveTo(Math.max(x1, LAYOUT.LEFT_LABEL_WIDTH), yBase);
+        ctx.lineTo(Math.min(x2, width), yBase);
+        ctx.stroke();
+      }
+      // 缺口 ⚠（期望时刻）
+      ctx.font = `600 11px ${getSansFont()}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = C.anomalyFill;
+      for (const gp of hb.gaps) {
+        if (gp.expectedTs < view.start || gp.expectedTs > view.end) continue;
+        const x = timeToX(gp.expectedTs);
+        if (x < LAYOUT.LEFT_LABEL_WIDTH || x > width) continue;
+        ctx.fillText('⚠', x, yBase);
+      }
+      // 抖动 ⚡（黄）
+      ctx.fillStyle = C.corrStroke;
+      for (const jt of hb.jitters) {
+        if (jt.ts < view.start || jt.ts > view.end) continue;
+        const x = timeToX(jt.ts);
+        if (x < LAYOUT.LEFT_LABEL_WIDTH || x > width) continue;
+        ctx.fillText('⚡', x, row.y + 10);
+      }
+    }
+  }
+  ctx.restore();
+}
+
+/** 画箭头头部（方向单位向量 dx,dy） */
+function drawArrowHead(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  dx: number,
+  dy: number,
+  color: string,
+  alpha: number,
+) {
+  const size = 6;
+  // 垂直向量
+  const px = -dy;
+  const py = dx;
+  ctx.fillStyle = withAlpha(color, Math.min(1, alpha + 0.15));
+  ctx.beginPath();
+  ctx.moveTo(x + dx * size, y + dy * size);
+  ctx.lineTo(x + px * size * 0.55, y + py * size * 0.55);
+  ctx.lineTo(x - px * size * 0.55, y - py * size * 0.55);
+  ctx.closePath();
+  ctx.fill();
 }
