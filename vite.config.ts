@@ -18,7 +18,8 @@ export default defineConfig({
   envPrefix: ['VITE_', 'TAURI_ENV_'],
   build: {
     target: 'es2021',
-    minify: 'esbuild',
+    // Vite 8（Rolldown 管线）默认 minifier 为 oxc；显式声明避免回退 esbuild（需另装依赖）
+    minify: 'oxc',
     sourcemap: false,
   },
 });
