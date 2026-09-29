@@ -1,10 +1,10 @@
 {
   "filters": [
     {
-      "id": "f1788488224147_2",
+      "id": "f1790598516757_2",
       "label": "Filter 1",
-      "color": "#0072b2",
-      "pattern": "INFO  Schema migration step",
+      "color": "#4ea2ff",
+      "pattern": "Upstream recovered, response",
       "isRegex": false,
       "caseSensitive": false,
       "enabled": true,
@@ -12,10 +12,10 @@
       "groupId": null
     },
     {
-      "id": "f1788488224147_3",
+      "id": "f1790598516757_3",
       "label": "Filter 2",
-      "color": "#009e73",
-      "pattern": "INFO  Deadlock resolved after retry",
+      "color": "#34d399",
+      "pattern": "INFO  Cache refresh triggered",
       "isRegex": false,
       "caseSensitive": false,
       "enabled": true,
@@ -25,25 +25,67 @@
   ],
   "groups": [
     {
-      "id": "g1788488224147_2",
+      "id": "g1790598516757_2",
       "label": "Group 1",
-      "color": "#0072b2",
+      "color": "#4ea2ff",
       "collapsed": false,
       "visible": true,
       "filterIds": [
-        "f1788488224147_2"
-      ]
+        "f1790598516757_2",
+        "f1790598516757_3"
+      ],
+      "sequence": {
+        "edges": [
+          {
+            "id": "e1790598545585_1",
+            "fromFilterId": "f1790598516757_3",
+            "toFilterId": "f1790598516757_2",
+            "maxGapMs": 1000
+          }
+        ],
+        "anomalyEnabled": false
+      }
     },
     {
-      "id": "g1788488224147_3",
+      "id": "g1790598516757_3",
       "label": "Group 2",
-      "color": "#009e73",
-      "collapsed": false,
+      "color": "#34d399",
+      "collapsed": true,
       "visible": true,
       "filterIds": [
-        "f1788488224147_3"
+        "f1790598516757_3"
       ]
     }
   ],
-  "savedAt": 1788488225858
+  "graphNodes": {
+    "f1790598516757_2": {
+      "id": "f1790598516757_2",
+      "kind": "filterItem",
+      "x": 490,
+      "y": 365
+    },
+    "g1790598516757_2": {
+      "id": "g1790598516757_2",
+      "kind": "group",
+      "x": 40,
+      "y": 40,
+      "w": 400,
+      "h": 300
+    },
+    "g1790598516757_3": {
+      "id": "g1790598516757_3",
+      "kind": "group",
+      "x": 460,
+      "y": 40,
+      "w": 400,
+      "h": 300
+    },
+    "f1790598516757_3": {
+      "id": "f1790598516757_3",
+      "kind": "filterItem",
+      "x": 232,
+      "y": 174
+    }
+  },
+  "savedAt": 1790598545987
 }

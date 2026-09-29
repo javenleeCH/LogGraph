@@ -1,20 +1,19 @@
 /**
- * 节点画布视图（draw.io 风格整画布即 group）
+ * 分组编辑页外壳（ReactFlow 版）
  *
- * 本文件仅导出两个顶层组件，由 App.tsx 根据 store 中的
- * activeGroupId / editingFilterId 决定是否渲染：
+ * 本文件导出两个顶层组件，由 App.tsx 按 store 状态渲染：
+ * - <GroupEditorPage />  activeGroupId 非空时渲染：
+ *   工具栏（返回/异常开关/作用域/统计/改名）+ <GroupFlowCanvas />（ReactFlow 画布）
+ * - <FilterDetailModal />  editingFilterId 非空时渲染，编辑 filter 属性与归属。
  *
- * - <GroupEditorPage />  activeGroupId 非空时渲染，整画布即 group 区域，
- *   左侧 filter 调色板 + 中间画布；拖 filter 到画布即归属，拖出画布即脱离。
- * - <FilterDetailModal />  editingFilterId 非空时渲染弹窗，编辑 filter 属性与归属。
- *
- * group / filter 的列表浏览已迁移到左侧栏（App.tsx 内联 SidePanel）。
+ * 画布交互（拖入/拖出/连线/自环/边编辑）全部在 ./flow/GroupFlowCanvas。
  */
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FilterEngine } from '../filters/FilterEngine';
-import type { FilterGroup, NodePos, SequenceEdge } from '../types';
-import { ChevronLeft, X, Check, AlertTriangle, Trash } from './Icon';
+import type { FilterGroup, SequenceEdge } from '../types';
+import { ChevronLeft, X, AlertTriangle, Trash } from './Icon';
+import { GroupFlowCanvas } from './flow/GroupFlowCanvas';
 import styles from './NodeCanvasView.module.css';
 
 /** 格式化时间窗标签：1000 → 1s，1500 → 1.5s，500 → 500ms */
@@ -24,366 +23,35 @@ export function formatGap(ms: number): string {
   return `${ms}ms`;
 }
 
-interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-/** 取某节点的矩形（缺省尺寸兜底） */
-function nodeRect(n: NodePos): Rect {
-  const w = n.kind === 'group' ? n.w ?? 400 : 160;
-  const h = n.kind === 'group' ? n.h ?? 300 : 44;
-  return { x: n.x, y: n.y, w, h };
-}
-
-/* ============================================================
- * Group 编辑画布：左侧 filter 调色板 + 中间画布 + 返回
- * 整个画布即 group 区域
- * ========================================================== */
-
 export function GroupEditorPage() {
   const activeGroupId = useLogStore((s) => s.activeGroupId);
   const setActiveGroup = useLogStore((s) => s.setActiveGroup);
-  const filters = useLogStore((s) => s.filters);
   const groups = useLogStore((s) => s.groups);
-  const matches = useLogStore((s) => s.matches);
-  const graphNodes = useLogStore((s) => s.graphNodes);
-  const graphPan = useLogStore((s) => s.graphPan);
-  const graphZoom = useLogStore((s) => s.graphZoom);
-  const setGraphPan = useLogStore((s) => s.setGraphPan);
-  const setGraphZoom = useLogStore((s) => s.setGraphZoom);
-  const setNodePos = useLogStore((s) => s.setNodePos);
-  const ensureNodePos = useLogStore((s) => s.ensureNodePos);
   const updateGroup = useLogStore((s) => s.updateGroup);
-  const addFilterToGroup = useLogStore((s) => s.addFilterToGroup);
-  const removeFilterFromGroup = useLogStore((s) => s.removeFilterFromGroup);
-  // 序列图关联
-  const sequenceResults = useLogStore((s) => s.sequenceResults);
-  const addSequenceEdge = useLogStore((s) => s.addSequenceEdge);
-  const removeSequenceEdge = useLogStore((s) => s.removeSequenceEdge);
   const toggleSequenceAnomaly = useLogStore((s) => s.toggleSequenceAnomaly);
   const setSequenceScope = useLogStore((s) => s.setSequenceScope);
+  const sequenceResults = useLogStore((s) => s.sequenceResults);
 
   const groupId = activeGroupId ?? '';
   const group = groups.find((g) => g.id === groupId);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  // 连线中状态：从节点右缘热区按下拖出橡皮筋线，松开在目标节点上建立序列边
-  const [linking, setLinking] = useState<{
-    fromFilterId: string;
-    cur: { x: number; y: number }; // 画布内屏幕坐标
-  } | null>(null);
-  // 编辑中的序列边（点击边弹出）
-  const [editingEdge, setEditingEdge] = useState<SequenceEdge | null>(null);
-
-  // 拖拽状态：palette 拖拽 / 已有节点拖拽 / 平移
-  const [dragging, setDragging] = useState<{
-    kind: 'palette' | 'node' | 'pan';
-    filterId?: string;
-    nodeId?: string;
-    offset?: { x: number; y: number };
-    startScreen?: { x: number; y: number };
-    startPan?: { x: number; y: number };
-    moved?: boolean;
-  } | null>(null);
-
-  // 确保进入画布时 group 节点有坐标
-  useEffect(() => {
-    if (groupId) ensureNodePos(groupId, 'group');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupId]);
-
-  // 兜底：组内任何成员 filter 缺坐标时自动补（覆盖持久化缺失/其它路径入组）
-  useEffect(() => {
-    if (!group) return;
-    for (const fid of group.filterIds) {
-      if (!graphNodes[fid]) ensureNodePos(fid, 'filterItem');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [group?.id, group?.filterIds.length, graphNodes]);
+  const seqResult = group ? sequenceResults[group.id] : undefined;
 
   // Esc 关闭抽屉
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !dragging) setActiveGroup(null);
+      if (e.key === 'Escape') setActiveGroup(null);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [dragging, setActiveGroup]);
-
-  const toScreen = useCallback(
-    (wx: number, wy: number) => ({ x: wx * graphZoom + graphPan.x, y: wy * graphZoom + graphPan.y }),
-    [graphZoom, graphPan],
-  );
-  const toWorld = useCallback(
-    (sx: number, sy: number) => ({ x: (sx - graphPan.x) / graphZoom, y: (sy - graphPan.y) / graphZoom }),
-    [graphZoom, graphPan],
-  );
-
-  // 该 group 下的 filter（用于画布上显示实体）
-  const memberFilters = useMemo(
-    () => (group ? filters.filter((f) => group.filterIds.includes(f.id)) : []),
-    [filters, group],
-  );
-
-  const matchCount = useCallback(
-    (fid: string) => matches.find((m) => m.filterId === fid)?.events.length ?? 0,
-    [matches],
-  );
-
-  // ---- 序列边渲染数据（世界坐标 → 屏幕坐标）----
-  const seqEdges = group?.sequence?.edges ?? [];
-  const seqResult = group ? sequenceResults[group.id] : undefined;
-
-  /** 该 filter 被链消耗的事件数（节点角标） */
-  const chainedCount = useCallback(
-    (fid: string) => {
-      if (!seqResult) return 0;
-      let n = 0;
-      for (const ch of seqResult.chains) {
-        for (const st of ch.steps) if (st.filterId === fid) n++;
-      }
-      return n;
-    },
-    [seqResult],
-  );
-
-  /** 边统计（matched/miss） */
-  const edgeStat = useCallback(
-    (edgeId: string) =>
-      seqResult?.edgeStats.find((s) => s.edgeId === edgeId) ?? null,
-    [seqResult],
-  );
-
-  /** 边有效目标列表（and/or 用 toFilterIds） */
-  const edgeTargets = useCallback((edge: SequenceEdge): string[] => {
-    if ((edge.kind === 'and' || edge.kind === 'or') && edge.toFilterIds?.length) {
-      return edge.toFilterIds;
-    }
-    return [edge.toFilterId];
-  }, []);
-
-  /** 目标节点左侧中点（屏幕坐标） */
-  const targetPoint = useCallback(
-    (fid: string) => {
-      const node = graphNodes[fid];
-      if (!node) return null;
-      const r = nodeRect(node);
-      return toScreen(r.x, r.y + r.h / 2);
-    },
-    [graphNodes, toScreen],
-  );
-
-  /** 源节点右侧中点（屏幕坐标） */
-  const sourcePoint = useCallback(
-    (fid: string) => {
-      const node = graphNodes[fid];
-      if (!node) return null;
-      const r = nodeRect(node);
-      return toScreen(r.x + r.w, r.y + r.h / 2);
-    },
-    [graphNodes, toScreen],
-  );
-
-  /** NOT 边违规数（画布边标签用） */
-  const violationCount = useCallback(
-    (edgeId: string) =>
-      seqResult?.notViolations.filter((v) => v.edgeId === edgeId).length ?? 0,
-    [seqResult],
-  );
-
-  // ---- 连线模式：橡皮筋拖线 ----
-  // linking 状态：mousemove 实时更新终点，mouseup 判定落点是否在某节点上
-  useEffect(() => {
-    if (!linking) return;
-    const onMove = (e: MouseEvent) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      setLinking((l) =>
-        l ? { ...l, cur: { x: e.clientX - rect.left, y: e.clientY - rect.top } } : l,
-      );
-    };
-    const onUp = (e: MouseEvent) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (rect && linking && group) {
-        const sx = e.clientX - rect.left;
-        const sy = e.clientY - rect.top;
-        // 修饰键：Shift=AND 多目标，Alt=OR 多目标（单支时仍是 and/or 单目标边）
-        const multiKind: 'and' | 'or' | null = e.shiftKey ? 'and' : e.altKey ? 'or' : null;
-        // 找落点落在哪个成员节点上（屏幕坐标矩形判定）
-        for (const f of memberFilters) {
-          const node = graphNodes[f.id];
-          if (!node) continue;
-          const r = nodeRect(node);
-          const fs = toScreen(r.x, r.y);
-          const w = r.w * graphZoom;
-          const h = (node.kind === 'group' ? node.h ?? 300 : 44) * graphZoom;
-          if (sx >= fs.x && sx <= fs.x + w && sy >= fs.y && sy <= fs.y + h) {
-            if (f.id === linking.fromFilterId) {
-              // 拖回自身 → periodic 心跳自环
-              addSequenceEdge(group.id, f.id, f.id, 1000, {
-                kind: 'periodic',
-                periodMs: 1000,
-              });
-            } else if (multiKind) {
-              // AND/OR：把「已有同 from 的对目标边」升级为多目标，或新建
-              addSequenceEdge(group.id, linking.fromFilterId, f.id, 1000, {
-                kind: multiKind,
-                toFilterIds: [f.id],
-              });
-            } else {
-              addSequenceEdge(group.id, linking.fromFilterId, f.id);
-            }
-            break;
-          }
-        }
-      }
-      setLinking(null);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [linking, memberFilters, graphNodes, graphZoom, toScreen, addSequenceEdge, group]);
-
-  /** 连线模式下从节点右缘开始拖线 */
-  const startLinkDrag = (e: React.MouseEvent, fid: string) => {
-    e.preventDefault(); // 阻止原生拖拽
-    e.stopPropagation();
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    setLinking({
-      fromFilterId: fid,
-      cur: { x: e.clientX - rect.left, y: e.clientY - rect.top },
-    });
-  };
-
-  // 滚轮缩放
-  const onWheel = useCallback(
-    (e: React.WheelEvent) => {
-      e.preventDefault();
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
-      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-      const newZoom = Math.max(0.2, Math.min(3, graphZoom * factor));
-      const wx = (mx - graphPan.x) / graphZoom;
-      const wy = (my - graphPan.y) / graphZoom;
-      setGraphPan(mx - wx * newZoom, my - wy * newZoom);
-      setGraphZoom(newZoom);
-    },
-    [graphZoom, graphPan, setGraphPan, setGraphZoom],
-  );
-
-  // 全局拖拽处理
-  useEffect(() => {
-    if (!dragging) return;
-    const onMove = (e: MouseEvent) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const sx = e.clientX - rect.left;
-      const sy = e.clientY - rect.top;
-      if (dragging.kind === 'pan') {
-        const dx = sx - (dragging.startScreen?.x ?? 0);
-        const dy = sy - (dragging.startScreen?.y ?? 0);
-        setGraphPan((dragging.startPan?.x ?? 0) + dx, (dragging.startPan?.y ?? 0) + dy);
-        return;
-      }
-      // palette / node 拖拽：实时更新坐标（node）
-      if (dragging.kind === 'node' && dragging.nodeId) {
-        const w = toWorld(sx, sy);
-        const nx = w.x - (dragging.offset?.x ?? 0);
-        const ny = w.y - (dragging.offset?.y ?? 0);
-        setNodePos(dragging.nodeId, nx, ny);
-      }
-      if (
-        Math.abs(sx - (dragging.startScreen?.x ?? 0)) > 2 ||
-        Math.abs(sy - (dragging.startScreen?.y ?? 0)) > 2
-      ) {
-        if (!dragging.moved) setDragging({ ...dragging, moved: true });
-      }
-    };
-    const onUp = (e: MouseEvent) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (rect && dragging) {
-        const sx = e.clientX - rect.left;
-        const sy = e.clientY - rect.top;
-        // 整个画布即 group 区域：落在画布边界内即归属，拖出画布外即脱离
-        const insideCanvas = sx >= 0 && sx <= rect.width && sy >= 0 && sy <= rect.height;
-        if (dragging.kind === 'palette' && dragging.filterId) {
-          if (insideCanvas) {
-            // 从调色板拖入画布 → 加入该组 + 落点生成节点坐标
-            const wasMember = group?.filterIds.includes(dragging.filterId) ?? false;
-            addFilterToGroup(dragging.filterId, groupId);
-            if (!wasMember) {
-              // 落点世界坐标（节点中心对齐鼠标）
-              const w = toWorld(sx, sy);
-              setNodePos(dragging.filterId, w.x - 80, w.y - 18);
-            }
-          }
-        } else if (dragging.kind === 'node' && dragging.moved && dragging.filterId) {
-          if (!insideCanvas) {
-            // 拖出画布 → 从该组移除
-            removeFilterFromGroup(dragging.filterId, groupId);
-          }
-        }
-      }
-      setDragging(null);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [dragging, toWorld, toScreen, setNodePos, setGraphPan, groupId, group, addFilterToGroup, removeFilterFromGroup]);
-
-  // 调色板拖拽起始
-  const startPaletteDrag = (e: React.MouseEvent, fid: string) => {
-    e.preventDefault(); // 阻止原生文本/元素拖拽，避免吞掉 mousemove/mouseup
-    e.stopPropagation();
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
-    setDragging({ kind: 'palette', filterId: fid, startScreen: { x: sx, y: sy }, moved: false });
-  };
-
-  // 已有节点拖拽起始
-  const startNodeDrag = (e: React.MouseEvent, fid: string) => {
-    e.preventDefault(); // 阻止原生拖拽
-    e.stopPropagation();
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
-    const w = toWorld(sx, sy);
-    const node = graphNodes[fid];
-    const offset = { x: w.x - (node?.x ?? 0), y: w.y - (node?.y ?? 0) };
-    setDragging({ kind: 'node', filterId: fid, nodeId: fid, offset, startScreen: { x: sx, y: sy }, moved: false });
-  };
-
-  // 空白平移
-  const startPan = (e: React.MouseEvent) => {
-    if (e.target !== e.currentTarget) return;
-    e.preventDefault(); // 防止画布空白处的原生拖拽/选中
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
-    setDragging({ kind: 'pan', startScreen: { x: sx, y: sy }, startPan: { ...graphPan }, moved: false });
-  };
+  }, [setActiveGroup]);
 
   if (!group) {
     return (
       <div className={styles.overlay}>
         <div className={styles.toolbar}>
-        <button className="ghost" onClick={() => setActiveGroup(null)}><ChevronLeft size={14} /> 返回</button>
+          <button className="ghost" onClick={() => setActiveGroup(null)}>
+            <ChevronLeft size={14} /> 返回
+          </button>
           <span className={styles.crumbs}>分组不存在</span>
         </div>
       </div>
@@ -432,325 +100,27 @@ export function GroupEditorPage() {
           右缘拖出连线=时序 · 拖回自身=心跳 · Shift=AND Alt=OR · 点边可编辑/切类型
         </span>
         <div className={styles.spacer} />
-        <button className="ghost" onClick={() => setActiveGroup(null)} title="关闭分组编辑，回到数据视图"><X size={14} /> 关闭</button>
-      </div>
-      <div className={styles.editorLayout}>
-        {/* 左侧 filter 调色板 */}
-        <aside className={styles.palette}>
-          <div className={styles.paletteHeader}>过滤器列表</div>
-          <div className={styles.paletteHint}>已归属高亮 · 拖入画布添加</div>
-          <div className={styles.paletteList}>
-            {filters.map((f) => {
-              const isMember = group.filterIds.includes(f.id);
-              return (
-                <div
-                  key={f.id}
-                  className={[
-                    styles.paletteItem,
-                    isMember ? styles.paletteActive : '',
-                    f.enabled ? '' : styles.cardDim,
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
-                  style={{ borderLeftColor: f.color }}
-                  onMouseDown={(e) => startPaletteDrag(e, f.id)}
-                  onClick={(e) => { e.stopPropagation(); }}
-                >
-                  <span className={styles.paletteDot} style={{ background: f.color }} />
-                  <span className={styles.paletteLabel}>{f.label}</span>
-                  <span className={styles.paletteCount}>{matchCount(f.id)}</span>
-                  {isMember && <span className={styles.paletteCheck}><Check size={13} /></span>}
-                </div>
-              );
-            })}
-            {filters.length === 0 && (
-              <div className={styles.emptyHint}>暂无 filter</div>
-            )}
-          </div>
-        </aside>
-
-        {/* 中间画布——整个画布即 group 区域 */}
-        <div
-          ref={containerRef}
-          className={[styles.canvas, styles.canvasIsGroup].filter(Boolean).join(' ')}
-          style={{ borderLeftColor: group.color }}
-          onMouseDown={startPan}
-          onWheel={onWheel}
+        <button
+          className="ghost"
+          onClick={() => setActiveGroup(null)}
+          title="关闭分组编辑，回到数据视图"
         >
-          {/* 画布标题条 */}
-          <div className={styles.canvasTitle} style={{ background: group.color }}>
-            <span>{group.label}</span>
-            <span className={styles.groupCount}>{group.filterIds.length}</span>
-          </div>
-
-          {/* 序列边 SVG 层（pointer-events 只开在边线上） */}
-          <svg className={styles.edgeLayer}>
-            <defs>
-              <marker
-                id="seq-arrow"
-                viewBox="0 0 10 10"
-                refX="9"
-                refY="5"
-                markerWidth="7"
-                markerHeight="7"
-                orient="auto-start-reverse"
-              >
-                <path d="M 0 1 L 9 5 L 0 9 z" fill="context-stroke" />
-              </marker>
-            </defs>
-            {seqEdges.map((edge) => {
-              const kind = edge.kind ?? 'seq';
-              const fromFilter = filters.find((f) => f.id === edge.fromFilterId);
-              const st = edgeStat(edge.id);
-              const total = (st?.matchedCount ?? 0) + (st?.missCount ?? 0);
-              const rate = total > 0 ? Math.round((st!.matchedCount / total) * 100) : null;
-              const hasMiss = (st?.missCount ?? 0) > 0;
-
-              // ---- periodic 自环：节点右缘绕出小圆环回到自身 ----
-              if (kind === 'periodic') {
-                const node = graphNodes[edge.fromFilterId];
-                if (!node) return null;
-                const r = nodeRect(node);
-                const right = toScreen(r.x + r.w, r.y + r.h / 2);
-                const cx = right.x + 22;
-                const cy = right.y;
-                const hb = seqResult?.heartbeats.find(
-                  (h) => h.filterId === edge.fromFilterId,
-                );
-                const gapN = hb?.gaps.length ?? 0;
-                const jitN = hb?.jitters.length ?? 0;
-                return (
-                  <g key={edge.id} className={styles.edgeGroup}>
-                    <circle
-                      className={styles.edgeLoop}
-                      style={{ stroke: fromFilter?.color ?? undefined }}
-                      cx={cx}
-                      cy={cy}
-                      r="14"
-                    />
-                    <text
-                      className={styles.edgeLabel}
-                      x={cx}
-                      y={cy - 18}
-                      textAnchor="middle"
-                      onClick={() => setEditingEdge(edge)}
-                    >
-                      ♥ {formatGap(edge.periodMs ?? edge.maxGapMs)} ±{formatGap(edge.maxGapMs)}
-                      {gapN + jitN > 0 ? ` · ⚠${gapN} ⚡${jitN}` : ''}
-                    </text>
-                    <g
-                      className={styles.edgeDeleteBtn}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeSequenceEdge(group.id, edge.id);
-                      }}
-                    >
-                      <title>删除心跳约束</title>
-                      <circle cx={cx} cy={cy} r="8" />
-                      <path
-                        d={`M ${cx - 3} ${cy - 3} L ${cx + 3} ${cy + 3} M ${cx - 3} ${cy + 3} L ${cx + 3} ${cy - 3}`}
-                      />
-                    </g>
-                  </g>
-                );
-              }
-
-              // ---- 普通边（seq / not / and / or）：源点 + 目标点集合 ----
-              const p1 = sourcePoint(edge.fromFilterId);
-              if (!p1) return null;
-              const targets = edgeTargets(edge);
-              const pts = targets
-                .map((t) => targetPoint(t))
-                .filter((p): p is { x: number; y: number } => !!p);
-              if (pts.length === 0) return null;
-              const isNot = kind === 'not';
-              const vCount = isNot ? violationCount(edge.id) : 0;
-
-              return (
-                <g key={edge.id} className={styles.edgeGroup}>
-                  {pts.map((p2, ti) => {
-                    // 三次贝塞尔：控制点水平外扩
-                    const dx = Math.max(40, (p2.x - p1.x) / 2);
-                    const cx1 = p1.x + dx;
-                    const cx2 = p2.x - dx;
-                    const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-                    const d = `M ${p1.x} ${p1.y} C ${cx1} ${p1.y}, ${cx2} ${p2.y}, ${p2.x} ${p2.y}`;
-                    return (
-                      <g key={ti}>
-                        <path className={styles.edgeHit} d={d} />
-                        <path
-                          className={
-                            isNot
-                              ? styles.edgePathNot
-                              : hasMiss
-                                ? styles.edgePathMiss
-                                : styles.edgePath
-                          }
-                          style={
-                            isNot ? undefined : { stroke: fromFilter?.color ?? undefined }
-                          }
-                          markerEnd={isNot ? undefined : 'url(#seq-arrow)'}
-                          d={d}
-                        />
-                        {/* 多支时每支中点也放小 ×（主 × 放首支） */}
-                        {ti > 0 && (
-                          <g
-                            className={styles.edgeDeleteBtn}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removeSequenceEdge(group.id, edge.id);
-                            }}
-                          >
-                            <title>切断连线</title>
-                            <circle cx={mid.x} cy={mid.y} r="7" />
-                            <path
-                              d={`M ${mid.x - 2.5} ${mid.y - 2.5} L ${mid.x + 2.5} ${mid.y + 2.5} M ${mid.x - 2.5} ${mid.y + 2.5} L ${mid.x + 2.5} ${mid.y - 2.5}`}
-                            />
-                          </g>
-                        )}
-                      </g>
-                    );
-                  })}
-                  {/* 主标签 + 主 ×：放首支中点 */}
-                  {(() => {
-                    const p2 = pts[0];
-                    const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-                    const kindLabel =
-                      kind === 'and' ? 'AND' : kind === 'or' ? 'OR' : isNot ? '⃠' : '';
-                    return (
-                      <>
-                        <text
-                          className={styles.edgeLabel}
-                          x={mid.x}
-                          y={mid.y - 12}
-                          textAnchor="middle"
-                          onClick={() => setEditingEdge(edge)}
-                        >
-                          {kindLabel}
-                          {kindLabel ? ' ' : ''}
-                          {formatGap(edge.maxGapMs)}
-                          {isNot
-                            ? ` · ${vCount} 违规`
-                            : rate !== null
-                              ? ` · ${rate}%`
-                              : ''}
-                        </text>
-                        <g
-                          className={styles.edgeDeleteBtn}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removeSequenceEdge(group.id, edge.id);
-                          }}
-                        >
-                          <title>切断连线</title>
-                          <circle cx={mid.x} cy={mid.y} r="8" />
-                          <path
-                            d={`M ${mid.x - 3} ${mid.y - 3} L ${mid.x + 3} ${mid.y + 3} M ${mid.x - 3} ${mid.y + 3} L ${mid.x + 3} ${mid.y - 3}`}
-                          />
-                        </g>
-                      </>
-                    );
-                  })()}
-                </g>
-              );
-            })}
-            {/* 连线模式橡皮筋 */}
-            {linking &&
-              (() => {
-                const node = graphNodes[linking.fromFilterId];
-                if (!node) return null;
-                const r = nodeRect(node);
-                const p1 = toScreen(r.x + r.w, r.y + r.h / 2);
-                return (
-                  <line
-                    className={styles.edgeRubber}
-                    x1={p1.x}
-                    y1={p1.y}
-                    x2={linking.cur.x}
-                    y2={linking.cur.y}
-                  />
-                );
-              })()}
-          </svg>
-
-          {/* filter 实体直接铺在画布上 */}
-          {memberFilters.map((f) => {
-            const node = graphNodes[f.id];
-            if (!node) return null;
-            const r = nodeRect(node);
-            const fs = toScreen(r.x, r.y);
-            const chained = chainedCount(f.id);
-            return (
-              <div
-                key={f.id}
-                className={styles.filterNode}
-                style={{ left: fs.x, top: fs.y, width: r.w * graphZoom, borderLeftColor: f.color }}
-                onMouseDown={(e) => startNodeDrag(e, f.id)}
-              >
-                <span className={styles.filterDot} style={{ background: f.color }} />
-                <span className={styles.filterLabel} style={{ opacity: f.enabled ? 1 : 0.4 }}>{f.label}</span>
-                <span className={styles.filterCount}>{matchCount(f.id)}</span>
-                {chained > 0 && (
-                  <span className={styles.chainBadge} title="被完整链消耗的事件数">
-                    ⛓{chained}
-                  </span>
-                )}
-                <button
-                  className={styles.filterRemoveBtn}
-                  title={`从「${group.label}」移出`}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={(e) => { e.stopPropagation(); removeFilterFromGroup(f.id, group.id); }}
-                >
-                  <X size={12} />
-                </button>
-                {/* 右缘连线热区：从这里按下拖出即建序列边 */}
-                <span
-                  className={styles.nodeLinkHandle}
-                  title="拖出连线到目标节点，声明 A→B 时序约束"
-                  onMouseDown={(e) => startLinkDrag(e, f.id)}
-                />
-              </div>
-            );
-          })}
-          {memberFilters.length === 0 && (
-            <div className={styles.emptyHint}>从左侧拖入 filter 到画布即归属该组</div>
-          )}
-          {filters.length === 0 && (
-            <div className={styles.emptyHint}>暂无 filter</div>
-          )}
-        </div>
+          <X size={14} /> 关闭
+        </button>
       </div>
 
-      {/* 序列边编辑弹窗 */}
-      {editingEdge && group && (
-        <EdgeEditModal
-          groupId={group.id}
-          edge={editingEdge}
-          fromLabel={
-            filters.find((f) => f.id === editingEdge.fromFilterId)?.label ??
-            editingEdge.fromFilterId
-          }
-          toLabel={
-            filters.find((f) => f.id === editingEdge.toFilterId)?.label ??
-            editingEdge.toFilterId
-          }
-          memberTargets={memberFilters
-            .filter((f) => f.id !== editingEdge.fromFilterId)
-            .map((f) => ({ id: f.id, label: f.label }))}
-          stat={edgeStat(editingEdge.id)}
-          violationCount={violationCount(editingEdge.id)}
-          onClose={() => setEditingEdge(null)}
-        />
-      )}
+      {/* ReactFlow 画布：调色板 + 画布 + 边编辑弹窗均在 GroupFlowCanvas 内 */}
+      <GroupFlowCanvas group={group} />
     </div>
   );
 }
 
 /* ============================================================
- * 序列边编辑弹窗：时间窗 maxGapMs 编辑 + 删除
+ * 序列边编辑弹窗：类型切换 / 时间窗 / AND-OR 目标 / 周期容差
+ * （由 GroupFlowCanvas 触发；props 兼容旧调用）
  * ========================================================== */
 
-function EdgeEditModal(props: {
+export function EdgeEditModal(props: {
   groupId: string;
   edge: SequenceEdge;
   fromLabel: string;
@@ -825,7 +195,6 @@ function EdgeEditModal(props: {
           <button className="ghost" onClick={onClose}><X size={14} /></button>
         </div>
         <div className={styles.modalBody}>
-          {/* 类型切换 */}
           <div className={styles.edgeEditRow}>
             <label className={styles.edgeEditLabel}>约束类型</label>
             <select
@@ -834,10 +203,7 @@ function EdgeEditModal(props: {
               onChange={(e) => {
                 const k = e.target.value as SequenceEdge['kind'];
                 setKind(k);
-                if (k === 'periodic') {
-                  // 自环：目标 = from 自身
-                  setTargets([edge.fromFilterId]);
-                }
+                if (k === 'periodic') setTargets([edge.fromFilterId]);
               }}
             >
               {(['seq', 'not', 'and', 'or', 'periodic'] as const).map((k) => (
@@ -848,7 +214,6 @@ function EdgeEditModal(props: {
             </select>
           </div>
 
-          {/* periodic：周期 + 容差 */}
           {isPeriodic ? (
             <>
               <div className={styles.edgeEditRow}>
@@ -892,14 +257,11 @@ function EdgeEditModal(props: {
               />
               <span className={styles.edgeEditUnit}>ms</span>
               <span className={styles.edgeEditHint}>
-                {kind === 'not'
-                  ? `（窗口内出现禁止目标即违规）`
-                  : `（目标须在 ${fromLabel} 之后此窗口内出现）`}
+                {kind === 'not' ? '（窗口内出现禁止目标即违规）' : `（目标须在 ${fromLabel} 之后此窗口内出现）`}
               </span>
             </div>
           )}
 
-          {/* and/or：目标多选 */}
           {isMulti && (
             <div className={styles.modalSection}>
               <div className={styles.modalSectionTitle}>
@@ -915,9 +277,7 @@ function EdgeEditModal(props: {
                         checked={checked}
                         onChange={(e) => {
                           setTargets((prev) =>
-                            e.target.checked
-                              ? [...prev, t.id]
-                              : prev.filter((x) => x !== t.id),
+                            e.target.checked ? [...prev, t.id] : prev.filter((x) => x !== t.id),
                           );
                         }}
                       />
@@ -929,7 +289,6 @@ function EdgeEditModal(props: {
             </div>
           )}
 
-          {/* 统计 */}
           {stat && !isPeriodic && (
             <div className={styles.edgeStatRow}>
               {kind === 'not' ? (
@@ -976,20 +335,15 @@ export function FilterDetailModal() {
   const addFilterToGroup = useLogStore((s) => s.addFilterToGroup);
   const removeFilterFromGroup = useLogStore((s) => s.removeFilterFromGroup);
 
-  const filter = useMemo(
-    () => filters.find((f) => f.id === editingFilterId) ?? null,
-    [filters, editingFilterId],
-  );
-
-  const onClose = useCallback(() => setEditingFilterId(null), [setEditingFilterId]);
+  const filter = filters.find((f) => f.id === editingFilterId) ?? null;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') setEditingFilterId(null);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [setEditingFilterId]);
 
   if (!filter) return null;
 
@@ -997,11 +351,11 @@ export function FilterDetailModal() {
 
   return (
     <>
-      <div className={styles.modalBackdrop} onClick={onClose} />
+      <div className={styles.modalBackdrop} onClick={() => setEditingFilterId(null)} />
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div className={styles.modalHeader}>
           <span className={styles.modalTitle}>编辑过滤器</span>
-          <button className="ghost" onClick={onClose}><X size={14} /></button>
+          <button className="ghost" onClick={() => setEditingFilterId(null)}><X size={14} /></button>
         </div>
         <div className={styles.modalBody}>
           <div className={styles.modalRow}>
@@ -1095,10 +449,16 @@ export function FilterDetailModal() {
           </div>
         </div>
         <div className={styles.modalFooter}>
-          <button className="ghost" onClick={() => { removeFilter(filter.id); onClose(); }}>
+          <button
+            className="ghost"
+            onClick={() => {
+              removeFilter(filter.id);
+              setEditingFilterId(null);
+            }}
+          >
             删除过滤器
           </button>
-          <button className="primary" onClick={onClose}>完成</button>
+          <button className="primary" onClick={() => setEditingFilterId(null)}>完成</button>
         </div>
       </div>
     </>
