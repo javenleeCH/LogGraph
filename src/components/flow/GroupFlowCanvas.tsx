@@ -16,6 +16,8 @@ import {
   ReactFlowProvider,
   Background,
   BackgroundVariant,
+  MiniMap,
+  Controls,
   useReactFlow,
   type NodeChange,
   type Connection,
@@ -316,14 +318,28 @@ function GroupFlowCanvasInner({ group }: { group: FilterGroup }) {
           onNodeDragStop={onNodeDragStop}
           nodesDraggable
           nodesConnectable
-          panOnDrag
           zoomOnScroll
           minZoom={0.2}
           maxZoom={3}
           proOptions={{ hideAttribution: true }}
           fitView={false}
+          selectionOnDrag
+          panOnDrag={[1, 2]} /* 中键/右键拖拽平移，左键留给框选 */
+          selectionKeyCode="Shift"
+          multiSelectionKeyCode={null}
+          deleteKeyCode={null}
+          snapToGrid
+          snapGrid={[10, 10]}
         >
           <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+          <MiniMap
+            pannable
+            zoomable
+            nodeColor={(n) => (n.data as FilterNodeData)?.color ?? '#ccc'}
+            nodeStrokeWidth={2}
+            style={{ width: 140, height: 100 }}
+          />
+          <Controls showInteractive={false} />
         </ReactFlow>
         <div className={styles.canvasTitle} style={{ background: group.color }}>
           <span>{group.label}</span>
