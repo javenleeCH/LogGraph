@@ -14,6 +14,12 @@ export type FilterNodeData = {
   enabled: boolean;
   matchCount: number;
   chainedCount: number;
+  /** 循环次数角标文本（如 "{2,5}"）；null=无约束 */
+  countLabel?: string | null;
+  /** 是否有条件表达式（ƒ 角标） */
+  hasCondition?: boolean;
+  /** 双击节点回调（打开节点编辑器） */
+  onEdit?: () => void;
   /** 悬停时移除按钮回调（由父级注入） */
   onRemove?: () => void;
 };
@@ -25,6 +31,10 @@ function FilterNodeInner({ data }: NodeProps<FilterNodeType>) {
     <div
       className={styles.filterNode}
       style={{ borderLeftColor: data.color, width: 160 }}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        data.onEdit?.();
+      }}
     >
       <span className={styles.filterDot} style={{ background: data.color }} />
       <span className={styles.filterLabel} style={{ opacity: data.enabled ? 1 : 0.4 }}>
@@ -34,6 +44,16 @@ function FilterNodeInner({ data }: NodeProps<FilterNodeType>) {
       {data.chainedCount > 0 && (
         <span className={styles.chainBadge} title="被完整链消耗的事件数">
           ⛓{data.chainedCount}
+        </span>
+      )}
+      {data.countLabel && (
+        <span className={styles.countBadge} title="循环次数约束（EPL A{min,max}）">
+          {data.countLabel}
+        </span>
+      )}
+      {data.hasCondition && (
+        <span className={styles.condBadge} title="有条件表达式（双击编辑）">
+          ƒ
         </span>
       )}
       {data.onRemove && (

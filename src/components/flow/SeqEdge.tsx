@@ -15,7 +15,7 @@ import {
 } from '@xyflow/react';
 
 export type SeqEdgeData = {
-  kind: 'seq' | 'not' | 'and' | 'or' | 'periodic';
+  kind: 'seq' | 'not' | 'and' | 'or' | 'periodic' | 'opt';
   color?: string;
   /** 标签文本（时间窗/周期 + 统计），由父级算好注入 */
   label: string;
@@ -102,6 +102,7 @@ function SeqEdgeInner(props: EdgeProps<SeqEdgeType>) {
   const markerEnd = isNot ? undefined : { url: undefined as unknown as string };
   void markerEnd; // 箭头由 CSS markerEnd 属性类控制（见 module.css）
 
+  const isOpt = data?.kind === 'opt';
   return (
     <>
       <BaseEdge
@@ -111,7 +112,9 @@ function SeqEdgeInner(props: EdgeProps<SeqEdgeType>) {
         style={
           isNot
             ? { stroke: 'var(--danger)', strokeWidth: 2, strokeDasharray: '4 3', opacity: 0.85 }
-            : { stroke: data?.color, strokeWidth: 2, opacity: 0.85 }
+            : isOpt
+              ? { stroke: data?.color, strokeWidth: 2, strokeDasharray: '2 5', opacity: 0.7 }
+              : { stroke: data?.color, strokeWidth: 2, opacity: 0.85 }
         }
       />
       {/* and/or 副支：多目标分支路径（视觉扇形） */}

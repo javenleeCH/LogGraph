@@ -30,6 +30,7 @@ import type {
   SequenceMatchResult,
 } from '../types';
 import { bisectLeft } from '../timeline/correlation';
+import { compileExpr } from './expr';
 
 /** 边的有效目标列表（and/or 用 toFilterIds，其余用 toFilterId） */
 function targetsOf(edge: SequenceEdge): string[] {
@@ -264,8 +265,20 @@ function matchBucket(
   const chains: MatchedChain[] = [];
   const violations: NotViolation[] = [];
 
-  const eventsOf = (fid: string): LogEvent[] =>
-    filterIds.includes(fid) ? matchByFilterId.get(fid) ?? [] : [];
+  // 节点条件编译缓存（fid → 谓词；null=不过滤/非法）
+  const condCache = new Map<string, ((ev: LogEvent) => boolean) | null>();
+  const eventsOf = (fid: string): LogEvent[] => {
+    const evs = filterIds.includes(fid) ? matchByFilterId.get(fid) ?? [] : [];
+    const condSrc = config.nodeConditions?.[fid];
+    if (!condSrc?.trim()) return evs;
+    let pred = condCache.get(fid);
+    if (pred === undefined) {
+      const compiled = compileExpr(condSrc);
+      pred = compiled === null ? null : compiled;
+      condCache.set(fid, pred);
+    }
+    return pred ? evs.filter(pred) : evs;
+  };
 
   // NOT 边：纯断言——对 from 的每个事件独立检查窗口（不消耗事件，不受链影响）
   // 规则：窗口内先遇禁止目标 → 违规；先遇另一 from 实例 → 观察期提前结束，通过；窗口耗尽 → 通过
@@ -308,9 +321,38 @@ function matchBucket(
       let cur = e0;
       let ok = true;
       for (const edge of chain.edges) {
+        const kind = edge.kind ?? 'seq';
         const fromEvents = eventsOf(edge.fromFilterId);
         const eventsByTarget = new Map<string, LogEvent[]>();
         for (const t of targetsOf(edge)) eventsByTarget.set(t, eventsOf(t));
+
+        // ---- opt 边：目标在窗口内则消耗（长路径），否则跳过（短路径），均不断裂 ----
+        if (kind === 'opt') {
+          const rOpt = advanceEdge(
+            { ...edge, kind: 'seq' }, // 复用 seq 推进（无插队放宽，插队仍断裂）
+            fromEvents,
+            eventsByTarget,
+            consumed,
+            cur.ts,
+          );
+          const st = edgeStats.get(edge.id);
+          if (rOpt !== null && 'ok' in rOpt && rOpt.movedTo) {
+            // 可选目标命中：消耗并推进
+            if (st) st.matchedCount++;
+            steps.push({ edgeId: edge.id, filterId: edge.toFilterId, event: rOpt.movedTo });
+            cur = rOpt.movedTo;
+          } else if (rOpt === null) {
+            // 目标缺失/超窗/插队——opt 容忍插队语义：仅当「目标缺失」跳过；
+            // advanceEdge 无法区分缺失与插队，这里统一跳过（opt 的容错优先于插队严格性，
+            // 因为跳过后 cur 未动，链的时序基准仍由后续边约束）
+            if (st) st.missCount++;
+            // 不设 ok=false：跳过此边，cur 不动
+          } else {
+            // violation（不会发生：seq 无 violation）；防御：跳过
+          }
+          continue;
+        }
+
         const r = advanceEdge(edge, fromEvents, eventsByTarget, consumed, cur.ts);
         if (r === null) {
           const st = edgeStats.get(edge.id);
@@ -330,7 +372,6 @@ function matchBucket(
         if (st) st.matchedCount++;
         if (r.movedTo) {
           // and：消耗全部就绪目标；其余：消耗 movedTo
-          const kind = edge.kind ?? 'seq';
           if (kind === 'and') {
             // 重新收集窗口内各目标最早未消耗事件（与 advanceEdge 一致）
             for (const t of targetsOf(edge)) {
@@ -350,6 +391,32 @@ function matchBucket(
                 : edge.toFilterId;
             steps.push({ edgeId: edge.id, filterId: tFid, event: r.movedTo });
             cur = r.movedTo;
+            // ---- nodeCounts：目标节点需连续出现 [min,max] 次 ----
+            const nc = config.nodeCounts?.[tFid];
+            if (nc && nc.min > 1) {
+              const evs = eventsOf(tFid);
+              const collected: LogEvent[] = [];
+              let lastTs = cur.ts;
+              for (const ev of evs) {
+                if (ev.ts <= lastTs) continue;
+                if (ev.ts - lastTs > edge.maxGapMs) break;
+                if (consumed.has(ev.id) || ev.id === cur.id) continue;
+                collected.push(ev);
+                lastTs = ev.ts;
+                if (collected.length >= nc.max - 1) break; // 含首事件共 max 个
+              }
+              if (collected.length + 1 < nc.min) {
+                // 连续数不足 min → 断裂
+                const st = edgeStats.get(edge.id);
+                if (st) st.missCount++;
+                ok = false;
+                break;
+              }
+              for (const ev of collected) {
+                steps.push({ edgeId: edge.id, filterId: tFid, event: ev });
+              }
+              cur = collected.length > 0 ? collected[collected.length - 1] : cur;
+            }
           }
         } else {
           // not 通过：不消耗、cur 不动（链继续走后续边，仍以 cur.ts 起算）

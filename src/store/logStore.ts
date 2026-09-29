@@ -128,6 +128,14 @@ interface LogState {
   removeSequenceEdge: (groupId: string, edgeId: string) => void;
   toggleSequenceAnomaly: (groupId: string) => void;
   setSequenceScope: (groupId: string, scope: 'global' | 'thread') => void;
+  /** 设置节点循环次数（EPL A{min,max}）；null 删除约束 */
+  setNodeCount: (
+    groupId: string,
+    filterId: string,
+    count: { min: number; max: number } | null,
+  ) => void;
+  /** 设置节点条件表达式（空串删除） */
+  setNodeCondition: (groupId: string, filterId: string, expr: string) => void;
 
   // --- 节点画布（draw.io 风格区域式） ---
   /** 当前展开的 group 详情页（null=关闭抽屉） */
@@ -583,6 +591,34 @@ export const useLogStore = create<LogState>((set, get) => ({
       if (g.id !== groupId) return g;
       const seq = g.sequence ?? { edges: [], anomalyEnabled: false };
       return { ...g, sequence: { ...seq, scope } };
+    });
+    set({ groups });
+    get().recomputeSequences();
+    schedulePersist(get);
+  },
+
+  setNodeCount: (groupId, filterId, count) => {
+    const groups = get().groups.map((g) => {
+      if (g.id !== groupId) return g;
+      const seq = g.sequence ?? { edges: [], anomalyEnabled: false };
+      const next = { ...seq.nodeCounts };
+      if (count === null) delete next[filterId];
+      else next[filterId] = count;
+      return { ...g, sequence: { ...seq, nodeCounts: next } };
+    });
+    set({ groups });
+    get().recomputeSequences();
+    schedulePersist(get);
+  },
+
+  setNodeCondition: (groupId, filterId, expr) => {
+    const groups = get().groups.map((g) => {
+      if (g.id !== groupId) return g;
+      const seq = g.sequence ?? { edges: [], anomalyEnabled: false };
+      const next = { ...seq.nodeConditions };
+      if (expr.trim()) next[filterId] = expr;
+      else delete next[filterId];
+      return { ...g, sequence: { ...seq, nodeConditions: next } };
     });
     set({ groups });
     get().recomputeSequences();

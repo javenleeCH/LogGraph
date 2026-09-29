@@ -156,6 +156,7 @@ export function EdgeEditModal(props: {
     not: '禁止 NOT（A 的窗口内不得出现 B）',
     and: '汇聚 AND（A 后全部目标都须出现）',
     or: '分支 OR（A 后任一目标出现即可）',
+    opt: '可选 OPT（B 可缺省，缺失时直接跳到后续）',
     periodic: '周期心跳 Periodic（A 以固定周期反复出现）',
   };
 
@@ -206,7 +207,7 @@ export function EdgeEditModal(props: {
                 if (k === 'periodic') setTargets([edge.fromFilterId]);
               }}
             >
-              {(['seq', 'not', 'and', 'or', 'periodic'] as const).map((k) => (
+              {(['seq', 'not', 'and', 'or', 'opt', 'periodic'] as const).map((k) => (
                 <option key={k} value={k}>
                   {KIND_LABEL[k]}
                 </option>

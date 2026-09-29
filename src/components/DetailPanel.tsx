@@ -13,6 +13,8 @@ export function DetailPanel() {
   const rawLines = useLogStore((s) => s.rawLines);
   const matches = useLogStore((s) => s.matches);
   const filters = useLogStore((s) => s.filters);
+  const groups = useLogStore((s) => s.groups);
+  const sequenceResults = useLogStore((s) => s.sequenceResults);
   const correlatedEventIds = useLogStore((s) => s.correlatedEventIds);
   const selectEvent = useLogStore((s) => s.selectEvent);
   const selectedRef = useRef<HTMLDivElement>(null);
@@ -40,6 +42,42 @@ export function DetailPanel() {
       ),
     );
   }, [selected, filters, matches]);
+
+  // 选中事件所属的匹配链（MEASURES 展示）
+  const owningChain = useMemo(() => {
+    if (!selected) return null;
+    for (const g of groups) {
+      const r = sequenceResults[g.id];
+      if (!r) continue;
+      for (const ch of r.chains) {
+        if (ch.steps.some((st) => st.event.id === selected.id)) {
+          return { group: g, chain: ch };
+        }
+      }
+    }
+    return null;
+  }, [selected, groups, sequenceResults]);
+
+  const copyChainJson = () => {
+    if (!owningChain) return;
+    const { group, chain } = owningChain;
+    const payload = {
+      group: group.label,
+      chainIndex: chain.chainIndex,
+      thread: chain.thread ?? null,
+      startTs: chain.startTs,
+      endTs: chain.endTs,
+      measures: chain.steps.map((st) => ({
+        filter: filters.find((f) => f.id === st.filterId)?.label ?? st.filterId,
+        ts: st.event.ts,
+        thread: st.event.thread ?? null,
+        level: st.event.level ?? null,
+        sourceFile: st.event.sourceFile ?? null,
+        raw: st.event.raw,
+      })),
+    };
+    void navigator.clipboard?.writeText(JSON.stringify(payload, null, 2));
+  };
 
   if (!selected) {
     return (
@@ -102,6 +140,95 @@ export function DetailPanel() {
           </span>
         ))}
       </div>
+      {/* 匹配链卡片（MEASURES）：选中事件在链上时展示整链 */}
+      {owningChain && (
+        <div
+          className={styles.tag}
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'stretch',
+            gap: 4,
+            margin: '0 12px 8px',
+            padding: '8px 10px',
+            border: `1px solid ${owningChain.group.color}`,
+            borderRadius: 8,
+            background: 'var(--bg-panel)',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            <span style={{ color: owningChain.group.color }}>
+              ⛓ 链 #{owningChain.chain.chainIndex}
+            </span>
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
+              {owningChain.group.label}
+              {owningChain.chain.thread ? ` · ${owningChain.chain.thread}` : ''}
+            </span>
+            <span style={{ flex: 1 }} />
+            <button
+              className="ghost"
+              style={{ fontSize: 11, padding: '1px 8px' }}
+              onClick={copyChainJson}
+              title="复制链 MEASURES 为 JSON（各步 ts/thread/level/raw）"
+            >
+              复制 JSON
+            </button>
+          </div>
+          {owningChain.chain.steps.map((st, i) => {
+            const stFilter = filters.find((f) => f.id === st.filterId);
+            const isSel = st.event.id === selected.id;
+            return (
+              <div
+                key={i}
+                onClick={() => selectEvent(st.event.id)}
+                style={{
+                  display: 'flex',
+                  gap: 6,
+                  alignItems: 'center',
+                  fontSize: 11,
+                  cursor: 'pointer',
+                  padding: '2px 4px',
+                  borderRadius: 5,
+                  background: isSel ? 'var(--bg-hover)' : 'transparent',
+                }}
+              >
+                <span
+                  style={{
+                    color: stFilter?.color ?? 'var(--text-dim)',
+                    fontWeight: 600,
+                    minWidth: 60,
+                  }}
+                >
+                  {stFilter?.label ?? st.filterId}
+                </span>
+                <span style={{ color: 'var(--text-faint)' }}>
+                  {formatDateTime(st.event.ts)}
+                </span>
+                <span
+                  style={{
+                    color: 'var(--text-dim)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    flex: 1,
+                  }}
+                  title={st.event.raw}
+                >
+                  {st.event.raw}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className={styles['detail-body']}>
         {ctxLines.map((l) => {
           const isSelected = l.lineId === selected.id;

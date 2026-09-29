@@ -64,7 +64,7 @@ export interface FilterMatch {
 // ===== 串行序列匹配（group 图关联）=====
 
 /** 边类型（缺省 'seq'，v1 数据向后兼容） */
-export type EdgeKind = 'seq' | 'not' | 'and' | 'or' | 'periodic';
+export type EdgeKind = 'seq' | 'not' | 'and' | 'or' | 'periodic' | 'opt';
 
 /** 序列边：group 内 filter 间的时序约束 */
 export interface SequenceEdge {
@@ -85,6 +85,12 @@ export interface SequenceEdge {
   periodMs?: number;
 }
 
+/** 节点循环次数约束（EPL A{min,max}） */
+export interface NodeCount {
+  min: number;
+  max: number; // Infinity 用 Number.POSITIVE_INFINITY
+}
+
 /** group 的序列匹配配置（挂在 FilterGroup 上） */
 export interface SequenceConfig {
   edges: SequenceEdge[];
@@ -92,6 +98,10 @@ export interface SequenceConfig {
   anomalyEnabled: boolean;
   /** 匹配作用域：global=全局时间轴（默认）；thread=按 thread 字段分桶隔离 */
   scope?: 'global' | 'thread';
+  /** 节点循环次数：filterId → [min,max]；缺省 [1,1]（EPL A{2,5}） */
+  nodeCounts?: Record<string, NodeCount>;
+  /** 节点条件表达式：filterId → 表达式串（对 filter 匹配事件二次过滤；空/缺省=不过滤） */
+  nodeConditions?: Record<string, string>;
 }
 
 /** 一条完整匹配链（链上各步按时间序，与边一一对应） */

@@ -24,13 +24,14 @@ import {
   type OnConnect,
   type OnConnectStart,
 } from '@xyflow/react';
+import { validateExpr, compileExpr } from '../../sequence/expr';
 import '@xyflow/react/dist/style.css';
 import { useLogStore } from '../../store/logStore';
 import type { FilterGroup, SequenceEdge } from '../../types';
 import { formatGap } from '../NodeCanvasView';
 import { FilterNode, type FilterNodeData } from './FilterNode';
 import { SeqEdge, type SeqEdgeData } from './SeqEdge';
-import { Check } from '../Icon';
+import { Check, X } from '../Icon';
 import styles from '../NodeCanvasView.module.css';
 
 const nodeTypes = { filter: FilterNode };
@@ -53,10 +54,12 @@ function GroupFlowCanvasInner({ group }: { group: FilterGroup }) {
 
   // 编辑中的边（复用旧弹窗）
   const [editingEdge, setEditingEdge] = useState<SequenceEdge | null>(null);
+  // 编辑中的节点（条件+次数弹窗）
+  const [editingNode, setEditingNode] = useState<string | null>(null);
   // 调色板拖拽的 filterId（HTML5 DnD）
   const dragFilterId = useRef<string | null>(null);
   // 连线修饰键
-  const modifierRef = useRef<'and' | 'or' | null>(null);
+  const modifierRef = useRef<'and' | 'or' | 'opt' | null>(null);
 
   const seqResult = sequenceResults[group.id];
 
@@ -80,12 +83,22 @@ function GroupFlowCanvasInner({ group }: { group: FilterGroup }) {
         for (const ch of seqResult?.chains ?? []) {
           for (const st of ch.steps) if (st.filterId === fid) chained++;
         }
+        const nc = group.sequence?.nodeCounts?.[fid];
+        const countLabel = nc
+          ? nc.min === nc.max
+            ? `{${nc.min}}`
+            : `{${nc.min},${nc.max === Infinity ? '' : nc.max}}`
+          : null;
+        const hasCondition = !!group.sequence?.nodeConditions?.[fid]?.trim();
         const data: FilterNodeData = {
           label: f.label,
           color: f.color,
           enabled: f.enabled,
           matchCount,
           chainedCount: chained,
+          countLabel,
+          hasCondition,
+          onEdit: () => setEditingNode(fid),
           onRemove: () => removeFilterFromGroup(fid, group.id),
         };
         return {
@@ -119,7 +132,7 @@ function GroupFlowCanvasInner({ group }: { group: FilterGroup }) {
         const total = (st?.matchedCount ?? 0) + (st?.missCount ?? 0);
         const rate = total > 0 ? Math.round((st!.matchedCount / total) * 100) : null;
         const kindLabel =
-          kind === 'and' ? 'AND ' : kind === 'or' ? 'OR ' : kind === 'not' ? '⃠ ' : '';
+          kind === 'and' ? 'AND ' : kind === 'or' ? 'OR ' : kind === 'not' ? '⃠ ' : kind === 'opt' ? '? ' : '';
         label = `${kindLabel}${formatGap(edge.maxGapMs)}${
           kind === 'not' ? ` · ${vCount} 违规` : rate !== null ? ` · ${rate}%` : ''
         }`;
@@ -215,7 +228,7 @@ function GroupFlowCanvasInner({ group }: { group: FilterGroup }) {
   // ---- 连线：修饰键建边 ----
   const onConnectStart: OnConnectStart = useCallback((e) => {
     const me = e as unknown as React.MouseEvent;
-    modifierRef.current = me.shiftKey ? 'and' : me.altKey ? 'or' : null;
+    modifierRef.current = me.shiftKey ? 'and' : me.altKey ? 'or' : me.ctrlKey || me.metaKey ? 'opt' : null;
   }, []);
   const onConnect: OnConnect = useCallback(
     (conn: Connection) => {
@@ -227,11 +240,13 @@ function GroupFlowCanvasInner({ group }: { group: FilterGroup }) {
         });
         return;
       }
-      if (modifierRef.current) {
+      if (modifierRef.current === 'and' || modifierRef.current === 'or') {
         addSequenceEdge(group.id, conn.source, conn.target, 1000, {
           kind: modifierRef.current,
           toFilterIds: [conn.target],
         });
+      } else if (modifierRef.current === 'opt') {
+        addSequenceEdge(group.id, conn.source, conn.target, 1000, { kind: 'opt' });
       } else {
         addSequenceEdge(group.id, conn.source, conn.target);
       }
@@ -350,6 +365,15 @@ function GroupFlowCanvasInner({ group }: { group: FilterGroup }) {
         )}
       </div>
 
+      {/* 节点编辑弹窗（条件+次数） */}
+      {editingNode && (
+        <NodeEditModal
+          group={group}
+          filterId={editingNode}
+          onClose={() => setEditingNode(null)}
+        />
+      )}
+
       {/* 复用旧边编辑弹窗 */}
       {editingEdge && (
         <EdgeEditModalLazy
@@ -390,6 +414,112 @@ function EdgeEditModalLazy(props: {
       violationCount={vCount}
       onClose={onClose}
     />
+  );
+}
+
+/** 节点编辑弹窗：循环次数 + 条件表达式（EPL A{n,m} 与事件内部条件） */
+function NodeEditModal(props: {
+  group: FilterGroup;
+  filterId: string;
+  onClose: () => void;
+}) {
+  const { group, filterId, onClose } = props;
+  const filters = useLogStore((s) => s.filters);
+  const matches = useLogStore((s) => s.matches);
+  const setNodeCount = useLogStore((s) => s.setNodeCount);
+  const setNodeCondition = useLogStore((s) => s.setNodeCondition);
+  const f = filters.find((x) => x.id === filterId);
+  const nc = group.sequence?.nodeCounts?.[filterId];
+  const cond = group.sequence?.nodeConditions?.[filterId] ?? '';
+  const [minS, setMinS] = useState(String(nc?.min ?? 1));
+  const [maxS, setMaxS] = useState(nc?.max === Infinity ? '' : String(nc?.max ?? 1));
+  const [expr, setExpr] = useState(cond);
+
+  // 实时校验 + 命中预览
+  const exprErr = useMemo(() => validateExpr(expr), [expr]);
+  const preview = useMemo(() => {
+    if (!expr.trim() || exprErr) return null;
+    const pred = compileExpr(expr);
+    if (!pred) return null;
+    const evs = matches.find((m) => m.filterId === filterId)?.events ?? [];
+    return { total: evs.length, hit: evs.filter(pred).length };
+  }, [expr, exprErr, matches, filterId]);
+
+  if (!f) return null;
+
+  const apply = () => {
+    const min = Math.max(1, parseInt(minS, 10) || 1);
+    const maxRaw = maxS.trim() === '' ? Infinity : parseInt(maxS, 10) || min;
+    const max = Math.max(min, maxRaw);
+    if (min > 1 || max > 1) setNodeCount(group.id, filterId, { min, max });
+    else setNodeCount(group.id, filterId, null);
+    setNodeCondition(group.id, filterId, expr);
+    onClose();
+  };
+
+  return (
+    <>
+      <div className={styles.modalBackdrop} onClick={onClose} />
+      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div className={styles.modalHeader}>
+          <span className={styles.modalTitle}>
+            节点约束：<span className="mono">{f.label}</span>
+          </span>
+          <button className="ghost" onClick={onClose}><X size={14} /></button>
+        </div>
+        <div className={styles.modalBody}>
+          <div className={styles.edgeEditRow}>
+            <label className={styles.edgeEditLabel}>出现次数</label>
+            <input
+              className={`${styles.edgeEditInput} mono`}
+              type="number"
+              min={1}
+              value={minS}
+              onChange={(e) => setMinS(e.target.value)}
+              style={{ width: 60 }}
+            />
+            <span className={styles.edgeEditUnit}>~</span>
+            <input
+              className={`${styles.edgeEditInput} mono`}
+              type="number"
+              min={1}
+              placeholder="∞"
+              value={maxS}
+              onChange={(e) => setMaxS(e.target.value)}
+              style={{ width: 60 }}
+            />
+            <span className={styles.edgeEditHint}>
+              （EPL A&#123;{minS || 1}&#125; 语义；1~1 = 不约束）
+            </span>
+          </div>
+
+          <div className={styles.modalSection}>
+            <div className={styles.modalSectionTitle}>条件表达式（对匹配事件二次过滤）</div>
+            <input
+              className={`${styles.edgeEditInput} mono`}
+              style={{ width: '100%' }}
+              type="text"
+              value={expr}
+              placeholder="level == 'E' && msg.includes('IPC timeout')"
+              onChange={(e) => setExpr(e.target.value)}
+            />
+            {exprErr ? (
+              <div style={{ color: 'var(--danger)', fontSize: 12 }}>{exprErr}</div>
+            ) : preview ? (
+              <div className={styles.edgeStatRow}>
+                命中预览：<b>{preview.hit}</b> / {preview.total} 条匹配事件
+              </div>
+            ) : null}
+            <div className={styles.edgeEditHint}>
+              {'字段：raw / msg / thread / level / ts / file · 运算：== != > < && || · 方法：msg.includes(\'x\') / startsWith / endsWith'}
+            </div>
+          </div>
+        </div>
+        <div className={styles.modalFooter}>
+          <button className="primary" onClick={apply}>保存</button>
+        </div>
+      </div>
+    </>
   );
 }
 
