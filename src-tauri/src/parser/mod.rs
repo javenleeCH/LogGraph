@@ -158,23 +158,39 @@ pub async fn parse_log(
     .map_err(|e| format!("解析任务执行失败: {e}"))?
 }
 
-// ---- 目录批量解析（P2：141 文件 × 5.1MB 场景，1 次 IPC 替代 141 次）----
+// ---- 目录批量解析（P2：141 文件 × 5.1MB 场景，分块传输防 OOM）----
+// 教训：一次性返回全量 events+rawLines 会序列化出 ~2GB 的单个 JSON，
+// Rust 堆 + JSON 串 + JS parse 结果三份共存直接打爆 WebView 内存（应用退出）。
+// 协议：parse_dir 只解析+缓存+回元数据（prepare）；前端循环
+// dir_lines_chunk / dir_events_chunk 按 offset 分块拉取；dir_cache_drop 释放。
+// 内存峰值 ≈ Rust 缓存 + 单块 JSON（~15MB），无巨型中间串。
 
-/// 多文件合并结果（= 前端 MultiLoadResult.meta 部分 + 全局事件流）
+use std::sync::{Mutex, OnceLock};
+
+/// prepare 阶段缓存；events / raw_lines 由 dir_chunk 从头部 drain 取走
+struct DirParseCache {
+    events: Vec<LogEventDto>,
+    raw_lines: Vec<String>,
+}
+
+fn dir_cache() -> &'static Mutex<Option<DirParseCache>> {
+    static CACHE: OnceLock<Mutex<Option<DirParseCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// 目录解析元数据（不含大数据体）
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct DirParseResultDto {
-    /// 全局事件流（id 已重编为全局行号，sourceFile 已赋值，按 ts 升序）
-    pub events: Vec<LogEventDto>,
-    /// 全局 rawLines（与前端 mergeParsedInputs 语义一致）
-    pub raw_lines: Vec<String>,
-    /// 参与合并的文件相对名（与 events.sourceFile 一致）
-    pub file_names: Vec<String>,
+pub struct DirMetaDto {
+    pub total_events: u32,
     pub total_lines: u32,
     pub skipped: u32,
-    /// 各文件格式 id 集合大小为 1 时给出该 id，否则 None（与 JS meta 逻辑一致）
+    pub file_count: u32,
     pub timestamp_format_id: Option<String>,
+    /// 参与合并的文件相对名
+    pub file_names: Vec<String>,
 }
+
 
 /// 判断文件名是否为可识别的日志文件（对齐前端 isLogFileName 宽松匹配）
 fn is_log_file_name(name: &str) -> bool {
@@ -213,14 +229,14 @@ fn walk_log_files(dir: &std::path::Path, prefix: &str, depth: u32, out: &mut Vec
     }
 }
 
-/// 批量解析目录：枚举 + 逐文件解析 + 全局 id 重编 + sourceFile 赋值 + 全局按 ts 排序，
-/// 全程 Rust 进程内完成（前端零合并拷贝），结果一次 IPC 返回。
+/// 批量解析目录（prepare 阶段）：枚举 + 逐文件解析 + 全局 id 重编 + sourceFile 赋值
+/// + 全局按 ts 排序，结果缓存在进程内，只回元数据（大数据体由 dir_chunk 分块拉取）。
 /// 进度经 Tauri event `parse_dir_progress` 推送 { loaded, total, current }。
 #[tauri::command]
 pub async fn parse_dir(
     app: tauri::AppHandle,
     dir: String,
-) -> Result<DirParseResultDto, String> {
+) -> Result<DirMetaDto, String> {
     use tauri::Emitter;
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -283,17 +299,63 @@ pub async fn parse_dir(
             None
         };
 
-        Ok(DirParseResultDto {
+        let total_events = all_events.len() as u32;
+        // 缓存（覆盖旧的；连续加载时旧缓存被丢弃）
+        *dir_cache().lock().map_err(|e| e.to_string())? = Some(DirParseCache {
             events: all_events,
             raw_lines: all_raw_lines,
-            file_names,
+        });
+
+        Ok(DirMetaDto {
+            total_events,
             total_lines,
             skipped,
+            file_count: file_names.len() as u32,
             timestamp_format_id,
+            file_names,
         })
     })
     .await
     .map_err(|e| format!("目录解析任务执行失败: {e}"))?
+}
+
+/// 取一块 rawLines（offset 起最多 max 条；不足 max = 已到尾）。
+/// 返回空数组 = 该序列传输完成。
+#[tauri::command]
+pub fn dir_lines_chunk(
+    offset: u32,
+    max: u32,
+) -> Result<Vec<String>, String> {
+    let guard = dir_cache().lock().map_err(|e| e.to_string())?;
+    let Some(cache) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let start = (offset as usize).min(cache.raw_lines.len());
+    let end = (start + max as usize).min(cache.raw_lines.len());
+    Ok(cache.raw_lines[start..end].to_vec())
+}
+
+/// 取一块事件（offset 起最多 max 条；事件已按 ts 升序）。
+/// 返回空数组 = 该序列传输完成。两序列都完成时由前端调 dir_cache_drop 释放。
+#[tauri::command]
+pub fn dir_events_chunk(
+    offset: u32,
+    max: u32,
+) -> Result<Vec<LogEventDto>, String> {
+    let guard = dir_cache().lock().map_err(|e| e.to_string())?;
+    let Some(cache) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let start = (offset as usize).min(cache.events.len());
+    let end = (start + max as usize).min(cache.events.len());
+    Ok(cache.events[start..end].to_vec())
+}
+
+/// 丢弃缓存（前端拉取完成后调用；重新 prepare 也会覆盖）。
+#[tauri::command]
+pub fn dir_cache_drop() -> Result<(), String> {
+    *dir_cache().lock().map_err(|e| e.to_string())? = None;
+    Ok(())
 }
 
 // ---- 单元测试（cargo test；期望值均按 JS 语义人工推演）----

@@ -188,6 +188,17 @@ export interface RustDirEvent {
   sourceFile?: string;
 }
 
+/** prepare 阶段返回的元数据（不含大数据体） */
+export interface RustDirMeta {
+  totalEvents: number;
+  totalLines: number;
+  skipped: number;
+  fileCount: number;
+  timestampFormatId: string | null;
+  fileNames: string[];
+}
+
+/** 目录批量解析最终结果（分块拉取后拼装） */
 export interface RustDirParseResult {
   events: RustDirEvent[];
   rawLines: string[];
@@ -198,38 +209,88 @@ export interface RustDirParseResult {
 }
 
 /** 形状校验：防 Rust 侧异常返回把脏数据塞进 store */
-function isRustDirResult(v: unknown): v is RustDirParseResult {
+function isRustDirMeta(v: unknown): v is RustDirMeta {
   if (!v || typeof v !== 'object') return false;
-  const r = v as RustDirParseResult;
+  const r = v as RustDirMeta;
   return (
-    Array.isArray(r.events) &&
-    Array.isArray(r.rawLines) &&
-    Array.isArray(r.fileNames) &&
+    typeof r.totalEvents === 'number' &&
     typeof r.totalLines === 'number' &&
     typeof r.skipped === 'number' &&
-    (r.timestampFormatId === null || typeof r.timestampFormatId === 'string')
+    typeof r.fileCount === 'number' &&
+    (r.timestampFormatId === null || typeof r.timestampFormatId === 'string') &&
+    Array.isArray(r.fileNames)
   );
 }
 
+/** 单块行数（≈15MB JSON，IPC 安全阈值） */
+const DIR_CHUNK_LINES = 60_000;
+
 /**
- * Tauri 专用：批量解析整个目录（枚举+解析+合并+全局排序 全在 Rust 进程内）。
- * 返回 null 表示不可用/失败，调用方回退逐文件路径。
- * 进度通过 Tauri event `parse_dir_progress` 推送（onProgress 订阅由调用方管理）。
+ * Tauri 专用：批量解析整个目录（分块传输防 OOM）。
+ * 协议：invoke parse_dir（prepare，Rust 解析+缓存+回元数据）
+ *   → 循环 invoke dir_lines_chunk / dir_events_chunk 分块拉取
+ *   → invoke dir_cache_drop 释放。
+ * onProgress(0..1) 报告拉取阶段进度。返回 null 表示不可用/失败，调用方回退逐文件。
  */
 export async function parseLogDir(
   dir: string,
+  onProgress?: (frac: number) => void,
 ): Promise<RustDirParseResult | null> {
   if (!isTauri()) return null;
+  let invokeFn: typeof import('@tauri-apps/api/core').invoke;
   try {
-    const { invoke } = await import('@tauri-apps/api/core');
-    const r = await invoke<RustDirParseResult>('parse_dir', { dir });
-    if (!isRustDirResult(r)) {
-      console.warn('[parseBridge] Rust parse_dir 返回形状异常，回退逐文件路径', r);
+    ({ invoke: invokeFn } = await import('@tauri-apps/api/core'));
+  } catch {
+    return null;
+  }
+  try {
+    // 1) prepare：Rust 枚举+解析+排序+缓存
+    const meta = await invokeFn<RustDirMeta>('parse_dir', { dir });
+    if (!isRustDirMeta(meta)) {
+      console.warn('[parseBridge] Rust parse_dir 返回形状异常，回退逐文件路径', meta);
       return null;
     }
-    return r;
+    // 2) 分块拉取 rawLines（行数已知，块间让出主线程保 UI 响应）
+    const rawLines: string[] = new Array(meta.totalLines);
+    let off = 0;
+    while (off < meta.totalLines) {
+      const chunk = await invokeFn<string[]>('dir_lines_chunk', {
+        offset: off,
+        max: DIR_CHUNK_LINES,
+      });
+      if (!Array.isArray(chunk) || chunk.length === 0) break;
+      for (let i = 0; i < chunk.length; i++) rawLines[off + i] = chunk[i];
+      off += chunk.length;
+      onProgress?.(off / (meta.totalLines + meta.totalEvents));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    // 3) 分块拉取 events（按 ts 升序拼接）
+    const events: RustDirEvent[] = [];
+    while (events.length < meta.totalEvents) {
+      const chunk = await invokeFn<RustDirEvent[]>('dir_events_chunk', {
+        offset: events.length,
+        max: DIR_CHUNK_LINES,
+      });
+      if (!Array.isArray(chunk) || chunk.length === 0) break;
+      for (const ev of chunk) events.push(ev);
+      onProgress?.(
+        (meta.totalLines + events.length) / (meta.totalLines + meta.totalEvents),
+      );
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    // 4) 释放 Rust 缓存
+    invokeFn('dir_cache_drop').catch(() => {});
+    return {
+      events,
+      rawLines,
+      fileNames: meta.fileNames,
+      totalLines: meta.totalLines,
+      skipped: meta.skipped,
+      timestampFormatId: meta.timestampFormatId,
+    };
   } catch (err) {
-    console.warn('[parseBridge] invoke parse_dir 失败，回退逐文件路径:', err);
+    console.warn('[parseBridge] parse_dir 分块协议失败，回退逐文件路径:', err);
+    invokeFn('dir_cache_drop').catch(() => {});
     return null;
   }
 }

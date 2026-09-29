@@ -318,7 +318,14 @@ export async function loadMultiple(
       /* 进度订阅失败不阻断加载 */
     }
     try {
-      const r = await parseLogDir(tauriRoot);
+      const r = await parseLogDir(tauriRoot, (frac) => {
+        // 拉取阶段进度：映射到 loaded/total 语义（解析事件已由 parse_dir_progress 推送）
+        onProgress?.(
+          Math.min(names.length, Math.round(frac * names.length)),
+          names.length,
+          '合并传输中',
+        );
+      });
       if (r) {
         // Rust 已完成合并排序：零拷贝构造（事件对象直接透传，sourceFile 已赋值）
         return {
