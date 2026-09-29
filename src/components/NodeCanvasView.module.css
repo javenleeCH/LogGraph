@@ -435,8 +435,8 @@
 
 /* ===== filterItem 实体节点 ===== */
 
+/* ReactFlow 节点内层卡片（RF 容器管定位，这里必须是普通文档流） */
 .filterNode {
-  position: absolute;
   display: flex;
   align-items: center;
   gap: 4px;
