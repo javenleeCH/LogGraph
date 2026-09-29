@@ -194,6 +194,8 @@ interface LogState {
   panBy: (deltaMs: number) => void;
   resetView: () => void;
   selectEvent: (id: number | null) => void;
+  /** 选中并定位：视图范围不含该事件时平移视图使其居中（上方视图跟随切换） */
+  focusEvent: (id: number) => void;
   setHovered: (id: number | null) => void;
   setScrubber: (ts: number | null, active?: boolean) => void;
   recomputeCorrelations: () => void;
@@ -742,6 +744,29 @@ export const useLogStore = create<LogState>((set, get) => ({
       }
     }
     get().recomputeCorrelations();
+  },
+
+  focusEvent: (id) => {
+    get().selectEvent(id);
+    const { events, viewRange, fullRange } = get();
+    const ev = events.find((e) => e.id === id);
+    if (!ev || !viewRange || !fullRange) return;
+    // 已在可视范围内则不平移
+    if (ev.ts >= viewRange.start && ev.ts <= viewRange.end) return;
+    // 平移视图使事件居中（宽度保持不变）
+    const span = viewRange.end - viewRange.start || 1;
+    let start = ev.ts - span / 2;
+    let end = start + span;
+    if (start < fullRange.start) {
+      start = fullRange.start;
+      end = start + span;
+    }
+    if (end > fullRange.end) {
+      end = fullRange.end;
+      start = Math.max(fullRange.start, end - span);
+    }
+    set({ viewRange: { start, end } });
+    scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
   setHovered: (id) => set({ hoveredEventId: id }),

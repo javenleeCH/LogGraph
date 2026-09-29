@@ -1,11 +1,15 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
 import { levelStyle } from '../constants';
 import { FileText } from './Icon';
+import { GroupMatchesTab } from './GroupMatchesTab';
 import styles from './DetailPanel.module.css';
 
 const CONTEXT_LINES = 4;
+
+/** 详情面板 tab 标识：'detail' = 事件详情；'group:<id>' = group 匹配结果 */
+type DetailTab = string;
 
 export function DetailPanel() {
   const selectedEventId = useLogStore((s) => s.selectedEventId);
@@ -18,6 +22,20 @@ export function DetailPanel() {
   const correlatedEventIds = useLogStore((s) => s.correlatedEventIds);
   const selectEvent = useLogStore((s) => s.selectEvent);
   const selectedRef = useRef<HTMLDivElement>(null);
+  const [activeTab, setActiveTab] = useState<DetailTab>('detail');
+
+  // group 匹配 tab 是否展示（配置了序列关系且有匹配结果）
+  const seqGroups = useMemo(
+    () => groups.filter((g) => sequenceResults[g.id]),
+    [groups, sequenceResults],
+  );
+
+  // group 被删除时若其 tab 激活，回落到详情 tab
+  useEffect(() => {
+    if (activeTab !== 'detail' && !seqGroups.some((g) => `group:${g.id}` === activeTab)) {
+      setActiveTab('detail');
+    }
+  }, [seqGroups, activeTab]);
 
   const selected = useMemo(
     () =>
@@ -79,9 +97,89 @@ export function DetailPanel() {
     void navigator.clipboard?.writeText(JSON.stringify(payload, null, 2));
   };
 
+  const activeGroupId = activeTab.startsWith('group:')
+    ? activeTab.slice(6)
+    : null;
+  const activeGroup = activeGroupId
+    ? groups.find((g) => g.id === activeGroupId)
+    : undefined;
+
+  // ===== group 匹配 tab =====
+  if (activeGroup) {
+    return (
+      <div className={styles.detail}>
+        <div className={styles['detail-header']}>
+          <button
+            className={`${styles.tabBtn} ${styles.tabBtnActive}`}
+            style={{ borderColor: activeGroup.color, color: activeGroup.color }}
+          >
+            匹配结果
+          </button>
+          {seqGroups
+            .filter((g) => g.id !== activeGroup.id)
+            .map((g) => {
+              const r = sequenceResults[g.id];
+              const anomaly =
+                r.uncoveredEvents.length + r.notViolations.length;
+              return (
+                <button
+                  key={g.id}
+                  className={styles.tabBtn}
+                  onClick={() => setActiveTab(`group:${g.id}`)}
+                  title={`切换到「${g.label}」匹配结果`}
+                >
+                  <span className={styles.tabDot} style={{ background: g.color }} />
+                  {g.label}
+                  <span className={styles.tabBadge}>{r.chains.length}</span>
+                  {anomaly > 0 && (
+                    <span className={`${styles.tabBadge} ${styles.tabBadgeWarn}`}>
+                      {anomaly}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          <span className={styles.tabSep} />
+          <button
+            className={styles.tabBtn}
+            onClick={() => setActiveTab('detail')}
+          >
+            详情
+          </button>
+        </div>
+        <GroupMatchesTab group={activeGroup} />
+      </div>
+    );
+  }
+
+  // ===== 详情 tab =====
   if (!selected) {
     return (
       <div className={styles.detail}>
+        <div className={styles['detail-header']}>
+          <button className={`${styles.tabBtn} ${styles.tabBtnActive}`}>详情</button>
+          {seqGroups.map((g) => {
+            const r = sequenceResults[g.id];
+            const anomaly = r.uncoveredEvents.length + r.notViolations.length;
+            return (
+              <button
+                key={g.id}
+                className={styles.tabBtn}
+                onClick={() => setActiveTab(`group:${g.id}`)}
+                title={`查看「${g.label}」匹配结果`}
+              >
+                <span className={styles.tabDot} style={{ background: g.color }} />
+                {g.label}
+                <span className={styles.tabBadge}>{r.chains.length}</span>
+                {anomaly > 0 && (
+                  <span className={`${styles.tabBadge} ${styles.tabBadgeWarn}`}>
+                    {anomaly}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
         <div className={styles['detail-empty']}>
           点击时间线上的事件以查看详情与上下文行
         </div>
@@ -101,7 +199,34 @@ export function DetailPanel() {
   return (
     <div className={styles.detail}>
       <div className={styles['detail-header']}>
-        <span className={styles.label}>详情</span>
+        <button
+          className={`${styles.tabBtn} ${activeTab === 'detail' ? styles.tabBtnActive : ''}`}
+          onClick={() => setActiveTab('detail')}
+        >
+          详情
+        </button>
+        {seqGroups.map((g) => {
+          const r = sequenceResults[g.id];
+          const anomaly = r.uncoveredEvents.length + r.notViolations.length;
+          return (
+            <button
+              key={g.id}
+              className={`${styles.tabBtn} ${activeTab === `group:${g.id}` ? styles.tabBtnActive : ''}`}
+              onClick={() => setActiveTab(`group:${g.id}`)}
+              title={`查看「${g.label}」匹配结果`}
+            >
+              <span className={styles.tabDot} style={{ background: g.color }} />
+              {g.label}
+              <span className={styles.tabBadge}>{r.chains.length}</span>
+              {anomaly > 0 && (
+                <span className={`${styles.tabBadge} ${styles.tabBadgeWarn}`}>
+                  {anomaly}
+                </span>
+              )}
+            </button>
+          );
+        })}
+        <span className={styles.spacer} />
         <span className={styles.linenum}>行 #{selected.id + 1}</span>
         <span className={styles.ts}>{formatDateTime(selected.ts)}</span>
         {selected.sourceFile && (
