@@ -41,6 +41,23 @@ npm run build    # 生产构建到 dist/
 | 拖拽加载 | HTML5 Drag & Drop | 原生文件拖放（`onDragDropEvent`） |
 | 打开目录 | File System Access API | 系统目录对话框 + `plugin-fs` 递归枚举 |
 | 过滤器持久化 | FSA + IndexedDB 句柄 | `plugin-fs` 读写 `filters.json` + localStorage 记路径 |
+| **日志解析** | JS 引擎（`LogParser`） | **Rust 原生引擎（`parse_log` 命令，进程内读文件+解析，大文本不过 IPC）** |
+
+### Rust 解析引擎（双通道架构）
+
+桌面端的日志解析已移入 Rust（`src-tauri/src/parser/`），与 JS 引擎语义逐条对齐
+（时间戳格式探测、thread/level 提取、行分割、稳定排序、skipped 统计）：
+
+- 前端统一入口 `src/parser/parseBridge.ts`：Tauri 下 `invoke('parse_log', { path })`
+  由 Rust `std::fs` 直读文件并解析（省去大文本过 IPC 桥的开销）；浏览器下原样走 JS 引擎；
+- **失败自动回退**：invoke 失败 / 返回异常时降级为 `plugin-fs` 读文本 + JS 解析，功能永不中断；
+- 浏览器端不加载任何 `@tauri-apps/*` 模块（构建产物已按需分包）；
+- 设计与语义对齐清单见 [`plans/rust-parser-design.md`](plans/rust-parser-design.md)。
+
+一致性自检：Tauri 环境下打开 `http://localhost:5180/?dualengine=1`，加载日志时
+JS/Rust 双引擎并行解析并深度比对，差异输出到 DevTools console（以 Rust 结果为准）。
+
+Rust 侧单测：`cd src-tauri && cargo test`。
 
 前置要求：Rust 工具链（`rustc`/`cargo`）与平台对应的 WebView（Windows 10/11 自带 WebView2）。
 

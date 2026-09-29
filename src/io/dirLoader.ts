@@ -16,7 +16,7 @@
 
 import type { LogEvent } from '../types';
 import type { LogMeta } from '../store/logStore';
-import { LogParser } from '../parser/LogParser';
+import { parseLogText, parseLogPath, type FullParseResult } from '../parser/parseBridge';
 import { isLogFileName } from './fileLoader';
 import { isTauri, loadDialog, loadFs, basename } from '../lib/tauri';
 
@@ -240,8 +240,6 @@ export interface MultiLoadResult {
   meta: LogMeta;
 }
 
-const parser = new LogParser();
-
 /**
  * 加载多个日志文件，合并成单一事件流。
  *
@@ -249,8 +247,12 @@ const parser = new LogParser();
  * @param names 文件相对路径名列表（来自 listLogFiles 的 name）
  * @param onProgress 可选进度回调（已加载文件数）
  */
-/** 把一组（文件名 + 文本）逐文件解析并合并为全局事件流（供多文件/目录加载共用） */
-function mergeParsed(files: { name: string; text: string }[]): MultiLoadResult {
+/**
+ * 把一组「已解析」的文件结果合并为全局事件流（供多文件/目录加载共用）。
+ * 解析本身由调用方完成（Tauri→parseLogPath Rust 引擎；浏览器→parseLogText JS 引擎），
+ * 合并规则与原 mergeParsed 完全一致：全局 id 重编号 / sourceFile 标记 / 全局按 ts 排序。
+ */
+function mergeParsedInputs(files: { name: string; parse: FullParseResult }[]): MultiLoadResult {
   const allEvents: LogEvent[] = [];
   const allRawLines: string[] = [];
   let totalLines = 0;
@@ -258,17 +260,15 @@ function mergeParsed(files: { name: string; text: string }[]): MultiLoadResult {
   const formatIds = new Set<string | null>();
   let firstFileName: string | null = null;
 
-  for (const { name, text } of files) {
-    const result = parser.parse(text);
+  for (const { name, parse: result } of files) {
     if (!firstFileName) firstFileName = name;
     formatIds.add(result.timestampFormatId);
     totalLines += result.totalLines;
     totalSkipped += result.skipped;
 
-    // 记录该文件原始行在全局 rawLines 中的起始偏移
+    // 记录该文件原始行在全局 rawLines 中的起始偏移（rawLines 由解析引擎产出，与 split(/\r?\n/) 一致）
     const baseId = allRawLines.length;
-    const fileLines = text.split(/\r?\n/);
-    for (const l of fileLines) allRawLines.push(l);
+    for (const l of result.rawLines) allRawLines.push(l);
 
     // 把该文件 events 的 id 重编为全局行号，并标记 sourceFile
     for (const ev of result.events) {
@@ -302,21 +302,29 @@ export async function loadMultiple(
   const tauriRoot = isTauriDir(dirHandle)
     ? String(dirHandle.path).replace(/[\\/]+$/, '')
     : null;
-  const fs = tauriRoot ? await loadFs() : null;
 
-  const files: { name: string; text: string }[] = [];
+  const files: { name: string; parse: FullParseResult }[] = [];
   for (let fi = 0; fi < names.length; fi++) {
     const name = names[fi];
     onProgress?.(fi, names.length, name);
 
-    let text: string | null = null;
     if (tauriRoot) {
-      try {
-        text = await fs!.readTextFile(`${tauriRoot}/${name}`);
-      } catch {
+      // 首选：Rust 原生解析（进程内读文件，不过 IPC 桥）
+      const parsed = await parseLogPath(`${tauriRoot}/${name}`);
+      if (parsed) {
+        files.push({ name, parse: parsed });
         continue;
       }
+      // 降级：invoke 失败（命令未注册等）→ plugin-fs 读文本走 JS 引擎，功能不中断
+      try {
+        const fs = await loadFs();
+        const text = await fs.readTextFile(`${tauriRoot}/${name}`);
+        files.push({ name, parse: await parseLogText(text) });
+      } catch {
+        continue; // 读取失败跳过该文件（原行为）
+      }
     } else {
+      // 浏览器：FSA 句柄读文本 → JS 引擎（parseLogText 在浏览器下即原 LogParser 路径）
       const fh = await getFileHandleByPath(dirHandle, name);
       if (!fh) continue;
       let file: File;
@@ -325,14 +333,13 @@ export async function loadMultiple(
       } catch {
         continue;
       }
-      text = await file.text();
+      files.push({ name, parse: await parseLogText(await file.text()) });
     }
-    files.push({ name, text: text! });
   }
 
   onProgress?.(names.length, names.length, '');
 
-  return mergeParsed(files);
+  return mergeParsedInputs(files);
 }
 
 /**
@@ -370,13 +377,14 @@ export async function loadDroppedDirectory(
   if (fileEntries.length === 0) return null;
   fileEntries.sort((a, b) => a.name.localeCompare(b.name));
 
-  const files: { name: string; text: string }[] = [];
+  // 浏览器专用路径（webkitGetAsEntry）：FSA 读文本 → JS 引擎解析（parseLogText 浏览器分支）
+  const files: { name: string; parse: FullParseResult }[] = [];
   for (const fe of fileEntries) {
     const file: File = await new Promise((resolve, reject) => fe.entry.file(resolve, reject));
-    files.push({ name: fe.name, text: await file.text() });
+    files.push({ name: fe.name, parse: await parseLogText(await file.text()) });
   }
 
-  return { result: mergeParsed(files), count: files.length };
+  return { result: mergeParsedInputs(files), count: files.length };
 }
 
 /** Tauri：判断路径是否为目录；是则返回可枚举的目录 handle，否则返回 null */

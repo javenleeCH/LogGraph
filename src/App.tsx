@@ -21,10 +21,8 @@ import {
   type MultiLoadResult,
 } from './io/dirLoader';
 import { setupTauriDragDrop } from './lib/tauri';
-import { LogParser } from './parser/LogParser';
+import { parseLoadedFile } from './parser/parseBridge';
 import styles from './App.module.css';
-
-const parser = new LogParser();
 
 export default function App() {
   const [dragOver, setDragOver] = useState(false);
@@ -134,12 +132,13 @@ export default function App() {
   }, []);
 
   // 解析并载入一段日志文本（浏览器拖拽 / Tauri 原生拖拽共用）
+  // 双通道：Tauri→Rust parse_log（path 直读）；浏览器/invoke 失败→JS 引擎
   const handleLoaded = useCallback(
     async (loaded: LoadedFile | null) => {
       if (!loaded) return;
       try {
-        const result = parser.parse(loaded.text);
-        setLog(result.events, loaded.text.split(/\r?\n/), {
+        const result = await parseLoadedFile(loaded);
+        setLog(result.events, result.rawLines, {
           fileName: loaded.name,
           fileSize: loaded.size,
           totalLines: result.totalLines,

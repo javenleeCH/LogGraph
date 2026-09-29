@@ -3,7 +3,7 @@ import { useLogStore } from '../store/logStore';
 import { useTheme } from '../hooks/useTheme';
 import { loadFile, openLogFileDialog, type LoadedFile } from '../io/fileLoader';
 import { isTauri } from '../lib/tauri';
-import { LogParser } from '../parser/LogParser';
+import { parseLoadedFile } from '../parser/parseBridge';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
 import {
   FolderOpen,
@@ -18,8 +18,6 @@ import {
 } from './Icon';
 import styles from './Toolbar.module.css';
 /* eslint-disable @typescript-eslint/no-explicit-any */
-
-const parser = new LogParser();
 
 export function Toolbar() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -42,8 +40,9 @@ export function Toolbar() {
 
   async function handleLoaded(loaded: LoadedFile) {
     try {
-      const result = parser.parse(loaded.text);
-      setLog(result.events, loaded.text.split(/\r?\n/), {
+      // 双通道：Tauri→Rust parse_log（path 直读）；浏览器/invoke 失败→JS 引擎
+      const result = await parseLoadedFile(loaded);
+      setLog(result.events, result.rawLines, {
         fileName: loaded.name,
         fileSize: loaded.size,
         totalLines: result.totalLines,
