@@ -40,7 +40,7 @@ npm run build    # 生产构建到 dist/
 | 打开日志 | `<input type=file>` | 系统文件对话框（`plugin-dialog`） |
 | 拖拽加载 | HTML5 Drag & Drop | 原生文件拖放（`onDragDropEvent`） |
 | 打开目录 | File System Access API | 系统目录对话框 + `plugin-fs` 递归枚举 |
-| 过滤器持久化 | FSA + IndexedDB 句柄 | `plugin-fs` 读写 `filters.json` + localStorage 记路径 |
+| 工作区持久化 | 所选目录内 `.logGraph/filters.json`（FSA readwrite 授权） | 所选目录内 `.logGraph/filters.json`（plugin-fs） |
 | **日志解析** | JS 引擎（`LogParser`） | **Rust 原生引擎（`parse_log` 命令，进程内读文件+解析，大文本不过 IPC）** |
 
 ### Rust 解析引擎（双通道架构）
@@ -104,7 +104,7 @@ src/
   io/
     fileLoader.ts               # 文件加载（浏览器/Tauri 双后端）
     dirLoader.ts                # 目录枚举 + 多文件合并（双后端）
-    filterPersist.ts            # 过滤器持久化（双后端）
+    filterPersist.ts            # 工作区持久化 .logGraph/filters.json（双后端）
   timeline/
     TimelineCanvas.tsx          # Canvas 宿主 + 交互
     renderers.ts               # 轴/lane/事件/minimap/连线绘制

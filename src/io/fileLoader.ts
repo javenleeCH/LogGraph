@@ -64,6 +64,26 @@ export function getDroppedDirectoryEntry(dt: DataTransfer): any | null {
 }
 
 /**
+ * 浏览器拖拽：尝试从 DataTransfer 取 FSA 目录句柄（Chromium）。
+ * 必须在 drop 事件处理器的同步段调用（DataTransfer.items 在首个 await 后失效，
+ * 本函数内部同步调用 getAsFileSystemHandle 后才 await 其结果）。
+ * 不支持 / 非目录返回 null。
+ */
+export async function getDroppedDirectoryHandle(dt: DataTransfer): Promise<any | null> {
+  try {
+    if (!dt || !dt.items) return null;
+    const item = dt.items[0] as any;
+    if (!item || item.kind !== 'file') return null;
+    if (typeof item.getAsFileSystemHandle !== 'function') return null;
+    const handle = await item.getAsFileSystemHandle();
+    if (handle && handle.kind === 'directory') return handle;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Tauri：打开「选择日志文件」对话框。
  * 只取 path + stat 大小，不读文本（解析交给 Rust parse_log）。
  * 浏览器下返回 null（由调用方走 <input type=file>）。

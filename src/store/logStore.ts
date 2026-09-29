@@ -4,15 +4,15 @@
  */
 
 import { create } from 'zustand';
-import type { Filter, FilterGroup, FilterMatch, LogEvent, NodePos, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
+import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, SequenceConfig, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
 import { FilterEngine } from '../filters/FilterEngine';
 import { runSequenceMatching } from '../sequence/SequenceMatcher';
 import {
-  pickDirectory,
-  getSavedDirectory,
-  ensureWritePermission,
+  openWorkspaceDir,
   readFilters,
   writeFilters,
+  readLegacyPersistedFilters,
+  clearLegacyPersistDir,
   isFSASupported,
   type PersistedFilters,
 } from '../io/filterPersist';
@@ -54,29 +54,38 @@ const genGroupId = () => `g${Date.now()}_${groupSeq++}`;
 let edgeSeq = 0;
 const genEdgeId = () => `e${Date.now()}_${edgeSeq++}`;
 
-// ---- 过滤器持久化（File System Access API） ----
+// ---- 工作区持久化（目录即工作区，<日志目录>/.logGraph/filters.json） ----
 /* eslint-disable @typescript-eslint/no-explicit-any */
-let persistDir: any = null; // 目录句柄
+let workspaceDir: any = null; // 当前工作区句柄（.logGraph 子目录）
 let persistTimer = 0;
 
-/** 防抖写入 filters.json */
+/** 组装持久化数据（过滤器 + 分组 + 画布坐标） */
+function buildPersistData(get: () => LogState): PersistedFilters {
+  return {
+    filters: get().filters.map((f) => ({ ...f })),
+    groups: get().groups.map((g) => ({ ...g })),
+    graphNodes: { ...get().graphNodes },
+    savedAt: Date.now(),
+  };
+}
+
+/** 立即写入当前工作区（无工作区则 no-op） */
+async function persistNow(get: () => LogState): Promise<void> {
+  if (!workspaceDir) return;
+  try {
+    await writeFilters(workspaceDir, buildPersistData(get));
+  } catch (e) {
+    console.error('工作区持久化写入失败', e);
+  }
+}
+
+/** 防抖写入工作区 filters.json */
 function schedulePersist(get: () => LogState) {
-  if (!persistDir) return;
+  if (!workspaceDir) return;
   if (persistTimer) clearTimeout(persistTimer);
-  persistTimer = window.setTimeout(async () => {
+  persistTimer = window.setTimeout(() => {
     persistTimer = 0;
-    if (!persistDir) return;
-    try {
-      const data: PersistedFilters = {
-        filters: get().filters.map((f) => ({ ...f })),
-        groups: get().groups.map((g) => ({ ...g })),
-        graphNodes: { ...get().graphNodes },
-        savedAt: Date.now(),
-      };
-      await writeFilters(persistDir, data);
-    } catch (e) {
-      console.error('过滤器持久化写入失败', e);
-    }
+    persistNow(get);
   }, 400);
 }
 
@@ -201,16 +210,16 @@ interface LogState {
   recomputeCorrelations: () => void;
   setCorrelationWindow: (halfMs: number | null) => void;
 
-  // --- 持久化 ---
-  /** 持久化目录名（已授权）；null=未配置 */
-  persistDirName: string | null;
+  // --- 工作区持久化（目录即工作区） ---
+  /** 当前绑定的工作区目录名；null=未绑定（本次会话不持久化） */
+  workspaceDirName: string | null;
   /** 浏览器是否支持 FSA */
   persistSupported: boolean;
-  /** 启动时调用：从 IndexedDB 恢复目录句柄并加载 filters.json */
-  initPersistence: () => Promise<void>;
-  /** 让用户选择持久化目录 */
-  choosePersistDir: () => Promise<void>;
-  /** 立即写入一次 */
+  /** 把一份存档整体应用到当前状态（id 重映射 / 旧格式迁移 / 补缺省坐标） */
+  applyPersistedFilters: (saved: PersistedFilters) => void;
+  /** 绑定目录的工作区：创建 .logGraph + 恢复存档（或继承当前状态播种） */
+  openWorkspace: (dirHandle: any) => Promise<void>;
+  /** 立即写入一次当前状态到工作区 */
   saveFiltersNow: () => Promise<void>;
 
   // --- 日志目录（目录式加载） ---
@@ -253,7 +262,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   correlationHalfWindow: null, // null = 自适应
   correlatedEventIds: new Set(),
 
-  persistDirName: null,
+  workspaceDirName: null,
   persistSupported: isFSASupported(),
 
   logsDirHandle: null,
@@ -821,136 +830,182 @@ export const useLogStore = create<LogState>((set, get) => ({
     set({ correlatedEventIds: ids });
   },
 
-  // ---- 过滤器持久化 ----
-  initPersistence: async () => {
-    if (!isFSASupported()) return;
-    try {
-      const dir = await getSavedDirectory();
-      if (!dir) return;
-      if (!(await ensureWritePermission(dir))) return;
-      persistDir = dir;
-      set({ persistDirName: dir.name });
-      const saved = await readFilters(dir);
-      if (saved && Array.isArray(saved.filters) && saved.filters.length > 0) {
-        // 旧 filter id → 新 filter id 的映射（filter 加载时重新生成 id）
-        const oldToNewFid = new Map<string, string>();
-        // 从 JSON 恢复过滤器（补全默认字段；保留原 groupId 用于迁移）
-        const restoredRaw: Filter[] = saved.filters.map((f: any, i: number) => {
-          const newId = genFilterId();
-          if (f.id) oldToNewFid.set(f.id, newId);
-          return {
-            id: newId,
-            label: f.label ?? `Filter ${i + 1}`,
-            color: f.color ?? PALETTE[i % PALETTE.length],
-            pattern: f.pattern ?? '',
-            isRegex: f.isRegex ?? false,
-            caseSensitive: f.caseSensitive ?? false,
-            enabled: f.enabled ?? true,
-            scope: f.scope === 'message' ? 'message' : 'raw',
-            groupId: f.groupId ?? null, // 旧字段，迁移后置 null
-          };
+  // ---- 工作区持久化（目录即工作区） ----
+  applyPersistedFilters: (saved) => {
+    // 旧 filter id → 新 filter id 的映射（filter 加载时重新生成 id）
+    const oldToNewFid = new Map<string, string>();
+    // 从 JSON 恢复过滤器（补全默认字段；保留原 groupId 用于迁移）
+    const restoredRaw: Filter[] = saved.filters.map((f: any, i: number) => {
+      const newId = genFilterId();
+      if (f.id) oldToNewFid.set(f.id, newId);
+      return {
+        id: newId,
+        label: f.label ?? `Filter ${i + 1}`,
+        color: f.color ?? PALETTE[i % PALETTE.length],
+        pattern: f.pattern ?? '',
+        isRegex: f.isRegex ?? false,
+        caseSensitive: f.caseSensitive ?? false,
+        enabled: f.enabled ?? true,
+        scope: f.scope === 'message' ? 'message' : 'raw',
+        groupId: f.groupId ?? null, // 旧字段，迁移后置 null
+      };
+    });
+    // 序列配置恢复：边端点 / 节点约束里的 filter id 全部重映射 旧id→新id，
+    // 端点已删除的边与约束直接丢弃；全部边失效则视为未配置（undefined）
+    const remapSequence = (seq: any): SequenceConfig | undefined => {
+      if (!seq || !Array.isArray(seq.edges)) return undefined;
+      const edges: SequenceEdge[] = [];
+      for (const e of seq.edges) {
+        if (!e || typeof e.fromFilterId !== 'string' || typeof e.toFilterId !== 'string') continue;
+        const from = oldToNewFid.get(e.fromFilterId);
+        if (!from) continue;
+        const to = oldToNewFid.get(e.toFilterId);
+        const toList = Array.isArray(e.toFilterIds)
+          ? (e.toFilterIds as string[])
+              .map((t) => oldToNewFid.get(t))
+              .filter((t): t is string => !!t)
+          : undefined;
+        const kind = (e.kind ?? 'seq') as SequenceEdge['kind'];
+        // 非 periodic 需要有效目标（单目标或 and/or 多目标列表）
+        if (kind !== 'periodic' && !to && !(toList && toList.length)) continue;
+        edges.push({
+          id: typeof e.id === 'string' ? e.id : genEdgeId(),
+          fromFilterId: from,
+          toFilterId: to ?? from, // and/or 以 toFilterIds 为准，单值仅占位
+          ...(toList && toList.length ? { toFilterIds: toList } : {}),
+          ...(kind !== 'seq' ? { kind } : {}),
+          maxGapMs: typeof e.maxGapMs === 'number' ? e.maxGapMs : 1000,
+          ...(kind === 'periodic' && typeof e.periodMs === 'number' ? { periodMs: e.periodMs } : {}),
         });
-        // 恢复分组；新格式有 filterIds（需重映射到新 id），旧格式无则从 filter.groupId 反向迁移
-        const restoredGroups: FilterGroup[] = Array.isArray(saved.groups)
-          ? saved.groups.map((g: any, i: number) => {
-              const id = genGroupId();
-              const base = {
-                id,
-                label: g.label ?? `Group ${i + 1}`,
-                color: g.color ?? PALETTE[i % PALETTE.length],
-                collapsed: g.collapsed ?? false,
-                visible: g.visible ?? true,
-              };
-              // 新格式：filterIds 重映射 旧id→新id（找不到的丢弃）
-              if (Array.isArray(g.filterIds)) {
-                return {
-                  ...base,
-                  filterIds: g.filterIds
-                    .map((fid: string) => oldToNewFid.get(fid))
-                    .filter((fid: string | undefined): fid is string => !!fid),
-                };
-              }
-              // 旧格式：filterIds 为空，下方迁移旧 filter.groupId
-              return { ...base, filterIds: [] as string[] };
-            })
-          : [];
-        // 旧→新迁移：若 filter 仍带 legacy groupId，按 saved.filter.groupId 反向构建 group.filterIds
-        const hasLegacyGroupIds = restoredRaw.some((f) => f.groupId);
-        if (hasLegacyGroupIds && saved.groups && Array.isArray(saved.groups)) {
-          for (let gi = 0; gi < restoredGroups.length; gi++) {
-            const oldGid = saved.groups[gi]?.id;
-            if (!oldGid) continue;
-            restoredGroups[gi].filterIds = restoredRaw
-              .filter((f) => f.groupId === oldGid)
-              .map((f) => f.id);
-          }
+      }
+      if (edges.length === 0) return undefined;
+      const nodeCounts: Record<string, NodeCount> = {};
+      if (seq.nodeCounts && typeof seq.nodeCounts === 'object') {
+        for (const [fid, c] of Object.entries(seq.nodeCounts) as [string, any][]) {
+          const nid = oldToNewFid.get(fid);
+          if (!nid || !c || typeof c.min !== 'number' || typeof c.max !== 'number') continue;
+          nodeCounts[nid] = { min: c.min, max: c.max };
         }
-        // 迁移完毕，filter.groupId 全部置 null（不再使用单值归属）
-        const restored: Filter[] = restoredRaw.map((f) => ({
-          ...f,
-          groupId: null,
-        }));
-        const collapsed = new Set<string>();
-        for (const g of restoredGroups) if (g.collapsed) collapsed.add(g.id);
-        // 恢复节点画布坐标：旧 group id → 新 group id 映射
-        const oldToNewGid = new Map<string, string>();
-        if (Array.isArray(saved.groups)) {
-          saved.groups.forEach((sg: any, i: number) => {
-            if (sg?.id && restoredGroups[i]) oldToNewGid.set(sg.id, restoredGroups[i].id);
-          });
+      }
+      const nodeConditions: Record<string, string> = {};
+      if (seq.nodeConditions && typeof seq.nodeConditions === 'object') {
+        for (const [fid, expr] of Object.entries(seq.nodeConditions) as [string, any][]) {
+          const nid = oldToNewFid.get(fid);
+          if (!nid || typeof expr !== 'string' || !expr) continue;
+          nodeConditions[nid] = expr;
         }
-        const restoredGraphNodes: Record<string, NodePos> = {};
-        if (saved.graphNodes && typeof saved.graphNodes === 'object') {
-          for (const [oldKey, node] of Object.entries(saved.graphNodes) as [string, any][]) {
-            const newId = node.kind === 'group' ? oldToNewGid.get(oldKey) : oldToNewFid.get(oldKey);
-            if (!newId) continue; // 找不到映射（已删除），丢弃
-            restoredGraphNodes[newId] = {
-              id: newId,
-              kind: node.kind,
-              x: node.x ?? 0,
-              y: node.y ?? 0,
-              ...(node.w != null ? { w: node.w } : {}),
-              ...(node.h != null ? { h: node.h } : {}),
+      }
+      return {
+        edges,
+        anomalyEnabled: seq.anomalyEnabled === true,
+        ...(seq.scope === 'thread' ? { scope: 'thread' } : {}),
+        ...(Object.keys(nodeCounts).length ? { nodeCounts } : {}),
+        ...(Object.keys(nodeConditions).length ? { nodeConditions } : {}),
+      };
+    };
+    // 恢复分组；新格式有 filterIds（需重映射到新 id），旧格式无则从 filter.groupId 反向迁移；
+    // sequence（连线/节点约束）一并恢复并重映射（修复：刷新后连线丢失）
+    const restoredGroups: FilterGroup[] = Array.isArray(saved.groups)
+      ? saved.groups.map((g: any, i: number) => {
+          const id = genGroupId();
+          const base = {
+            id,
+            label: g.label ?? `Group ${i + 1}`,
+            color: g.color ?? PALETTE[i % PALETTE.length],
+            collapsed: g.collapsed ?? false,
+            visible: g.visible ?? true,
+          };
+          const sequence = remapSequence(g.sequence);
+          // 新格式：filterIds 重映射 旧id→新id（找不到的丢弃）
+          if (Array.isArray(g.filterIds)) {
+            return {
+              ...base,
+              filterIds: g.filterIds
+                .map((fid: string) => oldToNewFid.get(fid))
+                .filter((fid: string | undefined): fid is string => !!fid),
+              ...(sequence ? { sequence } : {}),
             };
           }
-        }
-        set({
-          filters: restored,
-          groups: restoredGroups,
-          collapsedGroups: collapsed,
-          graphNodes: restoredGraphNodes,
-        });
-        // 兜底：无坐标的 filter/group 补缺省坐标
-        for (const g of restoredGroups) get().ensureNodePos(g.id, 'group');
-        for (const f of restored) get().ensureNodePos(f.id, 'filterItem');
-        get().recomputeMatches();
+          // 旧格式：filterIds 为空，下方迁移旧 filter.groupId
+          return { ...base, filterIds: [] as string[], ...(sequence ? { sequence } : {}) };
+        })
+      : [];
+    // 旧→新迁移：若 filter 仍带 legacy groupId，按 saved.filter.groupId 反向构建 group.filterIds
+    const hasLegacyGroupIds = restoredRaw.some((f) => f.groupId);
+    if (hasLegacyGroupIds && saved.groups && Array.isArray(saved.groups)) {
+      for (let gi = 0; gi < restoredGroups.length; gi++) {
+        const oldGid = saved.groups[gi]?.id;
+        if (!oldGid) continue;
+        restoredGroups[gi].filterIds = restoredRaw
+          .filter((f) => f.groupId === oldGid)
+          .map((f) => f.id);
       }
-    } catch (e) {
-      console.error('过滤器持久化初始化失败', e);
     }
+    // 迁移完毕，filter.groupId 全部置 null（不再使用单值归属）
+    const restored: Filter[] = restoredRaw.map((f) => ({
+      ...f,
+      groupId: null,
+    }));
+    const collapsed = new Set<string>();
+    for (const g of restoredGroups) if (g.collapsed) collapsed.add(g.id);
+    // 恢复节点画布坐标：旧 group id → 新 group id 映射
+    const oldToNewGid = new Map<string, string>();
+    if (Array.isArray(saved.groups)) {
+      saved.groups.forEach((sg: any, i: number) => {
+        if (sg?.id && restoredGroups[i]) oldToNewGid.set(sg.id, restoredGroups[i].id);
+      });
+    }
+    const restoredGraphNodes: Record<string, NodePos> = {};
+    if (saved.graphNodes && typeof saved.graphNodes === 'object') {
+      for (const [oldKey, node] of Object.entries(saved.graphNodes) as [string, any][]) {
+        const newId = node.kind === 'group' ? oldToNewGid.get(oldKey) : oldToNewFid.get(oldKey);
+        if (!newId) continue; // 找不到映射（已删除），丢弃
+        restoredGraphNodes[newId] = {
+          id: newId,
+          kind: node.kind,
+          x: node.x ?? 0,
+          y: node.y ?? 0,
+          ...(node.w != null ? { w: node.w } : {}),
+          ...(node.h != null ? { h: node.h } : {}),
+        };
+      }
+    }
+    set({
+      filters: restored,
+      groups: restoredGroups,
+      collapsedGroups: collapsed,
+      graphNodes: restoredGraphNodes,
+    });
+    // 兜底：无坐标的 filter/group 补缺省坐标
+    for (const g of restoredGroups) get().ensureNodePos(g.id, 'group');
+    for (const f of restored) get().ensureNodePos(f.id, 'filterItem');
+    get().recomputeMatches();
   },
 
-  choosePersistDir: async () => {
-    const dir = await pickDirectory();
-    if (!dir) return;
-    persistDir = dir;
-    set({ persistDirName: dir.name });
-    // 选择目录后立即把当前过滤器写一次
-    await get().saveFiltersNow();
+  openWorkspace: async (dirHandle) => {
+    // 1. 先把旧工作区的当前状态刷盘（切目录防丢最后一次编辑）
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = 0;
+    }
+    await persistNow(get);
+    // 2. 创建/打开 <目录>/.logGraph（失败→降级：本次会话不持久化，不阻断日志加载）
+    const ws = await openWorkspaceDir(dirHandle);
+    workspaceDir = ws;
+    set({ workspaceDirName: ws ? dirHandle.name ?? '.logGraph' : null });
+    if (!ws) return;
+    // 3. 有存档→整体恢复（存档是权威，空存档也如实应用）；
+    //    无存档→继承当前内存状态作为起点（选 B），立即播种写入新工作区
+    const saved = await readFilters(ws);
+    if (saved) {
+      get().applyPersistedFilters(saved);
+    } else {
+      await persistNow(get);
+    }
   },
 
   saveFiltersNow: async () => {
-    if (!persistDir) return;
-    try {
-      const data: PersistedFilters = {
-        filters: get().filters.map((f) => ({ ...f })),
-        groups: get().groups.map((g) => ({ ...g })),
-        savedAt: Date.now(),
-      };
-      await writeFilters(persistDir, data);
-    } catch (e) {
-      console.error('过滤器持久化写入失败', e);
-    }
+    await persistNow(get);
   },
 
   // ---- 日志目录 ----
@@ -962,15 +1017,27 @@ export const useLogStore = create<LogState>((set, get) => ({
     const dir = await pickLogDirectory();
     if (!dir) return;
     set({ logsDirHandle: dir, logsDirName: dir.name });
+    // 目录即工作区：绑定 .logGraph（恢复存档或继承当前状态播种）
+    await get().openWorkspace(dir);
   },
 
   initLogsDir: async () => {
     if (!isFSASupportedDir()) return;
     try {
       const dir = await getSavedLogDirectory();
-      if (!dir) return;
+      if (!dir) {
+        // 无已存日志目录：尝试旧版「持久化目录」一次性迁移（种子本次会话，成功后清理指针）
+        const legacy = await readLegacyPersistedFilters();
+        if (legacy && Array.isArray(legacy.filters) && legacy.filters.length > 0) {
+          get().applyPersistedFilters(legacy);
+          await clearLegacyPersistDir();
+        }
+        return;
+      }
       if (!(await ensureReadPermission(dir))) return;
       set({ logsDirHandle: dir, logsDirName: dir.name });
+      // 恢复上次工作区（含其过滤器/分组/画布坐标）
+      await get().openWorkspace(dir);
     } catch (e) {
       console.error('日志目录恢复失败', e);
     }

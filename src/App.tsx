@@ -11,6 +11,7 @@ import {
   loadFromDataTransfer,
   loadTauriPaths,
   getDroppedDirectoryEntry,
+  getDroppedDirectoryHandle,
   type LoadedFile,
 } from './io/fileLoader';
 import {
@@ -27,14 +28,13 @@ import styles from './App.module.css';
 export default function App() {
   const [dragOver, setDragOver] = useState(false);
   const setLog = useLogStore((s) => s.setLog);
-  const initPersistence = useLogStore((s) => s.initPersistence);
   const initLogsDir = useLogStore((s) => s.initLogsDir);
   const logsDirHandle = useLogStore((s) => s.logsDirHandle);
   const splitOrientation = useLogStore((s) => s.splitOrientation);
   const activeGroupId = useLogStore((s) => s.activeGroupId);
   const editingFilterId = useLogStore((s) => s.editingFilterId);
   /* eslint-disable @typescript-eslint/no-explicit-any */
-  const persistDirName = useLogStore((s) => s.persistDirName);
+  const workspaceDirName = useLogStore((s) => s.workspaceDirName);
   const events = useLogStore((s) => s.events);
 
   // 左侧文件树 / 主区域 可拖拽分隔：treeRatio = 文件树占比 [0, 0.4]
@@ -62,11 +62,10 @@ export default function App() {
     document.body.style.userSelect = 'none';
   }, []);
 
-  // 启动时恢复持久化目录 + 日志目录句柄
+  // 启动时恢复日志目录句柄 + 其 .logGraph 工作区状态
   useEffect(() => {
-    initPersistence();
     initLogsDir();
-  }, [initPersistence, initLogsDir]);
+  }, [initLogsDir]);
 
   // 横向文件树分隔拖拽
   useEffect(() => {
@@ -93,13 +92,13 @@ export default function App() {
     };
   }, []);
 
-  // 加载日志后若已有持久化目录，自动把过滤器写入一次（保证文件与状态同步）
-  const dirNameRef = useRef<string | null>(null);
+  // 加载日志后若已绑定工作区，自动把当前状态写入一次（保证文件与状态同步）
+  const wsDirNameRef = useRef<string | null>(null);
   useEffect(() => {
-    if (persistDirName) dirNameRef.current = persistDirName;
-  }, [persistDirName]);
+    if (workspaceDirName) wsDirNameRef.current = workspaceDirName;
+  }, [workspaceDirName]);
   useEffect(() => {
-    if (dirNameRef.current && events.length > 0) {
+    if (wsDirNameRef.current && events.length > 0) {
       useLogStore.getState().saveFiltersNow();
     }
   }, [events.length]);
@@ -200,6 +199,8 @@ export default function App() {
           if (!paths.length) return;
           const dirHandle = await tauriPathAsDirectory(paths[0]);
           if (dirHandle) {
+            // 目录即工作区：先绑定 .logGraph（恢复存档/继承播种），再加载日志
+            await useLogStore.getState().openWorkspace(dirHandle);
             await handleDirectory(dirHandle, dirHandle.name);
             return;
           }
@@ -219,8 +220,29 @@ export default function App() {
     async (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      // 目录拖拽（Chromium webkitGetAsEntry）
+      // 注意：DataTransfer.items 在首个 await 后失效，两路目录句柄都必须同步先取
+      const dirHandlePromise = getDroppedDirectoryHandle(e.dataTransfer);
+      // 目录拖拽（Chromium webkitGetAsEntry，兜底路径）
       const dirEntry = getDroppedDirectoryEntry(e.dataTransfer);
+      // 优先 FSA 句柄：可绑定 .logGraph 工作区（拖放手势内提权写权限）
+      const dirHandle = await dirHandlePromise;
+      if (dirHandle) {
+        try {
+          await useLogStore.getState().openWorkspace(dirHandle);
+          const list = await listLogFiles(dirHandle, { recursive: true });
+          if (list.length === 0) {
+            alert('该文件夹下没有可识别的日志文件（.log / .txt / .out / .csv / .tsv）');
+            return;
+          }
+          const names = list.map((f) => f.name);
+          const result = await loadMultiple(dirHandle, names);
+          applyDirectoryResult(result, dirHandle.name, names.length);
+        } catch (err) {
+          console.error(err);
+          alert('加载文件夹失败：' + (err as Error).message);
+        }
+        return;
+      }
       if (dirEntry) {
         try {
           const res = await loadDroppedDirectory(dirEntry);

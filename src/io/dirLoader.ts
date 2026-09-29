@@ -107,11 +107,11 @@ export async function pickLogDirectory(): Promise<any | null> {
   }
   const handle = await (window as any).showDirectoryPicker({
     id: 'loggraph-logs',
-    mode: 'read',
+    mode: 'readwrite', // 目录即工作区：需要写权限在目录内创建 .logGraph
     startIn: 'documents',
   });
-  if (!(await verifyPermission(handle, false))) {
-    alert('需要读取权限才能浏览日志目录');
+  if (!(await verifyPermission(handle, true))) {
+    alert('需要读写权限：工作区状态（过滤器/分组）会保存在所选目录内的 .logGraph 下');
     return null;
   }
   await idbSet(KEY_LOGS_DIR, handle);

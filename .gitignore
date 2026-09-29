@@ -19,3 +19,6 @@ package-lock.json
 
 # WorkBuddy 工作区数据
 .workbuddy/
+
+# logGraph 工作区状态（打开日志目录时自动生成）
+.logGraph/
