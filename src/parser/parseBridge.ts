@@ -175,6 +175,65 @@ export async function parseLogPath(path: string): Promise<FullParseResult | null
   return invokeRust({ path });
 }
 
+// ---- 目录批量解析（P2：141 文件场景 1 次 IPC 替代 141 次）----
+
+/** Rust parse_dir 返回的 DTO（serde camelCase） */
+export interface RustDirEvent {
+  id: number;
+  ts: number;
+  raw: string;
+  thread?: string;
+  level?: string;
+  message: string;
+  sourceFile?: string;
+}
+
+export interface RustDirParseResult {
+  events: RustDirEvent[];
+  rawLines: string[];
+  fileNames: string[];
+  totalLines: number;
+  skipped: number;
+  timestampFormatId: string | null;
+}
+
+/** 形状校验：防 Rust 侧异常返回把脏数据塞进 store */
+function isRustDirResult(v: unknown): v is RustDirParseResult {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as RustDirParseResult;
+  return (
+    Array.isArray(r.events) &&
+    Array.isArray(r.rawLines) &&
+    Array.isArray(r.fileNames) &&
+    typeof r.totalLines === 'number' &&
+    typeof r.skipped === 'number' &&
+    (r.timestampFormatId === null || typeof r.timestampFormatId === 'string')
+  );
+}
+
+/**
+ * Tauri 专用：批量解析整个目录（枚举+解析+合并+全局排序 全在 Rust 进程内）。
+ * 返回 null 表示不可用/失败，调用方回退逐文件路径。
+ * 进度通过 Tauri event `parse_dir_progress` 推送（onProgress 订阅由调用方管理）。
+ */
+export async function parseLogDir(
+  dir: string,
+): Promise<RustDirParseResult | null> {
+  if (!isTauri()) return null;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const r = await invoke<RustDirParseResult>('parse_dir', { dir });
+    if (!isRustDirResult(r)) {
+      console.warn('[parseBridge] Rust parse_dir 返回形状异常，回退逐文件路径', r);
+      return null;
+    }
+    return r;
+  } catch (err) {
+    console.warn('[parseBridge] invoke parse_dir 失败，回退逐文件路径:', err);
+    return null;
+  }
+}
+
 /**
  * 统一入口：加载一个「文件」（可能只有 text，或 Tauri 下带 path）。
  * - Tauri + path：Rust 读文件解析（不读 text）；

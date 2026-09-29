@@ -109,10 +109,11 @@ export function buildVisibleRows(
 
     if (g.collapsed) {
       // 折叠：聚合组内所有 filter 的事件为一行密度热力条
+      // 注：逐个 push（不要 spread——百万级元素会栈溢出），且各列已按 ts 升序
       const merged: LogEvent[] = [];
       for (const cf of childFilters) {
         const fm = findMatch(cf.id);
-        if (fm) merged.push(...fm.events);
+        if (fm) for (const ev of fm.events) merged.push(ev);
       }
       // 按 ts 升序（合并各列已有序事件）
       merged.sort((a, b) => a.ts - b.ts);

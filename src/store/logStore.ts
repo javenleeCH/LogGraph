@@ -54,6 +54,9 @@ const genGroupId = () => `g${Date.now()}_${groupSeq++}`;
 let edgeSeq = 0;
 const genEdgeId = () => `e${Date.now()}_${edgeSeq++}`;
 
+// 分块过滤任务的取消句柄（连续编辑时取消旧任务，只保留最新）
+let chunkedCancel: (() => void) | null = null;
+
 // ---- 工作区持久化（目录即工作区，<日志目录>/.logGraph/filters.json） ----
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let workspaceDir: any = null; // 当前工作区句柄（.logGraph 子目录）
@@ -194,6 +197,10 @@ interface LogState {
   updateFilter: (id: string, patch: Partial<Filter>) => void;
   removeFilter: (id: string) => void;
   recomputeMatches: () => void;
+  /** 单 filter 增量重算（编辑 filter 用；大数据量自动分块异步） */
+  recomputeFilterMatch: (id: string) => void;
+  /** 分块过滤进度（null=无进行中任务）；UI 展示进度条用 */
+  matchProgress: { filterId: string; done: number; total: number } | null;
   setViewRange: (r: TimeRange) => void;
   zoomTo: (centerTs: number, factor: number) => void;
   /** 增量缩放：ratioDelta>0 放大，<0 缩小；以 centerTs 为锚点保持该时刻不动 */
@@ -248,6 +255,7 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   filters: [],
   matches: [],
+  matchProgress: null,
   groups: [],
   collapsedGroups: new Set(),
   sequenceResults: {},
@@ -403,8 +411,51 @@ export const useLogStore = create<LogState>((set, get) => ({
     set({
       filters: get().filters.map((f) => (f.id === id ? { ...f, ...patch } : f)),
     });
-    get().recomputeMatches();
+    get().recomputeFilterMatch(id); // 增量：只重跑该 filter，其余 matches 引用复用
     schedulePersist(get);
+  },
+
+  /** 单 filter 增量重算：大数据量（>30 万）走分块异步 + 进度，小数据同步完成 */
+  recomputeFilterMatch: (id) => {
+    const { events, filters, matches } = get();
+    const filter = filters.find((f) => f.id === id);
+    if (!filter || events.length === 0) {
+      get().recomputeMatches();
+      return;
+    }
+    // 取消上一次未完成的分块任务（连续编辑时只保留最新）
+    if (chunkedCancel) {
+      chunkedCancel();
+      chunkedCancel = null;
+    }
+    const applyResult = (match: FilterMatch) => {
+      // 与 filters 原序对齐替换该 filter 的 match（其余引用复用）
+      const idx = matches.findIndex((m) => m.filterId === id);
+      const next = idx >= 0
+        ? matches.map((m, i) => (i === idx ? match : m))
+        : [...matches, match];
+      set({ matches: next, matchProgress: null });
+      get().recomputeSequences();
+      get().recomputeCorrelations();
+    };
+    if (events.length <= 300_000) {
+      applyResult(FilterEngine.runFilter(events, filter));
+      return;
+    }
+    set({ matchProgress: { filterId: id, done: 0, total: events.length } });
+    chunkedCancel = FilterEngine.runFilterChunked(
+      events,
+      filter,
+      (done, total) => {
+        // 进度节流：仅当百分比变化 ≥2% 才写 store
+        const cur = get().matchProgress;
+        if (!cur || cur.filterId !== id) return;
+        if (total - done < 50_000 || done - cur.done >= total * 0.02) {
+          set({ matchProgress: { filterId: id, done, total } });
+        }
+      },
+      applyResult,
+    );
   },
 
   removeFilter: (id) => {

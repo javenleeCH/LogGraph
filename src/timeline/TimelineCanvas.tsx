@@ -36,6 +36,16 @@ interface DragState {
   startMinimapView: TimeRange | null;
 }
 
+/** 单个 filter 的序列链渲染数据（memo 产物，见 chainDataMapRef） */
+interface ChainData {
+  chainIds: Set<number>;
+  chainColor: string;
+  chainIndexOf: (id: number) => number | null;
+  anomalyIds: Set<number> | null;
+  violationIds: Set<number>;
+  jitterTs: Set<number>;
+}
+
 export function TimelineCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -111,10 +121,21 @@ export function TimelineCanvas() {
     [],
   );
 
-  // ---- 渲染 ----
-  // 稳定的渲染函数：每帧从 store 实时读取最新状态，避免闭包陈旧值
-  // 且无依赖，RAF 循环只订阅一次，拖拽时不会反复取消/重建。
+  // ---- 渲染（脏标记：状态变化才重绘，静止时 0 CPU） ----
+  // 渲染函数实时读 store（避免闭包陈旧）；调度由「标脏 + 单帧 RAF」驱动，
+  // 不再用每帧循环（百万事件全量遍历会卡死主线程）。
   const renderRef = useRef<() => void>(() => {});
+  const dirtyRef = useRef(true);
+  const rafRef = useRef(0);
+  const scheduleRender = useCallback(() => {
+    if (rafRef.current) return; // 已排队
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0;
+      if (!dirtyRef.current) return;
+      dirtyRef.current = false;
+      renderRef.current();
+    });
+  }, []);
   renderRef.current = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -158,8 +179,20 @@ export function TimelineCanvas() {
 
     const { timeToX, xToTime } = makeTimeFns(viewRange, w);
 
-    // 构建可见行（group 折叠/展开后的行列表）
+    // 构建可见行（group 折叠/展开后的行列表；rowsMemo 已按 filters/groups/matches memo，
+    // 但渲染需与 store 实时状态一致 → 直接从最新 state 构建（行数少，开销可忽略））
     const rows = buildVisibleRows(filters, groups, matches);
+
+    // 视口二分：各 lane 的匹配事件已按 ts 升序 → 只取 [view.start, view.end] 子数组
+    const visibleSlice = (evs: LogEvent[]): LogEvent[] => {
+      if (evs.length === 0) return evs;
+      let lo = bisectLeft(evs, viewRange.start);
+      if (lo > 0) lo -= 1; // 左扩一个，保证边缘标记完整
+      let hi = lo;
+      const n = evs.length;
+      while (hi < n && evs[hi].ts <= viewRange.end) hi++;
+      return hi > lo ? evs.slice(lo, hi) : [];
+    };
 
     // 计算当前鼠标悬停在哪一行（用于行高亮）
     const myMouse = mousePosRef.current?.y ?? null;
@@ -186,48 +219,8 @@ export function TimelineCanvas() {
 
     drawAxis(rc, fullRange);
 
-    // 序列链预计算：本行 filter 相关的链事件集合/异常集合/链号查询
-    //（按 group 展开结构，只给组内 filter 行传对应组的数据）
-    const chainDataOf = (fid: string) => {
-      for (const g of groups) {
-        if (!g.filterIds.includes(fid)) continue;
-        const r = sequenceResults[g.id];
-        if (!r) continue;
-        const chainIds = new Set<number>();
-        const chainIdx = new Map<number, number>();
-        for (const ch of r.chains) {
-          for (const stp of ch.steps) {
-            if (stp.filterId !== fid) continue;
-            chainIds.add(stp.event.id);
-            if (!chainIdx.has(stp.event.id)) chainIdx.set(stp.event.id, ch.chainIndex);
-          }
-        }
-        const anomalyIds = g.sequence?.anomalyEnabled
-          ? new Set(r.uncoveredEvents.map((u) => u.id))
-          : null;
-        // NOT 违规事件（from 与 to 都标红）
-        const violationIds = new Set<number>();
-        for (const v of r.notViolations) {
-          violationIds.add(v.fromEvent.id);
-          violationIds.add(v.toEvent.id);
-        }
-        // periodic 抖动事件（黄框）
-        const jitterIds = new Set<number>();
-        for (const hb of r.heartbeats) {
-          if (hb.filterId !== fid) continue;
-          for (const jt of hb.jitters) jitterIds.add(jt.ts); // 注：按 ts 存，事件标记时用 ts 匹配
-        }
-        return {
-          chainIds,
-          chainColor: g.color,
-          chainIndexOf: (id: number) => chainIdx.get(id) ?? null,
-          anomalyIds,
-          violationIds,
-          jitterTs: jitterIds,
-        };
-      }
-      return null;
-    };
+    // 序列链数据已 memo（chainDataMapRef），渲染时直接查表（见组件级 useMemo）
+    const chainDataOf = (fid: string) => chainDataMapRef.current.get(fid) ?? null;
 
     // 遍历可见行绘制（group-header / filter / group-density）
     for (let i = 0; i < rows.length; i++) {
@@ -253,7 +246,7 @@ export function TimelineCanvas() {
         drawGroupDensity(
           rc,
           row.group,
-          row.events,
+          visibleSlice(row.events), // 视口二分：密度条也只统计可见窗口
           row.y,
           row.height,
           selectedEventId,
@@ -277,7 +270,7 @@ export function TimelineCanvas() {
           row.filter,
           row.y,
           row.height,
-          evs,
+          visibleSlice(evs), // 视口二分：只绘制可见窗口内事件
           selectedEventId,
           hoveredEventId,
           correlatedEventIds,
@@ -304,11 +297,15 @@ export function TimelineCanvas() {
 
     drawScrubber(rc, scrubberTs);
 
-    drawMinimap(rc, fullRange, viewRange, matches, filters);
+    drawMinimap(rc, fullRange, viewRange, matches, filters, minimapCacheRef.current);
   };
-  const render = useCallback(() => renderRef.current(), []);
 
-  // ---- 尺寸观察 + RAF ----
+  // 尺寸变化 → 失效 minimap 缓存（下一帧由 useMemo key 重建）
+  const invalidateMinimap = useCallback(() => {
+    minimapCacheRef.current = null;
+  }, []);
+
+  // ---- 尺寸观察 + 脏标记渲染调度 ----
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
@@ -322,22 +319,129 @@ export function TimelineCanvas() {
       canvas.height = Math.floor(rect.height * dpr);
       canvas.style.width = rect.width + 'px';
       canvas.style.height = rect.height + 'px';
+      invalidateMinimap();
+      dirtyRef.current = true;
+      scheduleRender();
     };
     resize();
     const ro = new ResizeObserver(resize);
     ro.observe(container);
-
-    let raf = 0;
-    const loop = () => {
-      render();
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
     return () => {
       ro.disconnect();
-      cancelAnimationFrame(raf);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [render]);
+  }, [scheduleRender, invalidateMinimap]);
+
+  // 任何相关 store 状态变化 → 标脏重绘（替代每帧全量 RAF 循环）
+  useEffect(() => {
+    const unsub = useLogStore.subscribe(() => {
+      dirtyRef.current = true;
+      scheduleRender();
+    });
+    // 挂载时先绘一次
+    dirtyRef.current = true;
+    scheduleRender();
+    return unsub;
+  }, [scheduleRender]);
+
+  // 鼠标位置（行高亮/tooltips 走 React state，不进 store 订阅）由事件处理器直接标脏
+  const markDirty = useCallback(() => {
+    dirtyRef.current = true;
+    scheduleRender();
+  }, [scheduleRender]);
+
+  // ---- 序列链数据 memo（原 chainDataOf 每帧重建 Set/Map，百万链时是帧率杀手） ----
+  const chainDataMapRef = useRef<Map<string, ChainData>>(new Map());
+  const seqGroupsForChain = useLogStore((s) => s.groups);
+  const seqResultsForChain = useLogStore((s) => s.sequenceResults);
+  useMemo(() => {
+    const m = new Map<string, ChainData>();
+    for (const g of seqGroupsForChain) {
+      const r = seqResultsForChain[g.id];
+      if (!r) continue;
+      // NOT 违规事件（from 与 to 都标红）：组内共享
+      const violationIds = new Set<number>();
+      for (const v of r.notViolations) {
+        violationIds.add(v.fromEvent.id);
+        violationIds.add(v.toEvent.id);
+      }
+      for (const fid of g.filterIds) {
+        const chainIds = new Set<number>();
+        const chainIdx = new Map<number, number>();
+        for (const ch of r.chains) {
+          for (const stp of ch.steps) {
+            if (stp.filterId !== fid) continue;
+            chainIds.add(stp.event.id);
+            if (!chainIdx.has(stp.event.id)) chainIdx.set(stp.event.id, ch.chainIndex);
+          }
+        }
+        const anomalyIds = g.sequence?.anomalyEnabled
+          ? new Set(r.uncoveredEvents.map((u) => u.id))
+          : null;
+        // periodic 抖动事件（黄框，按 ts 存）
+        const jitterIds = new Set<number>();
+        for (const hb of r.heartbeats) {
+          if (hb.filterId !== fid) continue;
+          for (const jt of hb.jitters) jitterIds.add(jt.ts);
+        }
+        m.set(fid, {
+          chainIds,
+          chainColor: g.color,
+          chainIndexOf: (id: number) => chainIdx.get(id) ?? null,
+          anomalyIds,
+          violationIds,
+          jitterTs: jitterIds,
+        });
+      }
+    }
+    chainDataMapRef.current = m;
+  }, [seqGroupsForChain, seqResultsForChain]);
+
+  // ---- minimap 离屏预渲染（直方图只依赖 matches/filters/fullRange/宽度，重算时才重建） ----
+  const minimapCacheRef = useRef<{
+    canvas: HTMLCanvasElement;
+    key: string;
+  } | null>(null);
+  const minimapMatches = useLogStore((s) => s.matches);
+  const minimapFilters = useLogStore((s) => s.filters);
+  const minimapFullRange = useLogStore((s) => s.fullRange);
+  useMemo(() => {
+    const { w, dpr } = sizeRef.current;
+    if (!minimapFullRange || w === 0) return;
+    const key = [
+      minimapMatches.map((m) => `${m.filterId}:${m.events.length}`).join('|'),
+      minimapFilters.map((f) => `${f.id}:${f.color}`).join('|'),
+      minimapFullRange.start,
+      minimapFullRange.end,
+      w,
+    ].join('#');
+    if (minimapCacheRef.current?.key === key) return;
+    const left = LAYOUT.LEFT_LABEL_WIDTH;
+    const cw = w - left;
+    if (cw <= 0) return;
+    // 预渲染到物理像素位图（画时直接 drawImage，静止时零重算）
+    const off = document.createElement('canvas');
+    off.width = Math.max(1, Math.floor(cw * dpr));
+    off.height = Math.floor(LAYOUT.MINIMAP_HEIGHT * dpr);
+    const octx = off.getContext('2d');
+    if (!octx) return;
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const span = minimapFullRange.end - minimapFullRange.start || 1;
+    for (let i = 0; i < minimapMatches.length; i++) {
+      const fm = minimapMatches[i];
+      const color = minimapFilters.find((f) => f.id === fm.filterId)?.color ?? '#888';
+      const bandTop = 6 + (i % 4) * 8;
+      octx.fillStyle = color;
+      for (const ev of fm.events) {
+        const x = Math.floor(((ev.ts - minimapFullRange.start) / span) * cw);
+        octx.fillRect(x, bandTop, 1, 7);
+      }
+    }
+    minimapCacheRef.current = { canvas: off, key };
+    // 重建后需要重绘一帧（useMemo 无渲染副作用）
+    dirtyRef.current = true;
+    scheduleRender();
+  }, [minimapMatches, minimapFilters, minimapFullRange, scheduleRender]);
 
   // ---- 命中测试：根据鼠标位置找到 visibleRow 内最近事件 ----
   const rowsMemo = useMemo(
@@ -539,6 +643,7 @@ export function TimelineCanvas() {
       // 记录鼠标位置，供 WASD 以鼠标为中心缩放 / 悬停行高亮
       animator.onMouseMove(mx);
       mousePosRef.current = { x: mx, y: my };
+      markDirty(); // 行高亮随鼠标 y 变化 → 重绘
       // 悬停命中
       const hit = hitTest(mx, my);
       setHovered(hit ? hit.event.id : null);
@@ -555,7 +660,7 @@ export function TimelineCanvas() {
               : 'grab';
       }
     },
-    [animator, viewRange, fullRange, makeTimeFns, inMinimap, panBy, setViewRange, setScrubber, setHovered, hitTest],
+    [animator, viewRange, fullRange, makeTimeFns, inMinimap, panBy, setViewRange, setScrubber, setHovered, hitTest, markDirty],
   );
 
   const onMouseUp = useCallback(() => {

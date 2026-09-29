@@ -507,13 +507,20 @@ export function drawScrubber(rc: RenderContext, scrubberTs: number | null) {
   ctx.restore();
 }
 
-/** 绘制 minimap */
+/** minimap 离屏直方图缓存（由 TimelineCanvas 的 useMemo 维护） */
+export interface MinimapCache {
+  canvas: HTMLCanvasElement;
+  key: string;
+}
+
+/** 绘制 minimap（直方图走离屏缓存位图，每帧仅 drawImage + 视口框） */
 export function drawMinimap(
   rc: RenderContext,
   fullRange: TimeRange,
   view: TimeRange,
   matches: FilterMatch[],
   filters: Filter[],
+  cache: MinimapCache | null = null,
 ) {
   const { ctx, width, height } = rc;
   const top = height - LAYOUT.MINIMAP_HEIGHT;
@@ -540,14 +547,19 @@ export function drawMinimap(
   const span = fullRange.end - fullRange.start || 1;
   const tToX = (t: number) => left + ((t - fullRange.start) / span) * w;
 
-  for (let i = 0; i < matches.length; i++) {
-    const fm = matches[i];
-    const color = filters.find((f) => f.id === fm.filterId)?.color ?? '#888';
-    const bandTop = top + 6 + (i % 4) * 8;
-    ctx.fillStyle = withAlpha(color, 0.9);
-    for (const ev of fm.events) {
-      const x = tToX(ev.ts);
-      ctx.fillRect(x, bandTop, 1, 7);
+  // 直方图：优先离屏缓存（O(1) drawImage）；缓存缺失时降级为直绘
+  if (cache) {
+    ctx.drawImage(cache.canvas, left, top, w, h);
+  } else {
+    for (let i = 0; i < matches.length; i++) {
+      const fm = matches[i];
+      const color = filters.find((f) => f.id === fm.filterId)?.color ?? '#888';
+      const bandTop = top + 6 + (i % 4) * 8;
+      ctx.fillStyle = withAlpha(color, 0.9);
+      for (const ev of fm.events) {
+        const x = tToX(ev.ts);
+        ctx.fillRect(x, bandTop, 1, 7);
+      }
     }
   }
 

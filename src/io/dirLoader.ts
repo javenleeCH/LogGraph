@@ -303,6 +303,44 @@ export async function loadMultiple(
     ? String(dirHandle.path).replace(/[\\/]+$/, '')
     : null;
 
+  // ---- 快速路径：Tauri + Rust parse_dir（枚举+解析+合并+排序 全在 Rust，1 次 IPC）----
+  if (tauriRoot) {
+    const { parseLogDir } = await import('../parser/parseBridge');
+    // 进度事件订阅（Rust 侧逐文件 emit）
+    let unlisten: (() => void) | null = null;
+    try {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen<{ loaded: number; total: number; current: string }>(
+        'parse_dir_progress',
+        (e) => onProgress?.(e.payload.loaded, e.payload.total, e.payload.current),
+      );
+    } catch {
+      /* 进度订阅失败不阻断加载 */
+    }
+    try {
+      const r = await parseLogDir(tauriRoot);
+      if (r) {
+        // Rust 已完成合并排序：零拷贝构造（事件对象直接透传，sourceFile 已赋值）
+        return {
+          events: r.events,
+          rawLines: r.rawLines,
+          meta: {
+            fileName: '',
+            fileSize: 0,
+            totalLines: r.totalLines,
+            skipped: r.skipped,
+            timestampFormatId: r.timestampFormatId,
+          },
+        };
+      }
+    } catch (err) {
+      console.warn('[dirLoader] parse_dir 快速路径失败，回退逐文件:', err);
+    } finally {
+      unlisten?.();
+    }
+  }
+
+  // ---- 逐文件路径（浏览器 / Rust 不可用降级）----
   const files: { name: string; parse: FullParseResult }[] = [];
   for (let fi = 0; fi < names.length; fi++) {
     const name = names[fi];

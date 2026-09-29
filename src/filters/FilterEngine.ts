@@ -4,6 +4,8 @@
  * 为性能考虑：
  * - 正则编译结果缓存（按 pattern+flags）
  * - 文本搜索使用 indexOf（普通字符串）或 RegExp.test（正则模式）
+ * - 大小写不敏感匹配预生成小写文本缓存（避免每行 toLowerCase 分配新串）
+ * - 单 filter 增量重算 + 分块异步调度（百万行不阻塞主线程）
  */
 
 import type { Filter, FilterMatch, LogEvent } from '../types';
@@ -88,6 +90,60 @@ export class FilterEngine {
       return { filterId: f.id, events: buckets.get(cf.filterId)! };
     });
     return result;
+  }
+
+  /**
+   * 单 filter 重算（增量路径）：只跑一个 filter，其余 matches 引用复用。
+   * 大数据量下配合 runFilterChunked 异步分块执行，避免阻塞主线程。
+   */
+  static runFilter(events: LogEvent[], filter: Filter): FilterMatch {
+    const cf = compileFilter(filter);
+    if (!cf) return { filterId: filter.id, events: [] };
+    const out: LogEvent[] = [];
+    for (const ev of events) {
+      if (eventMatches(ev, cf)) out.push(ev);
+    }
+    return { filterId: filter.id, events: out };
+  }
+
+  /**
+   * 分块异步执行单 filter（同步每块 CHUNK 事件，块间让出主线程）。
+   * 每块完成回调进度 onProgress(已处理数/总数)；onDone 返回最终结果。
+   * 返回 cancel 函数（组件卸载/新 filter 编辑时取消旧任务）。
+   */
+  static runFilterChunked(
+    events: LogEvent[],
+    filter: Filter,
+    onProgress: (done: number, total: number) => void,
+    onDone: (match: FilterMatch) => void,
+  ): () => void {
+    const cf = compileFilter(filter);
+    if (!cf) {
+      onProgress(events.length, events.length);
+      onDone({ filterId: filter.id, events: [] });
+      return () => {};
+    }
+    const out: LogEvent[] = [];
+    const CHUNK = 50_000;
+    let i = 0;
+    let cancelled = false;
+    const step = () => {
+      if (cancelled) return;
+      const end = Math.min(i + CHUNK, events.length);
+      for (; i < end; i++) {
+        if (eventMatches(events[i], cf)) out.push(events[i]);
+      }
+      onProgress(i, events.length);
+      if (i < events.length) {
+        setTimeout(step, 0); // 让出主线程，保持 UI 响应
+      } else {
+        onDone({ filterId: filter.id, events: out });
+      }
+    };
+    step();
+    return () => {
+      cancelled = true;
+    };
   }
 
   /** 校验正则是否合法，返回错误信息或 null */

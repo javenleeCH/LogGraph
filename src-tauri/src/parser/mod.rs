@@ -158,6 +158,144 @@ pub async fn parse_log(
     .map_err(|e| format!("解析任务执行失败: {e}"))?
 }
 
+// ---- 目录批量解析（P2：141 文件 × 5.1MB 场景，1 次 IPC 替代 141 次）----
+
+/// 多文件合并结果（= 前端 MultiLoadResult.meta 部分 + 全局事件流）
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirParseResultDto {
+    /// 全局事件流（id 已重编为全局行号，sourceFile 已赋值，按 ts 升序）
+    pub events: Vec<LogEventDto>,
+    /// 全局 rawLines（与前端 mergeParsedInputs 语义一致）
+    pub raw_lines: Vec<String>,
+    /// 参与合并的文件相对名（与 events.sourceFile 一致）
+    pub file_names: Vec<String>,
+    pub total_lines: u32,
+    pub skipped: u32,
+    /// 各文件格式 id 集合大小为 1 时给出该 id，否则 None（与 JS meta 逻辑一致）
+    pub timestamp_format_id: Option<String>,
+}
+
+/// 判断文件名是否为可识别的日志文件（对齐前端 isLogFileName 宽松匹配）
+fn is_log_file_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".log", ".txt", ".out", ".csv", ".tsv"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
+/// 递归枚举目录下日志文件（相对路径，'/' 分隔；与前端 listLogFiles 的 name 对齐）
+fn walk_log_files(dir: &std::path::Path, prefix: &str, depth: u32, out: &mut Vec<String>) {
+    if depth > 5 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return; // 无权限/不存在 → 跳过（前端行为一致）
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if path.is_dir() {
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            walk_log_files(&path, &rel, depth + 1, out);
+        } else if is_log_file_name(&name) {
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            out.push(rel);
+        }
+    }
+}
+
+/// 批量解析目录：枚举 + 逐文件解析 + 全局 id 重编 + sourceFile 赋值 + 全局按 ts 排序，
+/// 全程 Rust 进程内完成（前端零合并拷贝），结果一次 IPC 返回。
+/// 进度经 Tauri event `parse_dir_progress` 推送 { loaded, total, current }。
+#[tauri::command]
+pub async fn parse_dir(
+    app: tauri::AppHandle,
+    dir: String,
+) -> Result<DirParseResultDto, String> {
+    use tauri::Emitter;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::path::PathBuf::from(&dir);
+        if !root.is_dir() {
+            return Err(format!("目录不存在: {dir}"));
+        }
+        // 枚举（排序与前端 localeCompare 近似：按名称字典序）
+        let mut names: Vec<String> = Vec::new();
+        walk_log_files(&root, "", 0, &mut names);
+        names.sort();
+        if names.is_empty() {
+            return Err("该目录下没有可识别的日志文件（.log/.txt/.out/.csv/.tsv）".into());
+        }
+        let total = names.len();
+
+        let mut all_events: Vec<LogEventDto> = Vec::new();
+        let mut all_raw_lines: Vec<String> = Vec::new();
+        let mut total_lines: u32 = 0;
+        let mut skipped: u32 = 0;
+        let mut format_ids: Vec<Option<String>> = Vec::new();
+        let mut file_names: Vec<String> = Vec::new();
+
+        for (i, rel) in names.iter().enumerate() {
+            let full = root.join(rel);
+            let text = match read_file_lossy(full.to_str().unwrap_or_default()) {
+                Ok(t) => t,
+                Err(_) => continue, // 读取失败跳过（前端降级行为一致）
+            };
+            let parsed = parse_text_full(&text, None);
+            let _ = app.emit(
+                "parse_dir_progress",
+                serde_json::json!({ "loaded": i + 1, "total": total, "current": rel }),
+            );
+            file_names.push(rel.clone());
+            format_ids.push(parsed.timestamp_format_id.clone());
+            total_lines = total_lines.saturating_add(parsed.total_lines);
+            skipped = skipped.saturating_add(parsed.skipped);
+
+            // 全局 id 重编（baseId = 已累计行数）+ sourceFile 赋值（Rust 侧完成，
+            // 事件对象只存一份 name 引用，序列化后前端天然共享字符串池）
+            let base_id = all_raw_lines.len() as u32;
+            for l in parsed.raw_lines {
+                all_raw_lines.push(l);
+            }
+            for mut ev in parsed.events {
+                ev.id = base_id.saturating_add(ev.id);
+                ev.source_file = Some(rel.clone());
+                all_events.push(ev);
+            }
+        }
+
+        // 全局按 ts 稳定排序（与 JS mergeParsedInputs 相同语义）
+        all_events.sort_by_key(|e| e.ts);
+
+        // 格式 id：全部相同才透出（前端 meta 逻辑）
+        let timestamp_format_id = if !format_ids.is_empty() && format_ids.windows(2).all(|w| w[0] == w[1]) {
+            format_ids[0].clone()
+        } else {
+            None
+        };
+
+        Ok(DirParseResultDto {
+            events: all_events,
+            raw_lines: all_raw_lines,
+            file_names,
+            total_lines,
+            skipped,
+            timestamp_format_id,
+        })
+    })
+    .await
+    .map_err(|e| format!("目录解析任务执行失败: {e}"))?
+}
+
 // ---- 单元测试（cargo test；期望值均按 JS 语义人工推演）----
 
 #[cfg(test)]
