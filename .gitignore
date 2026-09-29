@@ -14,5 +14,8 @@ perfetto
 # 构建缓存
 tsconfig.tsbuildinfo
 
+# 前端依赖锁定文件（不入库）
+package-lock.json
+
 # WorkBuddy 工作区数据
 .workbuddy/
