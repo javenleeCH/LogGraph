@@ -233,10 +233,12 @@ export function DetailPanel() {
     }
   }
 
-  const selThread = dbMode ? dbSel?.thread : selected.thread;
-  const selLevel = dbMode ? dbSel?.level : selected.level;
-  const selSource = dbMode ? dbSel?.sourceFile : selected.sourceFile;
+  // v2（rg+瘦SQL）：dbCtx 无 thread/level/sourceFile（瘦表不存）→ dbMode 下隐藏这些 tag
+  const selThread = dbMode ? undefined : selected.thread;
+  const selLevel = dbMode ? undefined : selected.level;
+  const selSource = dbMode ? undefined : selected.sourceFile;
   const lvlStyle = levelStyle(selLevel);
+  void dbSel;
 
   return (
     <div className={styles.detail}>

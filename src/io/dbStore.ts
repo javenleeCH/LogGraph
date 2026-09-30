@@ -1,16 +1,13 @@
 /**
- * SQLite 数据驻留桥接层（P3，plans/perf-optimization-design.md）。
+ * v2 数据层桥接：rg 直扫 + 瘦 SQL（plans/v2-rg-sql-architecture.md）。
  *
- * 模式：日志数据驻留 Rust 侧 cache.db；前端只持轻量索引：
- * - eventIndex: (line, ts)[] 按 ts 升序（≈12B/事件）
- * - LogEvent.raw/message 惰性化：需要时经 db_context_lines / db_line 拉取
- *
- * 过滤下推：runDbFilter → db_filter（FTS5 trigram / Rust 扫描）→ 命中行号数组
- * → 前端用 eventIndex 组装 FilterMatch（events 按行号查 ts）。
+ * - 打开目录：db_open（指纹缓存 / ts 扫描建瘦表，带进度）
+ * - 事件索引：db_event_index_chunk 键集分页（line, ts）
+ * - 过滤：db_filter（rg 引擎直扫原文件 + filter_hits 落库）→ (line, ts)[]
+ * - 详情/上下文：db_context_lines / db_line（mmap 直读原文件）
  */
 
 import { isTauri } from '../lib/tauri';
-import type { LogEvent } from '../types';
 
 // ---- DTO（Rust serde camelCase）----
 
@@ -23,21 +20,16 @@ export interface DbOpenResult {
   timestampFormatId: string | null;
 }
 
-export interface DbEventRow {
+/** db_filter 命中条目（line + ts，按 ts 升序） */
+export interface DbHitEntry {
   line: number;
   ts: number;
-  thread?: string;
-  level?: string;
-  sourceFile?: string;
 }
 
 export interface DbContextRow {
   no: number;
   text: string;
   ts: number | null;
-  thread?: string;
-  level?: string;
-  sourceFile?: string;
 }
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -85,12 +77,11 @@ export function dbClose(): void {
   invoke('db_close').catch(() => {});
 }
 
-// ---- 索引拉取 ----
+// ---- 事件索引（键集分页） ----
 
 const INDEX_CHUNK = 60_000;
 
-/** 拉取全量事件索引：(line, ts)[]，按 (ts, line) 升序。
- * 键集分页：每块传上一块末尾 (ts, line)，走复合索引免排序（O(n²) OFFSET 已修复） */
+/** 拉取全量事件索引：(line, ts)[]，按 (ts, line) 升序 */
 export async function fetchEventIndex(
   totalEvents: number,
   onProgress?: (frac: number) => void,
@@ -115,19 +106,27 @@ export async function fetchEventIndex(
   return out;
 }
 
-// ---- 过滤下推 ----
+// ---- 过滤下推（v2：rg 引擎 + filter_hits 落库）----
 
 export interface DbFilterQuery {
+  /** 前端 filter id（filter_hits 表主键之一；编辑覆盖重写） */
+  filterId: string;
   pattern: string;
   isRegex: boolean;
   caseSensitive: boolean;
   scope: 'raw' | 'message';
 }
 
-/** 运行一个过滤器（Rust 侧执行），返回命中全局行号升序数组 */
-export async function runDbFilter(q: DbFilterQuery): Promise<number[]> {
-  const r = await invoke<number[]>('db_filter', { q });
+/** 运行一个过滤器：rg 直扫原文件 → (line, ts)[]（按 ts 升序；Rust 侧已 JOIN line_ts） */
+export async function runDbFilter(q: DbFilterQuery): Promise<DbHitEntry[]> {
+  const r = await invoke<DbHitEntry[]>('db_filter', { q });
   return Array.isArray(r) ? r : [];
+}
+
+/** 删除 filter 的命中记录（filter 被删时调用） */
+export function dropDbFilter(filterId: string): void {
+  if (!isTauri()) return;
+  invoke('db_filter_drop', { filterId }).catch(() => {});
 }
 
 // ---- 按需取数 ----
@@ -136,8 +135,8 @@ export async function runDbFilter(q: DbFilterQuery): Promise<number[]> {
 export async function fetchEventsInWindow(
   start: number,
   end: number,
-): Promise<DbEventRow[]> {
-  const r = await invoke<DbEventRow[]>('db_events_in_window', { start, end });
+): Promise<DbHitEntry[]> {
+  const r = await invoke<DbHitEntry[]>('db_events_in_window', { start, end });
   return Array.isArray(r) ? r : [];
 }
 
@@ -153,33 +152,4 @@ export async function fetchContextLines(
 /** 单行文本 */
 export async function fetchLine(no: number): Promise<string> {
   return invoke<string>('db_line', { no });
-}
-
-// ---- FilterMatch 组装 ----
-
-/**
- * 命中行号 → FilterMatch.events（按 ts 升序）。
- * eventIndex 按 ts 升序、行号 → ts 二分查找（index 构建时排序 Map）。
- * 生成的 LogEvent 是「骨架」：id/ts 就位，raw/message 惰性（'' 占位，详情面板拉取真值）。
- */
-export function hitsToEvents(
-  hits: number[],
-  lineToIdx: Map<number, { line: number; ts: number }>,
-): LogEvent[] {
-  const evs: LogEvent[] = [];
-  for (const h of hits) {
-    const e = lineToIdx.get(h);
-    if (e) {
-      evs.push({
-        id: e.line,
-        ts: e.ts,
-        raw: '',
-        message: '',
-        sourceFile: undefined,
-      });
-    }
-  }
-  // hits 升序（行号序）≠ ts 序 → 按 ts 稳定排序（行号序为稳定打破器）
-  evs.sort((a, b) => a.ts - b.ts || a.id - b.id);
-  return evs;
 }

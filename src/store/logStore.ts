@@ -22,12 +22,7 @@ import {
   ensureReadPermission,
   isFSASupported as isFSASupportedDir,
 } from '../io/dirLoader';
-import {
-  dbClose,
-  hitsToEvents,
-  runDbFilter,
-  type DbFilterQuery,
-} from '../io/dbStore';
+import { dbClose, runDbFilter } from '../io/dbStore';
 
 // 延迟重算关联，避免拖拽/缩放时每帧都重算导致抖动
 let corrRaf = 0;
@@ -494,7 +489,7 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   /** 单 filter 增量重算：dbMode 走 Rust 下推；大数据量（>30 万）走分块异步 + 进度 */
   recomputeFilterMatch: (id) => {
-    const { events, filters, matches, dbMode, dbLineIndex } = get();
+    const { events, filters, matches, dbMode } = get();
     const filter = filters.find((f) => f.id === id);
     if (!filter || events.length === 0) {
       get().recomputeMatches();
@@ -505,22 +500,25 @@ export const useLogStore = create<LogState>((set, get) => ({
       chunkedCancel();
       chunkedCancel = null;
     }
-    // dbMode：单 filter 下推 Rust
-    if (dbMode && dbLineIndex) {
+    // dbMode：单 filter 下推 Rust（rg 引擎；返回 (line,ts)[] 直接组装骨架事件）
+    if (dbMode) {
       void (async () => {
         const match: FilterMatch = !filter.pattern || !filter.enabled
           ? { filterId: id, events: [] }
           : {
               filterId: id,
-              events: hitsToEvents(
-                await runDbFilter({
-                  pattern: filter.pattern,
-                  isRegex: filter.isRegex,
-                  caseSensitive: filter.caseSensitive,
-                  scope: filter.scope,
-                }),
-                dbLineIndex,
-              ),
+              events: (await runDbFilter({
+                filterId: id,
+                pattern: filter.pattern,
+                isRegex: filter.isRegex,
+                caseSensitive: filter.caseSensitive,
+                scope: filter.scope,
+              })).map((h) => ({
+                id: h.line,
+                ts: h.ts,
+                raw: '',
+                message: '',
+              })),
             };
         // 编辑期间 filter 又变了 → 丢弃本次结果
         const cur = get().filters.find((f) => f.id === id);
@@ -800,11 +798,9 @@ export const useLogStore = create<LogState>((set, get) => ({
       set({ matches: [], correlatedEventIds: new Set(), sequenceResults: {} });
       return;
     }
-    // dbMode：过滤下推 Rust（db_filter），逐 filter 异步执行后一次性组装
+    // dbMode：过滤下推 Rust（rg 引擎 + filter_hits 落库），逐 filter 执行后组装
     if (dbMode) {
       void (async () => {
-        const idx = get().dbLineIndex;
-        if (!idx) return;
         const out: FilterMatch[] = [];
         for (const f of filters) {
           if (!f.pattern || !f.enabled) {
@@ -812,14 +808,22 @@ export const useLogStore = create<LogState>((set, get) => ({
             continue;
           }
           try {
-            const q: DbFilterQuery = {
+            const hits = await runDbFilter({
+              filterId: f.id,
               pattern: f.pattern,
               isRegex: f.isRegex,
               caseSensitive: f.caseSensitive,
               scope: f.scope,
-            };
-            const hits = await runDbFilter(q);
-            out.push({ filterId: f.id, events: hitsToEvents(hits, idx) });
+            });
+            out.push({
+              filterId: f.id,
+              events: hits.map((h) => ({
+                id: h.line,
+                ts: h.ts,
+                raw: '',
+                message: '',
+              })),
+            });
           } catch (err) {
             console.warn('[dbMode] db_filter 失败，该 filter 置空:', f.id, err);
             out.push({ filterId: f.id, events: [] });

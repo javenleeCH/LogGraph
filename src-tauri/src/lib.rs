@@ -1,5 +1,6 @@
 mod db;
 mod parser;
+mod raw_search;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -17,6 +18,7 @@ pub fn run() {
             db::db_open,
             db::db_event_index_chunk,
             db::db_filter,
+            db::db_filter_drop,
             db::db_events_in_window,
             db::db_context_lines,
             db::db_line,

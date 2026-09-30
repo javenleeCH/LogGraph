@@ -21,8 +21,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Rust 原生日志解析引擎（时间戳/行解析正则；unicode 模式 + JS \s/\d 语义翻译，见 parser/timestamp.rs）
 regex = "1"
-# SQLite 数据驻留层（bundled 自带 SQLite 源码编译，无系统依赖；含 FTS5）
+# SQLite 数据驻留层（bundled 自带 SQLite 源码编译，无系统依赖）
 rusqlite = { version = "0.32", features = ["bundled"] }
+# rg 搜索引擎（ripgrep 内核：mmap + SIMD + memchr），v2 架构直扫原文件
+grep-searcher = "0.1"
+grep-regex = "0.1"
 
 [profile.release]
 codegen-units = 1
