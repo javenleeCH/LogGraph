@@ -146,6 +146,40 @@ fn js_trim(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
 
+/// 大小写不敏感子串查找（无 to_lowercase 分配）。
+/// 候选位扫描：首字节 ASCII 折叠相等才进入窗口比较（eq_ignore_ascii_case 逐窗）。
+/// 日志文本以 ASCII 为主，命中密度低时接近 memchr 性能；远快于每行 to_lowercase。
+fn contains_ci(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let hb = hay.as_bytes();
+    let nb = needle.as_bytes();
+    if nb.len() > hb.len() {
+        return false;
+    }
+    // 非 ASCII needle（如中文）：大小写折叠无意义，退化为直接 contains
+    if !nb.is_ascii() {
+        return hay.contains(needle);
+    }
+    let first = nb[0];
+    let first_fold = first.to_ascii_lowercase();
+    let last_fold = nb[nb.len() - 1].to_ascii_uppercase();
+    let mut i = 0;
+    let end = hb.len() - nb.len();
+    while i <= end {
+        // 首字节折叠匹配才比整窗（先比首尾，剪枝快）
+        if hb[i].to_ascii_lowercase() == first_fold
+            && hb[i + nb.len() - 1].to_ascii_uppercase() == last_fold
+            && hb[i..i + nb.len()].eq_ignore_ascii_case(nb)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 // ---- schema ----
 
 const SCHEMA: &str = r#"
@@ -170,7 +204,7 @@ CREATE TABLE IF NOT EXISTS events (
   thread TEXT,
   level TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts, line);
 CREATE VIRTUAL TABLE IF NOT EXISTS lines_fts USING fts5(
   text, content='', tokenize="trigram"
 );
@@ -371,6 +405,10 @@ pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult,
         )
         .map_err(|e| e.to_string())?;
 
+        // WAL checkpoint：把 3GB 级 wal 归并进主库文件（TRUNCATE 清零 wal）。
+        // 建库是一次性批量写，checkpoint 额外耗时远小于 wal 无限膨胀的代价。
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+
         *db_conn().lock().map_err(|e| e.to_string())? = Some(conn);
 
         Ok(DbOpenResult {
@@ -445,32 +483,14 @@ fn parse_rest_offsets(
 
 // ---- 索引拉取（前端轻量索引，分块） ----
 
-/// 行号按 ts 升序的事件行列表（事件流 = 前端 LogEvent[] 的骨架）。
-/// 前端循环拉满 totalEvents 后组装：id=line, ts 由 db_events_ts 补齐。
-#[tauri::command]
-pub fn db_sorted_lines_chunk(offset: u32, max: u32) -> Result<Vec<u32>, String> {
-    let guard = db_conn().lock().map_err(|e| e.to_string())?;
-    let Some(conn) = guard.as_ref() else {
-        return Err("cache.db 未打开".into());
-    };
-    let mut stmt = conn
-        .prepare("SELECT line FROM events ORDER BY ts, line LIMIT ?1 OFFSET ?2")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![max as i64, offset as i64], |r| r.get::<_, u32>(0))
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows.flatten() {
-        out.push(r);
-    }
-    Ok(out)
-}
-
-/// 事件 ts 列表：与 db_sorted_lines_chunk 同序（ORDER BY ts, line），
-/// 返回 (line, ts) 对，前端一次拿齐 id+ts（每块 ≤6 万条，~1MB 级）。
+/// 事件索引分块（键集分页）：返回 (line, ts) 对，按 (ts, line) 升序。
+/// @afterTs/@afterLine：上一块最后一条的 (ts, line)，首块传 (i64::MIN, 0)。
+/// 走 idx_events_ts(ts, line) 复合索引，免排序免 OFFSET 扫描（原 LIMIT/OFFSET
+/// 分页每块都全表排序跳过，84 块 = O(n²) 灾难）。
 #[tauri::command]
 pub fn db_event_index_chunk(
-    offset: u32,
+    after_ts: i64,
+    after_line: u32,
     max: u32,
 ) -> Result<Vec<(u32, i64)>, String> {
     let guard = db_conn().lock().map_err(|e| e.to_string())?;
@@ -478,10 +498,14 @@ pub fn db_event_index_chunk(
         return Err("cache.db 未打开".into());
     };
     let mut stmt = conn
-        .prepare("SELECT line, ts FROM events ORDER BY ts, line LIMIT ?1 OFFSET ?2")
+        .prepare(
+            "SELECT line, ts FROM events
+             WHERE (ts > ?1) OR (ts = ?1 AND line > ?2)
+             ORDER BY ts, line LIMIT ?3",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![max as i64, offset as i64], |r| {
+        .query_map(params![after_ts, after_line as i64, max as i64], |r| {
             Ok((r.get::<_, u32>(0)?, r.get::<_, i64>(1)?))
         })
         .map_err(|e| e.to_string())?;
@@ -546,11 +570,7 @@ pub async fn db_filter(q: FilterQuery) -> Result<Vec<u32>, String> {
         } else {
             None
         };
-        let needle = if q.case_sensitive {
-            q.pattern.clone()
-        } else {
-            q.pattern.to_lowercase()
-        };
+        let needle = q.pattern.clone();
 
         let sql = if q.scope == "message" {
             "SELECT l.no, l.text, e.msg_off, e.msg_end FROM lines l JOIN events e ON e.line = l.no"
@@ -580,9 +600,9 @@ pub async fn db_filter(q: FilterQuery) -> Result<Vec<u32>, String> {
             let hit = if let Some(re) = &re {
                 re.is_match(hay)
             } else if q.case_sensitive {
-                hay.contains(&needle)
+                hay.contains(needle.as_str())
             } else {
-                hay.to_lowercase().contains(&needle)
+                contains_ci(hay, needle.as_str())
             };
             if hit {
                 hits.push(no as u32);

@@ -89,22 +89,27 @@ export function dbClose(): void {
 
 const INDEX_CHUNK = 60_000;
 
-/** 拉取全量事件索引：(line, ts)[]，按 ts 升序（每块让出主线程保 UI 响应） */
+/** 拉取全量事件索引：(line, ts)[]，按 (ts, line) 升序。
+ * 键集分页：每块传上一块末尾 (ts, line)，走复合索引免排序（O(n²) OFFSET 已修复） */
 export async function fetchEventIndex(
   totalEvents: number,
   onProgress?: (frac: number) => void,
 ): Promise<{ line: number; ts: number }[]> {
   const out: { line: number; ts: number }[] = [];
-  let off = 0;
-  while (off < totalEvents) {
+  let afterTs = Number.NEGATIVE_INFINITY;
+  let afterLine = 0;
+  while (out.length < totalEvents) {
     const chunk = await invoke<[number, number][]>('db_event_index_chunk', {
-      offset: off,
+      afterTs,
+      afterLine,
       max: INDEX_CHUNK,
     });
     if (!Array.isArray(chunk) || chunk.length === 0) break;
     for (const [line, ts] of chunk) out.push({ line, ts });
-    off += chunk.length;
-    onProgress?.(off / Math.max(1, totalEvents));
+    const last = chunk[chunk.length - 1];
+    afterLine = last[0];
+    afterTs = last[1];
+    onProgress?.(out.length / Math.max(1, totalEvents));
     await new Promise((r) => setTimeout(r, 0));
   }
   return out;
