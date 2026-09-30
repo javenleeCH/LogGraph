@@ -22,6 +22,12 @@ import {
   ensureReadPermission,
   isFSASupported as isFSASupportedDir,
 } from '../io/dirLoader';
+import {
+  dbClose,
+  hitsToEvents,
+  runDbFilter,
+  type DbFilterQuery,
+} from '../io/dbStore';
 
 // 延迟重算关联，避免拖拽/缩放时每帧都重算导致抖动
 let corrRaf = 0;
@@ -105,6 +111,12 @@ interface LogState {
   events: LogEvent[];
   rawLines: string[]; // 原始行，用于上下文显示
   meta: LogMeta | null;
+
+  // --- SQLite 数据驻留模式（dbMode）---
+  /** true=数据驻留 cache.db（rawLines 空、raw/message 惰性）；过滤走 Rust 下推 */
+  dbMode: boolean;
+  /** dbMode：行号 → 索引条目（id/ts），过滤命中组装用 */
+  dbLineIndex: Map<number, { line: number; ts: number }> | null;
 
   // --- 过滤器 ---
   filters: Filter[];
@@ -193,6 +205,13 @@ interface LogState {
 
   // --- actions ---
   setLog: (events: LogEvent[], rawLines: string[], meta: LogMeta) => void;
+  /** dbMode 装载：事件索引（骨架）+ 元数据；raw/message 惰性（db 按需取） */
+  setLogDb: (
+    eventIndex: { line: number; ts: number }[],
+    meta: LogMeta,
+  ) => void;
+  /** 离开 dbMode（切回普通模式/关闭目录） */
+  exitDbMode: () => void;
   addFilter: (partial?: Partial<Filter>) => string;
   updateFilter: (id: string, patch: Partial<Filter>) => void;
   removeFilter: (id: string) => void;
@@ -252,6 +271,8 @@ export const useLogStore = create<LogState>((set, get) => ({
   events: [],
   rawLines: [],
   meta: null,
+  dbMode: false,
+  dbLineIndex: null,
 
   filters: [],
   matches: [],
@@ -387,6 +408,62 @@ export const useLogStore = create<LogState>((set, get) => ({
     get().recomputeMatches();
   },
 
+  setLogDb: (eventIndex, meta) => {
+    if (eventIndex.length === 0) {
+      get().exitDbMode();
+      set({ meta });
+      return;
+    }
+    // 骨架事件：id=行号，ts 就位，raw/message 惰性（详情按需拉取）
+    const events: LogEvent[] = eventIndex.map((e) => ({
+      id: e.line,
+      ts: e.ts,
+      raw: '',
+      message: '',
+    }));
+    // 行号 → 索引（过滤命中组装用）
+    const dbLineIndex = new Map<number, { line: number; ts: number }>();
+    for (const e of eventIndex) dbLineIndex.set(e.line, e);
+    const fullRange = {
+      start: events[0].ts,
+      end: events[events.length - 1].ts,
+    };
+    set({
+      events,
+      rawLines: [], // dbMode：不驻留行文本
+      meta,
+      dbMode: true,
+      dbLineIndex,
+      fullRange,
+      viewRange: { ...fullRange },
+      matches: [],
+      selectedEventId: null,
+      hoveredEventId: null,
+      scrubberTs: null,
+      correlatedEventIds: new Set(),
+    });
+    get().recomputeMatches();
+  },
+
+  exitDbMode: () => {
+    dbClose();
+    set({
+      events: [],
+      rawLines: [],
+      meta: null,
+      dbMode: false,
+      dbLineIndex: null,
+      fullRange: null,
+      viewRange: null,
+      matches: [],
+      sequenceResults: {},
+      selectedEventId: null,
+      hoveredEventId: null,
+      scrubberTs: null,
+      correlatedEventIds: new Set(),
+    });
+  },
+
   addFilter: (partial) => {
     const id = genFilterId();
     const idx = get().filters.length;
@@ -415,9 +492,9 @@ export const useLogStore = create<LogState>((set, get) => ({
     schedulePersist(get);
   },
 
-  /** 单 filter 增量重算：大数据量（>30 万）走分块异步 + 进度，小数据同步完成 */
+  /** 单 filter 增量重算：dbMode 走 Rust 下推；大数据量（>30 万）走分块异步 + 进度 */
   recomputeFilterMatch: (id) => {
-    const { events, filters, matches } = get();
+    const { events, filters, matches, dbMode, dbLineIndex } = get();
     const filter = filters.find((f) => f.id === id);
     if (!filter || events.length === 0) {
       get().recomputeMatches();
@@ -427,6 +504,36 @@ export const useLogStore = create<LogState>((set, get) => ({
     if (chunkedCancel) {
       chunkedCancel();
       chunkedCancel = null;
+    }
+    // dbMode：单 filter 下推 Rust
+    if (dbMode && dbLineIndex) {
+      void (async () => {
+        const match: FilterMatch = !filter.pattern || !filter.enabled
+          ? { filterId: id, events: [] }
+          : {
+              filterId: id,
+              events: hitsToEvents(
+                await runDbFilter({
+                  pattern: filter.pattern,
+                  isRegex: filter.isRegex,
+                  caseSensitive: filter.caseSensitive,
+                  scope: filter.scope,
+                }),
+                dbLineIndex,
+              ),
+            };
+        // 编辑期间 filter 又变了 → 丢弃本次结果
+        const cur = get().filters.find((f) => f.id === id);
+        if (cur !== filter) return;
+        const idx = matches.findIndex((m) => m.filterId === id);
+        const next = idx >= 0
+          ? matches.map((m, i) => (i === idx ? match : m))
+          : [...matches, match];
+        set({ matches: next });
+        get().recomputeSequences();
+        get().recomputeCorrelations();
+      })();
+      return;
     }
     const applyResult = (match: FilterMatch) => {
       // 与 filters 原序对齐替换该 filter 的 match（其余引用复用）
@@ -688,9 +795,45 @@ export const useLogStore = create<LogState>((set, get) => ({
   },
 
   recomputeMatches: () => {
-    const { events, filters } = get();
+    const { events, filters, dbMode } = get();
     if (events.length === 0 || filters.length === 0) {
       set({ matches: [], correlatedEventIds: new Set(), sequenceResults: {} });
+      return;
+    }
+    // dbMode：过滤下推 Rust（db_filter），逐 filter 异步执行后一次性组装
+    if (dbMode) {
+      void (async () => {
+        const idx = get().dbLineIndex;
+        if (!idx) return;
+        const out: FilterMatch[] = [];
+        for (const f of filters) {
+          if (!f.pattern || !f.enabled) {
+            out.push({ filterId: f.id, events: [] });
+            continue;
+          }
+          try {
+            const q: DbFilterQuery = {
+              pattern: f.pattern,
+              isRegex: f.isRegex,
+              caseSensitive: f.caseSensitive,
+              scope: f.scope,
+            };
+            const hits = await runDbFilter(q);
+            out.push({ filterId: f.id, events: hitsToEvents(hits, idx) });
+          } catch (err) {
+            console.warn('[dbMode] db_filter 失败，该 filter 置空:', f.id, err);
+            out.push({ filterId: f.id, events: [] });
+          }
+        }
+        // 过滤期间用户可能又改了 filters → 结果以最新为准重新跑
+        if (get().filters !== filters) {
+          get().recomputeMatches();
+          return;
+        }
+        set({ matches: out });
+        get().recomputeSequences();
+        get().recomputeCorrelations();
+      })();
       return;
     }
     const matches = FilterEngine.run(events, filters);

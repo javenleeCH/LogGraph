@@ -143,6 +143,37 @@ export function FileTreePanel() {
     if (names.length === 0) return;
     setLoading(true);
     try {
+      // ---- 快速路径：SQLite 数据驻留（Tauri + 全目录加载时）----
+      // 前端只持 (line, ts) 索引；行文本/过滤全部下推 Rust cache.db
+      const isTauriDir = !!(logsDirHandle as { __tauriDir?: boolean }).__tauriDir;
+      const allSelected = names.length === files.length;
+      if (isTauriDir && allSelected) {
+        const dir = String((logsDirHandle as { path?: string }).path ?? '');
+        const { dbOpen, fetchEventIndex } = await import('../io/dbStore');
+        const opened = await dbOpen(dir, (loaded, total, cur) => {
+          if (mountedRef.current) {
+            setProgress(`建库 ${loaded}/${total} ${cur}`);
+          }
+        });
+        if (opened) {
+          if (mountedRef.current) setProgress('载入索引…');
+          const eventIndex = await fetchEventIndex(opened.totalEvents, (frac) => {
+            if (mountedRef.current) {
+              setProgress(`载入索引 ${Math.round(frac * 100)}%`);
+            }
+          });
+          useLogStore.getState().setLogDb(eventIndex, {
+            fileName: `${logsDirName ?? dir} (${opened.fileCount} 文件)`,
+            fileSize: totalSelectedSize,
+            totalLines: opened.totalLines,
+            skipped: opened.skipped,
+            timestampFormatId: opened.timestampFormatId,
+          });
+          return;
+        }
+        // dbOpen 失败 → 落回旧全量路径
+      }
+
       const result = await loadMultiple(logsDirHandle, names, (loaded, total, cur) => {
         if (mountedRef.current) {
           setProgress(`加载中 ${loaded}/${total} ${cur}`);

@@ -1,3 +1,4 @@
+mod db;
 mod parser;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -12,7 +13,14 @@ pub fn run() {
             parser::parse_dir,
             parser::dir_lines_chunk,
             parser::dir_events_chunk,
-            parser::dir_cache_drop
+            parser::dir_cache_drop,
+            db::db_open,
+            db::db_event_index_chunk,
+            db::db_filter,
+            db::db_events_in_window,
+            db::db_context_lines,
+            db::db_line,
+            db::db_close
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

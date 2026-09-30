@@ -53,7 +53,9 @@ export default function App() {
   const [splitRatio, setSplitRatio] = useState(0.40);
   const centerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
-  const showTimeline = splitOrientation === 'horizontal';
+  // dbMode（SQLite 驻留）只支持时间线视图（LogStreamView 依赖全量行文本）
+  const dbMode = useLogStore((s) => s.dbMode);
+  const showTimeline = splitOrientation === 'horizontal' || dbMode;
 
   const onSplitMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();

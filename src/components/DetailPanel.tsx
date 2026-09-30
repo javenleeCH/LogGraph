@@ -4,6 +4,7 @@ import { formatDateTime } from '../utils/timeFormat';
 import { levelStyle } from '../constants';
 import { FileText } from './Icon';
 import { GroupMatchesTab } from './GroupMatchesTab';
+import type { DbContextRow } from '../io/dbStore';
 import styles from './DetailPanel.module.css';
 
 const CONTEXT_LINES = 4;
@@ -15,6 +16,10 @@ export function DetailPanel() {
   const selectedEventId = useLogStore((s) => s.selectedEventId);
   const events = useLogStore((s) => s.events);
   const rawLines = useLogStore((s) => s.rawLines);
+  const dbMode = useLogStore((s) => s.dbMode);
+  /** dbMode：选中事件 ±CONTEXT_LINES 的真实行（异步拉取） */
+  const [dbCtx, setDbCtx] = useState<DbContextRow[] | null>(null);
+  const dbCtxSeq = useRef(0);
   const matches = useLogStore((s) => s.matches);
   const filters = useLogStore((s) => s.filters);
   const groups = useLogStore((s) => s.groups);
@@ -51,6 +56,27 @@ export function DetailPanel() {
       selectedRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
   }, [selected]);
+
+  // dbMode：选中事件 → 异步拉取 ±CONTEXT_LINES 上下文（带序号防过期覆盖）
+  useEffect(() => {
+    if (!dbMode || selectedEventId === null) {
+      setDbCtx(null);
+      return;
+    }
+    const seq = ++dbCtxSeq.current;
+    const from = Math.max(0, selectedEventId - CONTEXT_LINES);
+    const to = selectedEventId + CONTEXT_LINES;
+    void (async () => {
+      try {
+        const { fetchContextLines } = await import('../io/dbStore');
+        const rows = await fetchContextLines(from, to);
+        if (dbCtxSeq.current === seq) setDbCtx(rows);
+      } catch (err) {
+        console.warn('[DetailPanel] db 上下文拉取失败:', err);
+        if (dbCtxSeq.current === seq) setDbCtx([]);
+      }
+    })();
+  }, [dbMode, selectedEventId]);
 
   const owningFilters = useMemo(() => {
     if (!selected) return [];
@@ -187,14 +213,30 @@ export function DetailPanel() {
     );
   }
 
+  // dbMode：上下文来自异步拉取的 dbCtx（行文本真值）；selected 的 thread/level 也从 dbCtx 补
+  const dbSel = dbMode
+    ? dbCtx?.find((r) => r.no === selected.id)
+    : undefined;
   const startLine = Math.max(0, selected.id - CONTEXT_LINES);
   const endLine = Math.min(rawLines.length - 1, selected.id + CONTEXT_LINES);
   const ctxLines: { lineno: number; text: string; lineId: number }[] = [];
-  for (let i = startLine; i <= endLine; i++) {
-    ctxLines.push({ lineno: i + 1, text: rawLines[i] ?? '', lineId: i });
+  if (dbMode) {
+    for (const r of dbCtx ?? []) {
+      ctxLines.push({ lineno: r.no + 1, text: r.text, lineId: r.no });
+    }
+    if (!dbCtx) {
+      ctxLines.push({ lineno: selected.id + 1, text: '加载上下文…', lineId: selected.id });
+    }
+  } else {
+    for (let i = startLine; i <= endLine; i++) {
+      ctxLines.push({ lineno: i + 1, text: rawLines[i] ?? '', lineId: i });
+    }
   }
 
-  const lvlStyle = levelStyle(selected.level);
+  const selThread = dbMode ? dbSel?.thread : selected.thread;
+  const selLevel = dbMode ? dbSel?.level : selected.level;
+  const selSource = dbMode ? dbSel?.sourceFile : selected.sourceFile;
+  const lvlStyle = levelStyle(selLevel);
 
   return (
     <div className={styles.detail}>
@@ -229,21 +271,21 @@ export function DetailPanel() {
         <span className={styles.spacer} />
         <span className={styles.linenum}>行 #{selected.id + 1}</span>
         <span className={styles.ts}>{formatDateTime(selected.ts)}</span>
-        {selected.sourceFile && (
-          <span className={styles.tag} title={`来源文件：${selected.sourceFile}`}>
+        {selSource && (
+          <span className={styles.tag} title={`来源文件：${selSource}`}>
             <FileText size={11} />
-            {selected.sourceFile}
+            {selSource}
           </span>
         )}
-        {selected.thread && (
-          <span className={styles.tag}>{selected.thread}</span>
+        {selThread && (
+          <span className={styles.tag}>{selThread}</span>
         )}
-        {selected.level && (
+        {selLevel && (
           <span
             className={`${styles.tag} ${styles.level}`}
             style={lvlStyle}
           >
-            {selected.level}
+            {selLevel}
           </span>
         )}
         {owningFilters.map((f) => (

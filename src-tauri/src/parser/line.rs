@@ -18,6 +18,11 @@ const LEVELS: &[&str] = &[
     "EMERG", "EMERGENCY", "ALERT", "I", "D", "W", "E", "F",
 ];
 
+/// 词是否属于 LEVELS（db.rs 偏移版 parse_rest 复用）
+pub fn is_level_word(word: &str) -> bool {
+    LEVELS.contains(&word)
+}
+
 // JS: /^\[([^\]]+)\]\s*/ —— 锚定行首的 [Thread] 段
 fn thread_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
