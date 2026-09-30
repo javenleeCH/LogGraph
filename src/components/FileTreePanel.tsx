@@ -287,7 +287,7 @@ export function FileTreePanel() {
               : '点击工具栏「打开目录」选择一个日志文件夹'}
           </div>
         )}
-        {loading && files.length === 0 && (
+        {loading && (
           <div className={styles['fileTree-loading']}>{progress || '加载中…'}</div>
         )}
         {renderNode(tree, 0, '')}

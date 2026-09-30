@@ -17,6 +17,25 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+// ---- 建库用正则缓存（OnceLock；复用 line.rs 模式串，避免每行 Regex::new）----
+// 教训：parse_rest_offsets 初版直接调 build_re()（每次编译），700 万行 × 3 次
+// = 2100 万次正则编译，建库耗时几分钟起 —— 必须缓存。
+
+fn thread_head_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| build_re(r"^\[([^\]]+)\]\s*"))
+}
+
+fn bare_level_head_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| build_re(r"^([A-Z]+)\s+"))
+}
+
+fn bracket_level_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| build_re(r"(?:\[|\()([A-Za-z]+)(?:\]|\))\s*"))
+}
+
 /// 全局连接（命令短小，Mutex 串行足够）
 fn db_conn() -> &'static Mutex<Option<Connection>> {
     static C: OnceLock<Mutex<Option<Connection>>> = OnceLock::new();
@@ -382,7 +401,7 @@ fn parse_rest_offsets(
     let mut level: Option<String> = None;
 
     // 1. [Thread] 剥除
-    if let Some(caps) = build_re(r"^\[([^\]]+)\]\s*").captures(msg) {
+    if let Some(caps) = thread_head_re().captures(msg) {
         thread = Some(caps[1].to_string());
         let whole = caps.get(0).unwrap();
         let next = js_trim(&msg[whole.end()..]);
@@ -392,7 +411,7 @@ fn parse_rest_offsets(
 
     // 2. 裸写 level（∈ LEVELS，大小写敏感）
     let mut bare_used = false;
-    if let Some(caps) = build_re(r"^([A-Z]+)\s+").captures(msg) {
+    if let Some(caps) = bare_level_head_re().captures(msg) {
         let word = caps.get(1).unwrap().as_str();
         if crate::parser::line::is_level_word(word) {
             level = Some(word.to_string());
@@ -406,7 +425,7 @@ fn parse_rest_offsets(
 
     // 3. 括号 level（最左，upper 校验）
     if !bare_used {
-        if let Some(caps) = build_re(r"(?:\[|\()([A-Za-z]+)(?:\]|\))\s*").captures(msg) {
+        if let Some(caps) = bracket_level_re().captures(msg) {
             let word = caps.get(1).unwrap().as_str();
             let upper = word.to_uppercase();
             if crate::parser::line::is_level_word(&upper) {
