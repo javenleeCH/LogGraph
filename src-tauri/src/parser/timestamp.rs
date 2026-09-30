@@ -19,6 +19,8 @@ use std::sync::OnceLock;
 
 /// 提取结果：epoch 毫秒 + 匹配区间（字节偏移）。
 /// 所有格式的匹配内容均为纯 ASCII，故字节偏移必在 char 边界上，切片安全。
+/// start / format_id 仅测试断言引用（生产路径只用 ts + end），allow 防 dead_code。
+#[allow(dead_code)]
 pub struct ExtractedTimestamp {
     pub ts: i64,
     pub start: usize,
