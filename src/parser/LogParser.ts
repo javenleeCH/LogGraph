@@ -103,7 +103,9 @@ export class LogParser {
         skipped++;
         continue;
       }
-      const rest = raw.slice(raw.indexOf(extracted.matchStr) + extracted.matchStr.length);
+      // 用真实匹配区间切出剩余（对齐 Rust &raw[ext.end..]），避免 matchStr 在行内更早
+      // 重复时 indexOf 定位错位的已知偏差（web-desktop-consistency-review.md §1.3）。
+      const rest = raw.slice(extracted.index + extracted.matchStr.length);
       const { thread, level, message } = parseRest(rest);
       events.push({
         id: i,

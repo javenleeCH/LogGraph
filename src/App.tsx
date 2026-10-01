@@ -21,8 +21,10 @@ import {
   tauriPathAsDirectory,
   type MultiLoadResult,
 } from './io/dirLoader';
-import { setupTauriDragDrop } from './lib/tauri';
+import { setupTauriDragDrop, isTauri } from './lib/tauri';
 import { parseLoadedFile } from './parser/parseBridge';
+import { ensureRegexWasm } from './filters/regexWasm';
+import { ParserDriftBanner } from './components/ParserDriftBanner';
 import styles from './App.module.css';
 
 export default function App() {
@@ -53,9 +55,8 @@ export default function App() {
   const [splitRatio, setSplitRatio] = useState(0.40);
   const centerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
-  // dbMode（SQLite 驻留）只支持时间线视图（LogStreamView 依赖全量行文本）
-  const dbMode = useLogStore((s) => s.dbMode);
-  const showTimeline = splitOrientation === 'horizontal' || dbMode;
+  // 表格流 / 时间线 由 splitOrientation 决定；dbMode（SQLite 驻留）下 LogStreamView 会惰性加载行文本
+  const showTimeline = splitOrientation === 'horizontal';
 
   const onSplitMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -68,6 +69,14 @@ export default function App() {
   useEffect(() => {
     initLogsDir();
   }, [initLogsDir]);
+
+  // 预热 wasm 正则引擎：Web 端过滤改用与桌面端同一 Rust regex crate（§1.1 引擎统一）。
+  // 异步加载，失败自动回退 JS RegExp（FilterBar 会显示回退提示）。
+  // 仅 Web 预热：桌面 dbMode 过滤全在 Rust 侧，无需加载 wasm（桌面非 dbMode
+  // 会在首次过滤时由 FilterEngine 惰性触发加载）。
+  useEffect(() => {
+    if (!isTauri()) void ensureRegexWasm();
+  }, []);
 
   // 横向文件树分隔拖拽
   useEffect(() => {
@@ -279,6 +288,7 @@ export default function App() {
       }}
       onDrop={onDrop}
     >
+      <ParserDriftBanner />
       <Toolbar />
       <div className={styles['main-row']}>
         {logsDirHandle && (

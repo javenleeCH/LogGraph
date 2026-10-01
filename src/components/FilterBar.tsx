@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FilterEngine } from '../filters/FilterEngine';
+import { isRegexWasmFallback } from '../filters/regexWasm';
 import type { Filter, FilterGroup } from '../types';
 import {
   ChevronDown,
@@ -53,6 +54,8 @@ function FilterEditor({
   }, [onClose]);
 
   const regexError = filter.isRegex ? FilterEngine.validateRegex(filter.pattern) : null;
+  // 引擎统一后（wasm Rust regex = 桌面引擎），仅在 wasm 加载失败回退 JS 时提示
+  const wasmFallback = filter.isRegex && isRegexWasmFallback();
 
   if (!pos) return null;
 
@@ -92,6 +95,13 @@ function FilterEditor({
         />
 
         {regexError && <div className={styles.error}>{regexError}</div>}
+
+        {wasmFallback && (
+          <div className={styles.warn}>
+            ⚠ WASM 正则引擎未加载，当前使用 JS 正则兜底，结果可能与桌面端不一致。
+            刷新页面或检查网络后重试。
+          </div>
+        )}
 
         <div className={styles.toggles}>
           <label>

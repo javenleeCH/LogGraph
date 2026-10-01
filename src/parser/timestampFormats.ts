@@ -97,23 +97,35 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   },
 ];
 
+/** 时间戳提取结果 */
+export interface TimestampMatch {
+  ts: number;
+  /** 匹配到的整体文本 */
+  matchStr: string;
+  formatId: string;
+  /** 匹配在行中的起始字符索引（对齐 Rust `ext.start`，用于切出时间戳之后的剩余文本） */
+  index: number;
+}
+
 /**
  * 从一行文本中尝试提取时间戳。
  * @param line 原始日志行
  * @param format 指定格式；不传则自动探测
- * @returns { ts, matchStr } 或 null
+ * @returns TimestampMatch 或 null
  */
 export function extractTimestamp(
   line: string,
   format?: TimestampFormat,
-): { ts: number; matchStr: string; formatId: string } | null {
+): TimestampMatch | null {
   const formats = format ? [format] : TIMESTAMP_FORMATS;
   for (const f of formats) {
     const m = line.match(f.regex);
     if (m) {
       const ts = f.parse(m);
       if (ts !== null && !Number.isNaN(ts)) {
-        return { ts, matchStr: m[0], formatId: f.id };
+        // 注意：用真实匹配起始 index（非 indexOf(matchStr)），避免 matchStr 在行内
+        // 更早重复出现时定位到错误位置 —— 对齐 Rust `&raw[ext.end..]`（plans/web-desktop-consistency-review.md §1.3）。
+        return { ts, matchStr: m[0], formatId: f.id, index: m.index ?? 0 };
       }
     }
   }

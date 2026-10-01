@@ -22,3 +22,6 @@ package-lock.json
 
 # logGraph 工作区状态（打开日志目录时自动生成）
 .logGraph/
+
+# wasm 过滤引擎 crate 的构建产物（源码在 filter-wasm/，生成物进 src/filters/wasm-filter/pkg）
+filter-wasm/target/

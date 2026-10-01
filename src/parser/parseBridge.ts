@@ -39,6 +39,16 @@ interface RustParseResult {
   totalLines: number;
 }
 
+/** 是否开启双引擎一致性自检：?dualengine=1 强制开启；dev 构建默认开启。 */
+function dualEngineEnabled(): boolean {
+  try {
+    if (new URLSearchParams(location.search).get('dualengine') === '1') return true;
+    return import.meta.env.DEV === true;
+  } catch {
+    return false;
+  }
+}
+
 /** 浏览器 JS 引擎（原路径，逐字符等价于改造前 parser.parse + text.split） */
 function parseWithJs(text: string, engine: 'rust' | 'js'): FullParseResult {
   const r = new LogParser().parse(text);
@@ -142,6 +152,16 @@ function dualEngineCheck(rust: FullParseResult, js: FullParseResult): void {
       `[dualengine] Rust/JS 解析不一致（以 Rust 结果继续）：${diffs.join('; ')}，` +
         `events=${rust.events.length}/${js.events.length}`,
     );
+    // 通知 UI 弹出非阻塞告警横幅（web-desktop-consistency-review.md §1.3）
+    try {
+      window.dispatchEvent(
+        new CustomEvent('loggraph:parser-drift', {
+          detail: { diffs, rust: rust.events.length, js: js.events.length },
+        }),
+      );
+    } catch {
+      /* 非浏览器环境忽略 */
+    }
   } else {
     console.info(
       `[dualengine] 一致 ✓ events=${rust.events.length} lines=${rust.totalLines} skipped=${rust.skipped}`,
@@ -159,7 +179,7 @@ function dualEngineCheck(rust: FullParseResult, js: FullParseResult): void {
 export async function parseLogText(text: string): Promise<FullParseResult> {
   const rust = await invokeRust({ text });
   if (rust) {
-    if (new URLSearchParams(location.search).get('dualengine') === '1') {
+    if (dualEngineEnabled()) {
       dualEngineCheck(rust, parseWithJs(text, 'js'));
     }
     return rust;
@@ -310,7 +330,7 @@ export async function parseLoadedFile(loaded: {
   if (loaded.path) {
     const rust = await invokeRust({ path: loaded.path });
     if (rust) {
-      if (new URLSearchParams(location.search).get('dualengine') === '1' && loaded.text) {
+      if (dualEngineEnabled() && loaded.text) {
         dualEngineCheck(rust, parseWithJs(loaded.text, 'js'));
       }
       return rust;
