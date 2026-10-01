@@ -328,7 +328,12 @@ export function TimelineCanvas() {
     ro.observe(container);
     return () => {
       ro.disconnect();
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+        // 必须复位：React.StrictMode（dev）会"挂载→清理→重挂"，清理时 cancel 掉
+        // 已排队的 RAF 后若不复位，scheduleRender 会永远误判"已排队"→ 画布空白。
+        rafRef.current = 0;
+      }
     };
   }, [scheduleRender, invalidateMinimap]);
 
