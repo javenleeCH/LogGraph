@@ -51,6 +51,59 @@
   flex: 1 1 auto;
 }
 
+/* ---- 命令面板入口 ---- */
+.paletteBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px 0 10px;
+  min-width: 168px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.paletteBtn:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.paletteLabel {
+  flex: 1 1 auto;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.paletteKbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .paletteLabel {
+    display: none;
+  }
+  .paletteBtn {
+    min-width: 0;
+  }
+}
+
 /* ---- segmented control (视图切换) ---- */
 .seg-control {
   display: inline-flex;
@@ -129,7 +182,7 @@
 }
 
 .status-range {
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-dim);
   display: inline-flex;
@@ -140,6 +193,16 @@
 .status-range b {
   color: var(--accent-light);
   font-weight: 500;
+}
+
+.status-line {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 20px;
+  padding: 2px 10px;
+  white-space: nowrap;
 }
 
 .status-pill {

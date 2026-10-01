@@ -24,6 +24,33 @@ function Svg({ size = 16, children, ...props }: IconProps & { children: ReactNod
   );
 }
 
+export function Search({ size, ...p }: IconProps) {
+  return (
+    <Svg size={size} {...p}>
+      <circle cx="11" cy="11" r="7" />
+      <path d="m20 20-3.6-3.6" />
+    </Svg>
+  );
+}
+
+export function Keyboard({ size, ...p }: IconProps) {
+  return (
+    <Svg size={size} {...p}>
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8" />
+    </Svg>
+  );
+}
+
+export function Copy({ size, ...p }: IconProps) {
+  return (
+    <Svg size={size} {...p}>
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M15 5.5A1.5 1.5 0 0 0 13.5 4H6a2 2 0 0 0-2 2v7.5A1.5 1.5 0 0 0 5.5 15" />
+    </Svg>
+  );
+}
+
 export function ChevronDown({ size, ...p }: IconProps) {
   return <Svg size={size} {...p}><path d="m6 9 6 6 6-6" /></Svg>;
 }

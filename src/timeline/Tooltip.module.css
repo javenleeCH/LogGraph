@@ -9,7 +9,7 @@
   max-width: 480px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
   backdrop-filter: blur(6px);
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.5;
   white-space: normal;

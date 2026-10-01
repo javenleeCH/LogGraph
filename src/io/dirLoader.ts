@@ -19,6 +19,7 @@ import type { LogMeta } from '../store/logStore';
 import { parseLogText, parseLogPath, type FullParseResult } from '../parser/parseBridge';
 import { isLogFileName } from './fileLoader';
 import { isTauri, loadDialog, loadFs, basename } from '../lib/tauri';
+import { notify } from '../store/uiStore';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -102,7 +103,10 @@ export async function pickLogDirectory(): Promise<any | null> {
   }
 
   if (!isFSASupported()) {
-    alert('当前浏览器不支持 File System Access API，请使用 Chrome/Edge 等 Chromium 浏览器');
+    notify(
+      '当前浏览器不支持 File System Access API',
+      { kind: 'warn', detail: '请使用 Chrome / Edge 等 Chromium 浏览器以启用「打开目录」工作区能力' },
+    );
     return null;
   }
   const handle = await (window as any).showDirectoryPicker({
@@ -111,7 +115,10 @@ export async function pickLogDirectory(): Promise<any | null> {
     startIn: 'documents',
   });
   if (!(await verifyPermission(handle, true))) {
-    alert('需要读写权限：工作区状态（过滤器/分组）会保存在所选目录内的 .logGraph 下');
+    notify('需要读写权限', {
+      kind: 'warn',
+      detail: '工作区状态（过滤器 / 分组）会保存在所选目录内的 .logGraph 下，请授予读写权限',
+    });
     return null;
   }
   await idbSet(KEY_LOGS_DIR, handle);

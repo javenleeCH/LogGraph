@@ -9,6 +9,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FileTreePanel } from './FileTreePanel';
+import { removeFilterWithUndo, removeGroupWithUndo } from '../store/undoable';
 import type { FilterGroup } from '../types';
 import {
   ChevronRight,
@@ -21,6 +22,7 @@ import {
   Layers,
   Filter as FilterIcon,
   FolderTree,
+  Trash,
 } from './Icon';
 import styles from './SidePanel.module.css';
 
@@ -35,7 +37,6 @@ export function SidePanel() {
   const setActiveGroup = useLogStore((s) => s.setActiveGroup);
   const setEditingFilterId = useLogStore((s) => s.setEditingFilterId);
   const updateGroup = useLogStore((s) => s.updateGroup);
-  const removeGroup = useLogStore((s) => s.removeGroup);
   const toggleGroupVisible = useLogStore((s) => s.toggleGroupVisible);
   const toggleGroupCollapsed = useLogStore((s) => s.toggleGroupCollapsed);
 
@@ -100,7 +101,7 @@ export function SidePanel() {
                 group={g}
                 onOpen={() => setActiveGroup(g.id)}
                 onRename={(label) => updateGroup(g.id, { label })}
-                onRemove={() => removeGroup(g.id)}
+                onRemove={() => removeGroupWithUndo(g.id)}
                 onToggleVisible={() => toggleGroupVisible(g.id)}
                 onToggleCollapsed={() => toggleGroupCollapsed(g.id)}
               />
@@ -159,6 +160,17 @@ export function SidePanel() {
                       ))
                     )}
                   </div>
+                  <button
+                    className={styles.rowDelete}
+                    title={`删除过滤器「${f.label}」（可撤销）`}
+                    aria-label={`删除过滤器 ${f.label}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeFilterWithUndo(f.id);
+                    }}
+                  >
+                    <Trash size={12} />
+                  </button>
                 </div>
               );
             })}

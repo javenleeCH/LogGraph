@@ -194,7 +194,7 @@
 }
 
 .cardMono {
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-dim);
   white-space: nowrap;

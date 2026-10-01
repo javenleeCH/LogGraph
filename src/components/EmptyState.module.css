@@ -1,0 +1,252 @@
+/* ===== 主引导页（未载入任何日志） ===== */
+.wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: auto;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 560px;
+  text-align: center;
+  animation: rise 0.34s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 58px;
+  margin-bottom: 18px;
+  border-radius: 18px;
+  background: var(--accent-grad);
+  box-shadow: 0 8px 26px rgba(124, 92, 255, 0.32);
+}
+
+.title {
+  margin: 0 0 8px;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.sub {
+  margin: 0 0 22px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-dim);
+  max-width: 440px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.actions button {
+  height: 34px;
+  padding: 0 16px;
+  font-size: 13px;
+  border-radius: var(--radius-md);
+}
+
+.actions .ghost {
+  border-color: var(--border);
+  background: var(--bg-elevated);
+}
+
+.divider {
+  position: relative;
+  width: 100%;
+  margin: 26px 0 14px;
+  text-align: center;
+}
+
+.divider::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 8%;
+  right: 8%;
+  height: 1px;
+  background: var(--border);
+}
+
+.divider span {
+  position: relative;
+  padding: 0 12px;
+  background: var(--bg);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.dropHint {
+  margin: 0 0 22px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-dim);
+}
+
+.dropHint code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+}
+
+.tips {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.tipSep {
+  width: 1px;
+  height: 13px;
+  background: var(--border);
+}
+
+.linkBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.linkBtn:hover {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ===== 次级引导（已载入日志但无过滤器） ===== */
+.compact {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  overflow: auto;
+  text-align: center;
+}
+
+.compactIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  margin-bottom: 4px;
+  border-radius: 50%;
+  border: 1px dashed var(--border-strong);
+  color: var(--text-faint);
+  background: var(--bg-track);
+}
+
+.compactTitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.compactSub {
+  max-width: 430px;
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--text-dim);
+}
+
+.compactActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+.compactActions .ghost {
+  border-color: var(--border);
+  background: var(--bg-elevated);
+}
+
+.compactHint {
+  margin-top: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+}
+
+.plus {
+  margin: 0 1px;
+  color: var(--text-faint);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    animation: none;
+  }
+}

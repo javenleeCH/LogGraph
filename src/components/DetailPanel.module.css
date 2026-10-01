@@ -31,7 +31,7 @@
 .detail-header .ts {
   color: var(--accent-light);
   font-weight: 500;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .detail-header .tag {
@@ -43,7 +43,7 @@
   border-radius: 5px;
   padding: 2px 8px;
   font-size: 11px;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   color: var(--text-dim);
 }
 
@@ -52,15 +52,51 @@
 }
 
 .detail-header .linenum {
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   color: var(--text-dim);
+}
+
+/* ---- 上下文行数调节 ---- */
+.ctxCtrl {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.ctxSelect {
+  height: 22px;
+  padding: 0 4px;
+  font-size: 11px;
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.copyBtn {
+  height: 22px !important;
+  padding: 0 9px !important;
+  font-size: 11px !important;
+  gap: 4px;
+  border-color: var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+}
+
+.copyBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .detail-body {
   flex: 1 1 auto;
   overflow: auto;
   padding: 4px 0;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -117,10 +153,23 @@
 }
 
 .detail-empty {
-  padding: 14px 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 16px;
   color: var(--text-faint);
   text-align: center;
   font-size: 12px;
+  line-height: 1.7;
+}
+
+.detail-empty b {
+  color: var(--text-dim);
+  font-weight: 600;
+  font-family: var(--font-mono);
 }
 
 /* ===== 顶部 tab（详情 / group 匹配结果） ===== */
@@ -175,7 +224,7 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   font-size: 10px;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   color: var(--text-dim);
   line-height: 1;
 }
@@ -239,7 +288,7 @@
 }
 
 .gm-stat b {
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--text);
 }
@@ -268,7 +317,7 @@
   font-size: 12px;
   padding: 4px 9px;
   outline: none;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .gm-input:focus {
@@ -279,7 +328,7 @@
   flex: 1 1 auto;
   overflow: auto;
   padding: 2px 0 8px;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.55;
 }

@@ -53,3 +53,20 @@ export function useTheme() {
 
   return { theme, toggle, setTheme } as const;
 }
+
+/**
+ * 命令式主题切换（供命令面板等非组件上下文调用）。
+ * 与 useTheme 共享同一份外部 store，因此工具栏图标状态会同步更新。
+ */
+export const toggleTheme = (): Theme => {
+  const next: Theme = currentTheme === 'dark' ? 'light' : 'dark';
+  currentTheme = next;
+  applyTheme(next);
+  try {
+    localStorage.setItem(STORAGE_KEY, next);
+  } catch {
+    /* ignore */
+  }
+  listeners.forEach((l) => l());
+  return next;
+};

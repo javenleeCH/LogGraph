@@ -25,6 +25,12 @@ import { setupTauriDragDrop, isTauri } from './lib/tauri';
 import { parseLoadedFile } from './parser/parseBridge';
 import { ensureRegexWasm } from './filters/regexWasm';
 import { ParserDriftBanner } from './components/ParserDriftBanner';
+import { ToastHost, BusyIndicator } from './components/ToastHost';
+import { CommandPalette } from './components/CommandPalette';
+import { ManualCopyDialog } from './components/ManualCopyDialog';
+import { WelcomeState, NoFilterState } from './components/EmptyState';
+import { beginBusy, toast } from './store/uiStore';
+import { LOG_EXT_HINT } from './constants';
 import styles from './App.module.css';
 
 export default function App() {
@@ -35,9 +41,11 @@ export default function App() {
   const splitOrientation = useLogStore((s) => s.splitOrientation);
   const activeGroupId = useLogStore((s) => s.activeGroupId);
   const editingFilterId = useLogStore((s) => s.editingFilterId);
+  const filters = useLogStore((s) => s.filters);
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const workspaceDirName = useLogStore((s) => s.workspaceDirName);
   const events = useLogStore((s) => s.events);
+  const fullRange = useLogStore((s) => s.fullRange);
 
   // 左侧文件树 / 主区域 可拖拽分隔：treeRatio = 文件树占比 [0, 0.4]
   const [treeRatio, setTreeRatio] = useState(0.18);
@@ -146,6 +154,7 @@ export default function App() {
   const handleLoaded = useCallback(
     async (loaded: LoadedFile | null) => {
       if (!loaded) return;
+      const endBusy = beginBusy(`解析 ${loaded.name}`);
       try {
         const result = await parseLoadedFile(loaded);
         setLog(result.events, result.rawLines, {
@@ -155,9 +164,21 @@ export default function App() {
           skipped: result.skipped,
           timestampFormatId: result.timestampFormatId,
         });
+        toast.success(
+          `已载入 ${loaded.name}`,
+          [
+            `${result.events.length.toLocaleString()} 条有效事件`,
+            result.skipped > 0 ? `跳过 ${result.skipped} 行` : '',
+            result.timestampFormatId ? `时间戳格式 ${result.timestampFormatId}` : '',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+        );
       } catch (err) {
         console.error(err);
-        alert('解析日志失败：' + (err as Error).message);
+        toast.error('解析日志失败', (err as Error).message);
+      } finally {
+        endBusy();
       }
     },
     [setLog],
@@ -177,10 +198,11 @@ export default function App() {
   // 加载一个目录句柄（Tauri 拖拽目录）：枚举 + 合并 + 写入 store
   const handleDirectory = useCallback(
     async (dirHandle: any, dirName: string) => {
+      const endBusy = beginBusy(`扫描 ${dirName}`);
       try {
         const list = await listLogFiles(dirHandle, { recursive: true });
         if (list.length === 0) {
-          alert('该文件夹下没有可识别的日志文件（.log / .txt / .out / .csv / .tsv）');
+          toast.warn('没有找到可识别的日志文件', `支持 ${LOG_EXT_HINT}`);
           return;
         }
         const names = list.map((f) => f.name);
@@ -190,9 +212,15 @@ export default function App() {
           fileName: `${dirName} (${names.length} 文件)`,
           fileSize: list.reduce((s, f) => s + f.size, 0),
         });
+        toast.success(
+          `已载入目录 ${dirName}`,
+          `${names.length} 个文件 · ${result.events.length.toLocaleString()} 条事件`,
+        );
       } catch (err) {
         console.error(err);
-        alert('加载文件夹失败：' + (err as Error).message);
+        toast.error('加载文件夹失败', (err as Error).message);
+      } finally {
+        endBusy();
       }
     },
     [setLog],
@@ -218,7 +246,7 @@ export default function App() {
           await handleLoaded(await loadTauriPaths(paths));
         } catch (err) {
           console.error(err);
-          alert('加载失败：' + (err as Error).message);
+          toast.error('加载失败', (err as Error).message);
         }
       },
     }).then((fn) => {
@@ -242,7 +270,7 @@ export default function App() {
           await useLogStore.getState().openWorkspace(dirHandle);
           const list = await listLogFiles(dirHandle, { recursive: true });
           if (list.length === 0) {
-            alert('该文件夹下没有可识别的日志文件（.log / .txt / .out / .csv / .tsv）');
+            toast.warn('没有找到可识别的日志文件', `支持 ${LOG_EXT_HINT}`);
             return;
           }
           const names = list.map((f) => f.name);
@@ -250,7 +278,7 @@ export default function App() {
           applyDirectoryResult(result, dirHandle.name, names.length);
         } catch (err) {
           console.error(err);
-          alert('加载文件夹失败：' + (err as Error).message);
+          toast.error('加载文件夹失败', (err as Error).message);
         }
         return;
       }
@@ -258,10 +286,10 @@ export default function App() {
         try {
           const res = await loadDroppedDirectory(dirEntry);
           if (res) applyDirectoryResult(res.result, dirEntry.name, res.count);
-          else alert('该文件夹下没有可识别的日志文件（.log / .txt / .out / .csv / .tsv）');
+          else toast.warn('没有找到可识别的日志文件', `支持 ${LOG_EXT_HINT}`);
         } catch (err) {
           console.error(err);
-          alert('加载文件夹失败：' + (err as Error).message);
+          toast.error('加载文件夹失败', (err as Error).message);
         }
         return;
       }
@@ -274,6 +302,10 @@ export default function App() {
   );
 
   const topFlex = 1 - splitRatio;
+  // 侧栏（文件树 / 分组 / 过滤器）可见条件：
+  // 原先仅绑了日志目录才渲染，导致「只打开单个日志文件」时用户完全没有入口
+  // 去新建过滤器——而过滤器正是本应用的核心能力。这里补上「已载入日志」的条件。
+  const hasContent = !!logsDirHandle || events.length > 0;
 
   return (
     <div
@@ -291,7 +323,7 @@ export default function App() {
       <ParserDriftBanner />
       <Toolbar />
       <div className={styles['main-row']}>
-        {logsDirHandle && (
+        {hasContent && (
           <>
             <div
               className={styles.treePane}
@@ -309,16 +341,24 @@ export default function App() {
         <div
           ref={centerRef}
           className={styles['app-center']}
-          style={{ flex: `${logsDirHandle ? (1 - treeRatio) : 1} 1 0` }}
+          style={{ flex: `${hasContent ? (1 - treeRatio) : 1} 1 0` }}
         >
           <div className={styles.paneTop} style={{ flex: `${topFlex} 1 0` }}>
-            {showTimeline ? (
+            {!showTimeline ? (
+              <>
+                {/* 表格流同样需要过滤器启停条：列是按过滤器分的，不显示就没法临时隐藏某一列 */}
+                <FilterChips />
+                <LogStreamView />
+              </>
+            ) : fullRange && filters.length > 0 ? (
               <>
                 <FilterChips />
                 <TimelineCanvas />
               </>
+            ) : fullRange ? (
+              <NoFilterState />
             ) : (
-              <LogStreamView />
+              <WelcomeState />
             )}
           </div>
           <div
@@ -364,6 +404,10 @@ export default function App() {
       )}
       {activeGroupId && <GroupEditorPage />}
       {editingFilterId && <FilterDetailModal />}
+      <BusyIndicator />
+      <ToastHost />
+      <CommandPalette />
+      <ManualCopyDialog />
     </div>
   );
 }

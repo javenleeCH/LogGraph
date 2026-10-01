@@ -4,6 +4,7 @@ import { bisectLeft } from '../timeline/correlation';
 import { formatTime, formatDuration, chooseTickStep } from '../utils/timeFormat';
 import { levelColor as getLevelColor } from '../constants';
 import { ChevronLeft, ChevronRight, AlignCenter, Columns, Globe } from './Icon';
+import { WelcomeState, NoFilterState } from './EmptyState';
 import type { LogEvent, Filter } from '../types';
 import styles from './LogStreamView.module.css';
 
@@ -619,7 +620,7 @@ export function LogStreamView() {
   if (!viewRange || !fullRange) {
     return (
       <div ref={measureRef} className={styles.empty}>
-        打开日志文件并添加过滤器以开始
+        <WelcomeState />
       </div>
     );
   }
@@ -627,7 +628,7 @@ export function LogStreamView() {
   if (visibleFilters.length === 0) {
     return (
       <div ref={measureRef} className={styles.empty}>
-        请先添加过滤器，每列对应一个过滤器的匹配结果
+        <NoFilterState />
       </div>
     );
   }

@@ -75,7 +75,7 @@
   gap: 12px;
   color: var(--text-dim);
   font-size: 11px;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .range-info b {

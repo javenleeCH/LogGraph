@@ -150,7 +150,7 @@
   padding-left: 8px;
   color: var(--text-faint);
   font-size: 10px;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   flex: 0 0 auto;
 }
 

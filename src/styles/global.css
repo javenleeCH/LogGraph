@@ -93,9 +93,11 @@
   --minimap-h: 44px;
 
   color-scheme: light;
-  --font-ui: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont,
+  /* 与 index.html 加载的 Fira Sans / Fira Code 保持一致。
+     之前这里写的是 Inter / SFMono，导致字体已下载却从未生效，界面实际依赖系统回退。 */
+  --font-ui: 'Fira Sans', 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont,
     'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: 'SFMono-Regular', 'Cascadia Code', Consolas, 'Roboto Mono',
+  --font-mono: 'Fira Code', 'SFMono-Regular', 'Cascadia Code', Consolas, 'Roboto Mono',
     'Liberation Mono', Menlo, monospace;
   font-family: var(--font-ui);
 }

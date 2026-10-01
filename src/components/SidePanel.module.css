@@ -235,6 +235,34 @@
   margin-top: 2px;
 }
 
+/* 悬停/聚焦才显形的行内删除按钮：平时不占视觉重量，用的时候就在手边 */
+.rowDelete {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0;
+  width: 20px;
+  height: 20px;
+  border: none !important;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.filterRow:hover .rowDelete,
+.rowDelete:focus-visible {
+  opacity: 1;
+}
+
+.rowDelete:hover {
+  background: rgba(213, 94, 0, 0.14);
+  color: var(--danger);
+}
+
 .rowTag {
   font-size: 10px;
   opacity: 0.75;

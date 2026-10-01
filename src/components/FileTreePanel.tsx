@@ -12,6 +12,7 @@ import {
   type LogFileInfo,
 } from '../io/dirLoader';
 import { ChevronDown, ChevronRight, Folder, FileText } from './Icon';
+import { toast } from '../store/uiStore';
 import styles from './FileTreePanel.module.css';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -189,7 +190,7 @@ export function FileTreePanel() {
       });
     } catch (e) {
       console.error('加载日志失败', e);
-      alert('加载日志失败：' + (e as Error).message);
+      toast.error('加载日志失败', (e as Error).message);
     } finally {
       setLoading(false);
       setProgress('');

@@ -9,6 +9,13 @@
       href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@300;400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+    <!-- 内联 SVG favicon：省一次 /favicon.ico 请求，也避免控制台 404 噪音 -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c5cff'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Cpath d='M5 17h5l2.5-7.5L16 24l3-11 2 4h6' fill='none' stroke='white' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <meta name="description" content="多过滤器日志时间线分析器：把多条过滤器轨道按同一根时间轴对齐，一眼看清日志之间的时间关联。" />
+    <meta name="theme-color" content="#0b0e14" />
     <script>
       // 主题早期注入，避免 FOUC（闪烁）
       (function () {

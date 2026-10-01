@@ -1,13 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
+import { copyWithFallback } from '../utils/copyFlow';
+import { getRawLine } from '../utils/rawLine';
 import { levelStyle } from '../constants';
-import { FileText } from './Icon';
+import { FileText, Copy } from './Icon';
 import { GroupMatchesTab } from './GroupMatchesTab';
 import type { DbContextRow } from '../io/dbStore';
 import styles from './DetailPanel.module.css';
 
-const CONTEXT_LINES = 4;
+/** 上下文行数可选档位：堆栈往往很长，固定 4 行不够用，交给用户现场调 */
+const CONTEXT_PRESETS = [4, 8, 16, 32, 64];
+const DEFAULT_CONTEXT = 8;
 
 /** 详情面板 tab 标识：'detail' = 事件详情；'group:<id>' = group 匹配结果 */
 type DetailTab = string;
@@ -28,6 +32,28 @@ export function DetailPanel() {
   const selectEvent = useLogStore((s) => s.selectEvent);
   const selectedRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<DetailTab>('detail');
+  /** 上下文行数（选中行上下各取这么多行） */
+  const [ctxSpan, setCtxSpan] = useState<number>(DEFAULT_CONTEXT);
+
+  /**
+   * 复制当前选中行。
+   * dbMode 下 rawLines 为空，必须回源到 SQLite 拉这一行，否则复制出来是空字符串
+   * （会被误判成「剪贴板不可用」）。自动复制全失败时 copyWithFallback 会弹
+   * 手动复制窗口兜底。
+   */
+  const copySelectedLine = useCallback(async () => {
+    const id = useLogStore.getState().selectedEventId;
+    if (id === null) return;
+    const text = await getRawLine(id);
+    await copyWithFallback(text, {
+      successTitle: '已复制原始行',
+      successDetail: `第 ${id + 1} 行 · ${text.length} 字符`,
+      fallbackTitle: '手动复制该行',
+    });
+  }, []);
+
+  // 注：全局复制快捷键（Ctrl/⌘+C）集中登记在 CommandPalette 里，此处不再重复监听，
+  // 否则一次按键会触发两遍复制。
 
   // group 匹配 tab 是否展示（配置了序列关系且有匹配结果）
   const seqGroups = useMemo(
@@ -64,8 +90,8 @@ export function DetailPanel() {
       return;
     }
     const seq = ++dbCtxSeq.current;
-    const from = Math.max(0, selectedEventId - CONTEXT_LINES);
-    const to = selectedEventId + CONTEXT_LINES;
+    const from = Math.max(0, selectedEventId - ctxSpan);
+    const to = selectedEventId + ctxSpan;
     void (async () => {
       try {
         const { fetchContextLines } = await import('../io/dbStore');
@@ -76,7 +102,7 @@ export function DetailPanel() {
         if (dbCtxSeq.current === seq) setDbCtx([]);
       }
     })();
-  }, [dbMode, selectedEventId]);
+  }, [dbMode, selectedEventId, ctxSpan]);
 
   const owningFilters = useMemo(() => {
     if (!selected) return [];
@@ -120,7 +146,10 @@ export function DetailPanel() {
         raw: st.event.raw,
       })),
     };
-    void navigator.clipboard?.writeText(JSON.stringify(payload, null, 2));
+    void copyWithFallback(JSON.stringify(payload, null, 2), {
+      successTitle: '已复制匹配链 JSON',
+      fallbackTitle: '手动复制匹配链 JSON',
+    });
   };
 
   const activeGroupId = activeTab.startsWith('group:')
@@ -207,7 +236,11 @@ export function DetailPanel() {
           })}
         </div>
         <div className={styles['detail-empty']}>
-          点击时间线上的事件以查看详情与上下文行
+          <Copy size={22} />
+          <div style={{ marginTop: 10 }}>点击任意事件查看详情：原始行、上下文、时间戳与所属过滤器</div>
+          <div style={{ marginTop: 6, opacity: 0.75 }}>
+            选中后可按 <b>Ctrl / ⌘ + C</b> 直接复制该行原文
+          </div>
         </div>
       </div>
     );
@@ -217,8 +250,8 @@ export function DetailPanel() {
   const dbSel = dbMode
     ? dbCtx?.find((r) => r.no === selected.id)
     : undefined;
-  const startLine = Math.max(0, selected.id - CONTEXT_LINES);
-  const endLine = Math.min(rawLines.length - 1, selected.id + CONTEXT_LINES);
+  const startLine = Math.max(0, selected.id - ctxSpan);
+  const endLine = Math.min(rawLines.length - 1, selected.id + ctxSpan);
   const ctxLines: { lineno: number; text: string; lineId: number }[] = [];
   if (dbMode) {
     for (const r of dbCtx ?? []) {
@@ -273,6 +306,34 @@ export function DetailPanel() {
         <span className={styles.spacer} />
         <span className={styles.linenum}>行 #{selected.id + 1}</span>
         <span className={styles.ts}>{formatDateTime(selected.ts)}</span>
+
+        {/* 高频操作：复制原始行 / 调节上下文行数 */}
+        <span className={styles.ctxCtrl}>
+          <label htmlFor="lg-ctx" title="选中行上下各显示的上下文行数">
+            上下文
+          </label>
+          <select
+            id="lg-ctx"
+            className={styles.ctxSelect}
+            value={ctxSpan}
+            onChange={(e) => setCtxSpan(Number(e.target.value))}
+          >
+            {CONTEXT_PRESETS.map((n) => (
+              <option key={n} value={n}>
+                ±{n}
+              </option>
+            ))}
+          </select>
+        </span>
+        <button
+          className={styles.copyBtn}
+          onClick={() => void copySelectedLine()}
+          title="复制这一行的原始文本（Ctrl / ⌘ + C）"
+        >
+          <Copy size={12} />
+          复制行
+        </button>
+
         {selSource && (
           <span className={styles.tag} title={`来源文件：${selSource}`}>
             <FileText size={11} />
