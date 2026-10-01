@@ -87,14 +87,18 @@ export async function fetchEventIndex(
   onProgress?: (frac: number) => void,
 ): Promise<{ line: number; ts: number }[]> {
   const out: { line: number; ts: number }[] = [];
-  let afterTs = Number.NEGATIVE_INFINITY;
+  // 注意：首块用 null 作为「无下界」哨兵（Rust 侧 after_ts: Option<i64>）。
+  // 不能用 Number.NEGATIVE_INFINITY —— 它不是合法 JSON/serde 值，
+  // 会被序列化成 null 后触发 Rust 端反序列化报错，进而 invoke 直接 reject。
+  let afterTs: number | null = null;
   let afterLine = 0;
   while (out.length < totalEvents) {
-    const chunk = await invoke<[number, number][]>('db_event_index_chunk', {
+    // 用 as 断言而非 invoke<T> 泛型：避免 tsc 对元组数组的推断环路（TS7022）
+    const chunk = (await invoke('db_event_index_chunk', {
       afterTs,
       afterLine,
       max: INDEX_CHUNK,
-    });
+    })) as [number, number][];
     if (!Array.isArray(chunk) || chunk.length === 0) break;
     for (const [line, ts] of chunk) out.push({ line, ts });
     const last = chunk[chunk.length - 1];
@@ -152,4 +156,68 @@ export async function fetchContextLines(
 /** 单行文本 */
 export async function fetchLine(no: number): Promise<string> {
   return invoke<string>('db_line', { no });
+}
+
+// ---- 序列匹配 SQL 加速路径（PR-4：CEP 下推，dbMode 大数据加速）----
+
+export interface DbRunSeqEdge {
+  id: string;
+  fromFilterId: string;
+  toFilterId: string;
+  toFilterIds?: string[];
+  kind?: 'seq' | 'not' | 'and' | 'or' | 'periodic' | 'opt';
+  maxGapMs: number;
+  periodMs?: number;
+}
+
+export interface DbRunSeqGroup {
+  groupId: string;
+  filterIds: string[];
+  scope?: 'global' | 'thread';
+  edges: DbRunSeqEdge[];
+  nodeConditions?: Record<string, string>;
+  nodeCounts?: Record<string, { min: number; max: number }>;
+}
+
+export interface DbRunSeqResponse {
+  /** true → 存在不支持的特性（thread 分桶 / nodeConditions / nodeCounts / opt / periodic），
+   *  调用方应整体回退到前端 TS 引擎 runSequenceMatching */
+  fallback: boolean;
+  results: Record<string, unknown>;
+}
+
+/**
+ * 把序列匹配下推到 Rust（从 filter_hits JOIN line_ts 取事件，贪心链匹配）。
+ * 仅支持 global 作用域 + seq/and/or/not 边；其它特性由 Rust 端标记 fallback。
+ */
+export async function runDbSequences(
+  groups: DbRunSeqGroup[],
+): Promise<DbRunSeqResponse> {
+  if (!isTauri()) return { fallback: true, results: {} };
+  const specs = groups
+    .filter((g) => g.edges && g.edges.length > 0)
+    .map((g) => ({
+      groupId: g.groupId,
+      filterIds: g.filterIds,
+      scope: g.scope ?? 'global',
+      edges: g.edges.map((e) => ({
+        id: e.id,
+        fromFilterId: e.fromFilterId,
+        toFilterId: e.toFilterId,
+        toFilterIds: e.toFilterIds,
+        kind: e.kind,
+        maxGapMs: e.maxGapMs,
+        periodMs: e.periodMs,
+      })),
+      nodeConditions: g.nodeConditions,
+      nodeCounts: g.nodeCounts,
+    }));
+  if (specs.length === 0) return { fallback: true, results: {} };
+  try {
+    const r = await invoke<DbRunSeqResponse>('db_run_sequences', { groups: specs });
+    return r ?? { fallback: true, results: {} };
+  } catch (err) {
+    console.warn('[dbStore] db_run_sequences 失败，回退 TS:', err);
+    return { fallback: true, results: {} };
+  }
 }

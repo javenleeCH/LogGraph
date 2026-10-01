@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 /// 全局连接
-fn db_conn() -> &'static Mutex<Option<Connection>> {
+pub(crate) fn db_conn() -> &'static Mutex<Option<Connection>> {
     static C: OnceLock<Mutex<Option<Connection>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(None))
 }
@@ -664,9 +664,10 @@ pub fn db_events_in_window(start: i64, end: i64) -> Result<Vec<HitEntry>, String
 }
 
 /// 事件索引分块（键集分页，复合索引免排序）：返回 (line, ts)，按 (ts, line) 升序。
+/// after_ts 为 None 表示「无下界」（首块）；非首块传上一块最后一条的 (ts, line)。
 #[tauri::command]
 pub fn db_event_index_chunk(
-    after_ts: i64,
+    after_ts: Option<i64>,
     after_line: u32,
     max: u32,
 ) -> Result<Vec<(u32, i64)>, String> {
@@ -674,10 +675,11 @@ pub fn db_event_index_chunk(
     let Some(conn) = guard.as_ref() else {
         return Err("cache.db 未打开".into());
     };
+    // after_ts IS NULL → 首块无下界；否则键集分页 (ts, line) 游标
     let mut stmt = conn
         .prepare(
             "SELECT line, ts FROM line_ts
-             WHERE (ts > ?1) OR (ts = ?1 AND line > ?2)
+             WHERE (?1 IS NULL OR ts > ?1 OR (ts = ?1 AND line > ?2))
              ORDER BY ts, line LIMIT ?3",
         )
         .map_err(|e| e.to_string())?;

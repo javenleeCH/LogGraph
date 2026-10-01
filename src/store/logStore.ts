@@ -22,7 +22,7 @@ import {
   ensureReadPermission,
   isFSASupported as isFSASupportedDir,
 } from '../io/dirLoader';
-import { dbClose, runDbFilter } from '../io/dbStore';
+import { dbClose, runDbFilter, runDbSequences, type DbRunSeqGroup } from '../io/dbStore';
 
 // 延迟重算关联，避免拖拽/缩放时每帧都重算导致抖动
 let corrRaf = 0;
@@ -660,7 +660,44 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   /** 重算所有 group 的序列匹配（依赖 matches + groups.sequence） */
   recomputeSequences: () => {
-    const { groups, matches } = get();
+    const { groups, matches, dbMode } = get();
+    // dbMode：优先下推 Rust（PR-4 CEP 加速路径），不支持的特性整体回退 TS 引擎
+    if (dbMode) {
+      void (async () => {
+        const seqGroups: DbRunSeqGroup[] = groups
+          .filter((g) => g.sequence && g.sequence.edges.length > 0)
+          .map((g) => ({
+            groupId: g.id,
+            filterIds: g.filterIds,
+            scope: g.sequence!.scope,
+            edges: g.sequence!.edges.map((e) => ({
+              id: e.id,
+              fromFilterId: e.fromFilterId,
+              toFilterId: e.toFilterId,
+              toFilterIds: e.toFilterIds,
+              kind: e.kind,
+              maxGapMs: e.maxGapMs,
+              periodMs: e.periodMs,
+            })),
+            nodeConditions: g.sequence!.nodeConditions,
+            nodeCounts: g.sequence!.nodeCounts,
+          }));
+        let results: Record<string, SequenceMatchResult>;
+        try {
+          const resp = await runDbSequences(seqGroups);
+          if (resp.fallback) {
+            results = runSequenceMatching(groups, matches);
+          } else {
+            results = resp.results as Record<string, SequenceMatchResult>;
+          }
+        } catch {
+          results = runSequenceMatching(groups, matches);
+        }
+        set({ sequenceResults: results });
+        get().recomputeCorrelations();
+      })();
+      return;
+    }
     const results = runSequenceMatching(groups, matches);
     // 引用不变时避免无谓 set（runSequenceMatching 每次新对象，简单比较）
     set({ sequenceResults: results });

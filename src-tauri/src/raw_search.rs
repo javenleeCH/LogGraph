@@ -5,6 +5,7 @@
 //! grep-searcher 行切分（\n 计数）与 split('\n') 语义天然一致。
 
 use grep_regex::RegexMatcherBuilder;
+use grep_matcher::LineTerminator;
 use grep_searcher::{SearcherBuilder, Sink, SinkMatch};
 use rusqlite::Connection;
 use std::path::Path;
@@ -46,6 +47,12 @@ fn build_matcher(
     };
     let mut b = RegexMatcherBuilder::new();
     b.case_insensitive(!case_sensitive);
+    // CRLF（rg --crlf 同款）：让 ^ / $ 锚点按 Windows 换行语义编译。
+    // 副作用：crlf(true) 会把 matcher 的 line_terminator 置为 CRLF，
+    // 因此 searcher 侧必须同步设为 LineTerminator::crlf()——
+    // 否则 Searcher::check_config 会报 MismatchedLineTerminators，
+    // 且该错误会被 search_path 吞成 io::Error 被 `let _ =` 丢弃 → 静默零命中。
+    b.crlf(true);
     b.build(&expr).map_err(|e| format!("构建 matcher 失败: {e}"))
 }
 
@@ -76,9 +83,14 @@ pub(crate) fn search_dir(
     };
 
     let mut all_hits: Vec<u32> = Vec::new();
+    // 注意：SearcherBuilder 没有 crlf() 方法（crlf() 只在 grep_regex::RegexMatcherBuilder 上），
+    // searcher 侧的 CRLF 由 line_terminator(LineTerminator::crlf()) 表达，
+    // 且必须与上面的 b.crlf(true) 成对出现（见 check_config 的一致性校验）。
+    // 行号始终按 \n 字节计数（LineTerminator::as_byte() 对 CRLF 也返回 b'\n'），
+    // 与 db.rs 建库的 split('\n') 全局行号语义天然一致。
     let mut searcher = SearcherBuilder::new()
         .line_number(true)
-        .crlf(true)
+        .line_terminator(LineTerminator::crlf())
         .build();
 
     for (name, first_line) in files {
@@ -96,4 +108,102 @@ pub(crate) fn search_dir(
     all_hits.sort_unstable();
     all_hits.dedup();
     Ok(all_hits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 建一个临时目录 + files 表（first_line 与 db.rs 的 split('\n') 语义一致）
+    struct Fixture {
+        dir: std::path::PathBuf,
+    }
+
+    impl Fixture {
+        fn new(tag: &str, files: &[(&str, &str)]) -> (Fixture, Connection) {
+            let dir = std::env::temp_dir().join(format!(
+                "loggraph_raw_search_{tag}_{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE files (fid INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                                     first_line INTEGER NOT NULL);",
+            )
+            .unwrap();
+
+            // 与 db.rs 建库同款：全局行号按 split('\n') 递增（尾随空行也计入）
+            let mut next_line: u32 = 0;
+            for (i, (name, content)) in files.iter().enumerate() {
+                std::fs::write(dir.join(name), content.as_bytes()).unwrap();
+                conn.execute(
+                    "INSERT INTO files(fid, name, first_line) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![(i + 1) as i64, *name, next_line as i64],
+                )
+                .unwrap();
+                next_line += content.split('\n').count() as u32;
+            }
+            (Fixture { dir }, conn)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// CRLF 文件：字面量命中行号必须与 split('\n') 全局行号一致
+    #[test]
+    fn crlf_literal_global_line_numbers() {
+        let (f, conn) = Fixture::new(
+            "lit",
+            &[
+                ("a.log", "alpha\r\nbeta\r\ngamma\r\n"), // 4 行（尾随空行）
+                ("b.log", "beta again\r\n"),             // 首行全局行号 = 4
+            ],
+        );
+        let hits = search_dir(&f.dir, &conn, "beta", false, true).unwrap();
+        // a.log 第 2 行 → 全局 1；b.log 第 1 行 → 全局 4
+        assert_eq!(hits, vec![1, 4]);
+    }
+
+    /// 大小写不敏感 / 正则匹配的基本行为
+    #[test]
+    fn case_insensitive_and_regex() {
+        let (f, conn) = Fixture::new(
+            "ci",
+            &[("a.log", "ERROR: boom\nwarn: hmm\n"), ("b.log", "Info: ok\n")],
+        );
+        // 默认（case_sensitive=false）应命中 ERROR 与 warn 两行
+        let hits = search_dir(&f.dir, &conn, "error|warn", true, false).unwrap();
+        assert_eq!(hits, vec![0, 1]);
+        // 大小写敏感：ERROR 不再命中，只剩小写 warn
+        let hits = search_dir(&f.dir, &conn, "error|warn", true, true).unwrap();
+        assert_eq!(hits, vec![1]);
+    }
+
+    /// CRLF 文件上的 `$` 锚点回归测试：若 matcher/searcher 两侧的 CRLF 配置
+    /// 被单独改动（例如把 line_terminator 删掉），此用例会红。
+    #[test]
+    fn crlf_dollar_anchor_matches() {
+        let (f, conn) = Fixture::new(
+            "anchor",
+            &[("a.log", "ok done\r\nstill running\r\n"), ("b.log", "done\r\n")],
+        );
+        // `$` 只应命中以 done 结尾的行：
+        // a.log 第 1 行 → 全局 0；b.log 首行全局行号 = 3（a.log 占 3 个 split 行）
+        let hits = search_dir(&f.dir, &conn, r"done$", true, true).unwrap();
+        assert_eq!(hits, vec![0, 3]);
+    }
+
+    /// 空 pattern → 空结果（不触发任何扫描）
+    #[test]
+    fn empty_pattern_yields_nothing() {
+        let (f, conn) = Fixture::new("empty", &[("a.log", "x\n")]);
+        assert!(search_dir(&f.dir, &conn, "", false, true).unwrap().is_empty());
+    }
 }

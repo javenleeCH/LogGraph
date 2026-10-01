@@ -199,6 +199,8 @@ export function LogStreamView() {
   const selectEvent = useLogStore((s) => s.selectEvent);
   const setHovered = useLogStore((s) => s.setHovered);
   const resetView = useLogStore((s) => s.resetView);
+  // dbMode（SQLite 驻留）：事件只有骨架（raw=''），需要按视口惰性取行文本
+  const dbMode = useLogStore((s) => s.dbMode);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerInnerRef = useRef<HTMLDivElement>(null);
@@ -339,6 +341,8 @@ export function LogStreamView() {
   // 同一 filter 在多个 group 出现时各 slot 独立宽度。拖动列 slot 边界仅改 colWidths[slot]，
   // 后续列宽度不变 → 它们整体位置随 flex 排列自然右移（即"整体平移跟随"）
   const [colWidths, setColWidths] = useState<number[]>([]);
+  // dbMode 下列表只持有骨架事件（raw=''），按视口惰性从 cache.db 取行文本（no=全局行号=event.id）
+  const [lineText, setLineText] = useState<Map<number, string>>(new Map());
   // 列实例数量变化时重置为等分填充可用宽
   useEffect(() => {
     setColWidths((prev) => {
@@ -548,6 +552,69 @@ export function LogStreamView() {
       return m;
     });
   }, [laneEvents]);
+
+  // 当前视口内真正会渲染的事件 id 集合（按视图模式推断），供 dbMode 惰性取文本
+  const renderedIds = useMemo(() => {
+    if (!dbMode) return [] as number[];
+    const ids: number[] = [];
+    if (mode === 'aligned') {
+      for (const r of visibleRows) {
+        for (const m of laneByTs) {
+          const arr = m.get(r.ts);
+          if (arr) for (const e of arr) ids.push(e.id);
+        }
+      }
+    } else if (mode === 'global' && viewRange && globalData) {
+      const yTop = Math.max(0, scrollTop - 60);
+      const yBot = scrollTop + viewportH + 60;
+      const tsTop = viewRange.start + yTop / globalData.pxPerMs;
+      const tsBot = viewRange.start + yBot / globalData.pxPerMs;
+      for (const le of laneEvents) {
+        let s = bisectLeft(le, tsTop);
+        if (s > 0) s -= 1;
+        const e = bisectLeft(le, tsBot) + 1;
+        for (let i = Math.max(0, s); i < Math.min(le.length, e); i++) ids.push(le[i].id);
+      }
+    } else {
+      // independent：各列按虚拟滚动切片
+      const cardH = CARD_H + 2;
+      const overscan = 8;
+      const startIdx = Math.max(0, Math.floor(scrollTop / cardH) - overscan);
+      const count = Math.ceil(viewportH / cardH) + overscan * 2;
+      const endIdx = startIdx + count;
+      for (const le of laneEvents) {
+        for (let i = startIdx; i < Math.min(le.length, endIdx); i++) ids.push(le[i].id);
+      }
+    }
+    return Array.from(new Set(ids));
+  }, [dbMode, mode, visibleRows, laneByTs, laneEvents, viewRange, globalData, scrollTop, viewportH]);
+
+  // dbMode：仅取视口内缺失行文本（一次性区间查询，写入 lineText 缓存）
+  useEffect(() => {
+    if (!dbMode || renderedIds.length === 0) return;
+    const missing = renderedIds.filter((id) => !lineText.has(id));
+    if (missing.length === 0) return;
+    const min = Math.min(...missing);
+    const max = Math.max(...missing);
+    let cancelled = false;
+    (async () => {
+      try {
+        const { fetchContextLines } = await import('../io/dbStore');
+        const rows = await fetchContextLines(min, max);
+        if (cancelled) return;
+        setLineText((prev) => {
+          const next = new Map(prev);
+          for (const r of rows) next.set(r.no, r.text);
+          return next;
+        });
+      } catch (err) {
+        console.warn('[dbMode] 行文本惰性加载失败:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dbMode, renderedIds, lineText]);
 
   if (!viewRange || !fullRange) {
     return (
@@ -766,6 +833,7 @@ export function LogStreamView() {
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
                   chainInfo={chainInfoByFilter.get(f.id)}
+                  lineText={lineText}
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
@@ -802,6 +870,7 @@ export function LogStreamView() {
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
                   chainInfo={chainInfoByFilter.get(f.id)}
+                  lineText={lineText}
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
@@ -823,6 +892,7 @@ export function LogStreamView() {
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
                   chainInfo={chainInfoByFilter.get(f.id)}
+                  lineText={lineText}
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
@@ -860,6 +930,7 @@ interface GlobalLaneProps {
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
   chainInfo?: Map<number, ChainMark>;
+  lineText?: Map<number, string>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
 }
@@ -877,6 +948,7 @@ function GlobalLane({
   hoveredEventId,
   correlatedEventIds,
   chainInfo,
+  lineText,
   onSelect,
   onHover,
 }: GlobalLaneProps) {
@@ -1025,8 +1097,8 @@ function GlobalLane({
                 {ev.level}
               </span>
             )}
-            <span className={styles.eventRaw} title={ev.raw}>
-              {ev.raw}
+            <span className={styles.eventRaw} title={lineText?.get(ev.id) ?? ev.raw}>
+              {lineText?.get(ev.id) ?? ev.raw}
             </span>
           </div>
         );
@@ -1050,6 +1122,7 @@ interface LaneStreamProps {
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
   chainInfo?: Map<number, ChainMark>;
+  lineText?: Map<number, string>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
 }
@@ -1064,6 +1137,7 @@ function LaneStream({
   hoveredEventId,
   correlatedEventIds,
   chainInfo,
+  lineText,
   onSelect,
   onHover,
 }: LaneStreamProps) {
@@ -1133,8 +1207,8 @@ function LaneStream({
                 {ev.level}
               </span>
             )}
-            <span className={styles.eventRaw} title={ev.raw}>
-              {ev.raw}
+            <span className={styles.eventRaw} title={lineText?.get(ev.id) ?? ev.raw}>
+              {lineText?.get(ev.id) ?? ev.raw}
             </span>
           </div>
         );
@@ -1154,6 +1228,7 @@ interface LaneColumnProps {
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
   chainInfo?: Map<number, ChainMark>;
+  lineText?: Map<number, string>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
 }
@@ -1167,6 +1242,7 @@ function LaneColumn({
   hoveredEventId,
   correlatedEventIds,
   chainInfo,
+  lineText,
   onSelect,
   onHover,
 }: LaneColumnProps) {
@@ -1238,8 +1314,8 @@ function LaneColumn({
                         {ev.level}
                       </span>
                     )}
-                            <span className={styles.eventRaw} title={ev.raw}>
-                      {ev.raw}
+                            <span className={styles.eventRaw} title={lineText?.get(ev.id) ?? ev.raw}>
+                      {lineText?.get(ev.id) ?? ev.raw}
                     </span>
                   </div>
                 );

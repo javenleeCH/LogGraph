@@ -1,7 +1,25 @@
 # v2 架构设计：rg 直扫 + SQL 只存 filter 结果
 
-> 状态：**待确认**（本文档是设计稿，确认后实施）
-> 日期：2026-09-30
+> 状态：**已实施**（PR-1/PR-2/PR-3 已完成；PR-4 大数据加速路径已实现并接入 dbMode）
+> 日期：2026-09-30（设计稿）；2026-10-01（实施核对）
+>
+> ## 实施状态核对（2026-10-01）
+> - **PR-1 瘦表改造**：✅ 完成。`db.rs` 已是 `meta/files/line_ts/filter_hits` 瘦表，
+>   `SCHEMA_VERSION="2"`，指纹+schemaVersion 双校验；v1 大表（lines/events/FTS5）全代码库无引用。
+> - **PR-2 rg 引擎**：✅ 完成。`raw_search.rs`（grep-searcher 直扫 + CRLF 配对 + 4 单元测）；
+>   `db_filter` 写 `filter_hits` 后 `JOIN line_ts` 返回 `(line,ts)[]`；前端 `runDbFilter` 接入。
+> - **PR-3 按需取数**：✅ 完成。`db_context_lines / db_line / db_events_in_window / db_event_index_chunk`
+>   全部按行号直读原文件或查 `line_ts`，不存文本；`DetailPanel` 走 `db_context_lines`。
+> - **PR-4 CEP SQL 下推（可选）**：✅ 已完成加速路径。`src-tauri/src/sequence.rs` 新增
+>   `db_run_sequences` 命令：从 `filter_hits JOIN line_ts` 取事件流，在 Rust 侧跑贪心链匹配。
+>   覆盖范围 = **global 作用域 + seq/and/or/not 边**（与前端 `SequenceMatcher` 核心语义一致）。
+>   **超出范围的特性（thread 分桶 / nodeConditions / nodeCounts / opt / periodic）整体回退前端
+>   TS 引擎**（`recomputeSequences` 的 dbMode 分支：Rust 返回 `fallback=true` 即调用
+>   `runSequenceMatching`）。另外 dbMode 下命中事件无 thread/message，thread 分桶本就无意义。
+> - 附带修复（同轮）：`App.tsx`/`LogStreamView.tsx` 在 dbMode 下已支持「表格流/时间线」切换
+>   （LogStreamView 惰性 `fetchContextLines` 取行文本），不再强制时间线。
+> - 一处说明：`db_open` 重建分支 `for suffix in ["","-wal","-shm"]` 中的空串项已删除主
+>   `cache.db` 文件，v1 遗留库会被物理清掉后重建，符合「schema 不符自动删库重建」。
 > 背景：v1（SQL 存全量文本）实测失败——720MB 原始日志建库膨胀到 3GB+、建库数分钟、
 > 扫描路径远慢于 rg（1 秒）。用户裁决：**SQL 存全量是本末倒置**。
 > rg 实测基准：`rg -o "pengtest frame|pengtest vk" <目录>` 720MB 约 1 秒。

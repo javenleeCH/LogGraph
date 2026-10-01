@@ -1,6 +1,7 @@
 mod db;
 mod parser;
 mod raw_search;
+mod sequence;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,7 +23,8 @@ pub fn run() {
             db::db_events_in_window,
             db::db_context_lines,
             db::db_line,
-            db::db_close
+            db::db_close,
+            sequence::db_run_sequences
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
