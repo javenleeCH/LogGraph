@@ -31,9 +31,9 @@
 > 2. message scope 二次校验改按文件单趟（O(总字节)，替代 O(hits×文件大小) 的逐行整文件重读）；
 > 3. files 表新增 `line_offsets` BLOB，`db_line/db_context_lines/视口行文本` 全部 seek 直读片段；
 >    视口契约从 min/max 行号区间改为 **id 集合分批**（`db_lines_by_ids`，500/批 + 20k LRU）；
-> 4. 同步命令全部 `spawn_blocking`（`db_filter_drop/db_context_lines/db_line/db_events_in_window/
->    db_event_index_chunk/db_run_sequences`；此前同步 command 在主线程执行，百万行 DELETE 会卡 UI）；
-> 5. 关联窗口下推 SQL（`db_corr_ids`：line_ts 覆盖索引范围扫 × filter_hits 主键点查，
+> 4. 同步命令全部 `spawn_blocking` + **连接并发化**（全局单连接 Mutex 改为存路径、
+>    每命令独立开连接：WAL 并发读，慢查询不再持锁阻塞行文本/详情命令——实测回归修复）；
+> 5. 关联窗口下推 SQL（`db_corr_ids`：line_ts 覆盖索引范围扫 + filter_hits 主键 EXISTS 点查，
 >    替代 JS 每次视图变化 O(总命中数) 扫 matches）。
 > schemaVersion → **3**（旧库自动重建）；`tsconfig` lib 升 ES2024（Promise.withResolvers）。
 
@@ -230,18 +230,30 @@ Tauri 同步 command（`pub fn`）在主线程执行。`db_filter_drop`（百万
 `db_context_lines`、`db_line`、`db_events_in_window`、`db_event_index_chunk`、
 `db_run_sequences` 全部改 `pub async fn` + `spawn_blocking`。
 
-### 7.5 关联窗口下推 SQL
+### 7.5 连接并发化（实测回归修复）
+spawn_blocking 只解决了主线程卡顿，第一版仍保留**全局单连接 `Mutex<Connection>`**——
+所有命令在锁上串行。实测（百万级命中）：`db_corr_ids` 窗口查询持锁期间，
+`db_lines_by_ids`/`db_context_lines`/`db_line` 全部排队，表现为点击事件后
+详情/原始行长时间无响应（滚动靠已缓存行文本仍可翻）。
+修复：全局只存 **cache.db 路径**，每个命令 `Connection::open` 独立连接
+（`open_cache()`，cache_size 64MB + busy_timeout 5s）。WAL 是库级持久属性，
+新连接自动继承 → **读命令完全并发**；写命令（filter_hits 事务/DELETE）之间靠
+busy_timeout 串行等待，读写互不阻塞（WAL snapshot 隔离）。
+
+### 7.6 关联窗口下推 SQL
 `recomputeCorrelations` 旧版每次视图变化 JS 全量扫 `matches`（O(总命中数)）。
 新命令 `db_corr_ids(filterIds, start, end)`：
 ```sql
-SELECT DISTINCT t.line FROM line_ts t
-CROSS JOIN filter_hits h ON h.line = t.line AND h.filter_id IN (...)
+SELECT t.line FROM line_ts t
 WHERE t.ts BETWEEN ?1 AND ?2
+  AND EXISTS (SELECT 1 FROM filter_hits h
+              WHERE h.filter_id IN (...) AND h.line = t.line)
 ```
-CROSS JOIN 强制 line_ts (ts,line) 覆盖索引范围扫驱动 + filter_hits 主键点查（EXPLAIN 断言
-SEARCH + idx_line_ts_ts）；前端模块级 `corrSeq` 序号丢弃过期响应。
+line_ts (ts,line) 覆盖索引范围扫（窗口行）驱动，每行对 filter_hits 主键做 EXISTS
+点查（命中即短路，免 CROSS JOIN + DISTINCT 的去重开销；EXPLAIN 断言 SEARCH +
+idx_line_ts_ts）；前端模块级 `corrSeq` 序号丢弃过期响应。
 
-### 7.6 schema 与兼容
+### 7.7 schema 与兼容
 - `SCHEMA_VERSION = "3"`：v2 库打开时自动删库重建（files 表结构变了）
 - meta 新增 `totalEvents`（cache-hit 免 COUNT 全索引扫描）
 - `tsconfig.json` lib ES2020 → ES2024（`Promise.withResolvers`；target 仍 ES2020，产物不变）

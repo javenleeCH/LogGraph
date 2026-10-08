@@ -11,7 +11,7 @@
 //! 任何不满足上述条件的 group 触发**整体回退**，由前端 TS 引擎
 //! (`runSequenceMatching`) 处理，保证行为不变。
 
-use crate::db::db_conn;
+use crate::db::open_cache;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -672,10 +672,7 @@ fn match_group(conn: &Connection, spec: &GroupSpec) -> Result<SeqResult, String>
 #[tauri::command]
 pub async fn db_run_sequences(groups: Vec<GroupSpec>) -> Result<RunSeqResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = db_conn().lock().map_err(|e| e.to_string())?;
-        let Some(conn) = guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
+        let conn = open_cache()?;
         let mut results: HashMap<String, SeqResult> = HashMap::new();
         let mut fallback = false;
         for spec in &groups {
@@ -683,7 +680,7 @@ pub async fn db_run_sequences(groups: Vec<GroupSpec>) -> Result<RunSeqResponse, 
                 fallback = true;
                 continue;
             }
-            match match_group(conn, spec) {
+            match match_group(&conn, spec) {
                 Ok(r) => {
                     results.insert(spec.group_id.clone(), r);
                 }

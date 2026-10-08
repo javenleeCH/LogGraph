@@ -15,18 +15,45 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex};
 
-/// 全局连接
-pub(crate) fn db_conn() -> &'static Mutex<Option<Connection>> {
-    static C: OnceLock<Mutex<Option<Connection>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(None))
-}
+/// cache.db 路径（打开目录后设置）。每命令独立开连接：WAL 支持并发读，
+/// 慢查询（如 db_corr_ids 的窗口扫描）不再持全局锁阻塞其它命令——
+/// v3 之前全局单连接 Mutex，corr 查询持锁期间 db_lines_by_ids /
+/// db_context_lines / db_line 全部排队，表现为视口/详情/原始行「没反应」。
+static DB_CACHE_PATH: LazyLock<Mutex<Option<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// 当前打开的目录（rg 扫描根）
+static DB_ROOT: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
+
+pub(crate) fn db_cache_path() -> &'static Mutex<Option<PathBuf>> {
+    &DB_CACHE_PATH
+}
+
 fn db_root() -> &'static Mutex<Option<PathBuf>> {
-    static D: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
-    D.get_or_init(|| Mutex::new(None))
+    &DB_ROOT
+}
+
+/// 打开一个独立 cache.db 连接。
+/// journal_mode=WAL 是库级持久属性（建库时设置），新连接自动继承；
+/// 写命令之间靠 busy_timeout 串行等待，读写互不阻塞（WAL snapshot）。
+pub(crate) fn open_cache() -> Result<Connection, String> {
+    let Some(path) = db_cache_path().lock().map_err(|e| e.to_string())?.clone() else {
+        return Err("cache.db 未打开".into());
+    };
+    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA cache_size=-65536; PRAGMA busy_timeout=5000;")
+        .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+fn cache_root() -> Result<PathBuf, String> {
+    db_root()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| "cache.db 未打开".into())
 }
 
 // ---- DTO ----
@@ -305,8 +332,9 @@ pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult,
                         )
                         .ok()
                         .filter(|s| !s.is_empty());
-                    *db_conn().lock().map_err(|e| e.to_string())? = Some(conn);
+                    *db_cache_path().lock().map_err(|e| e.to_string())? = Some(db_path.clone());
                     *db_root().lock().map_err(|e| e.to_string())? = Some(root);
+                    drop(conn); // 连接不驻留：后续命令各自独立开连接（WAL 并发读）
                     return Ok(DbOpenResult {
                         cache_hit: true,
                         total_lines,
@@ -429,8 +457,9 @@ pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult,
         // WAL checkpoint（一次性批量写，归并清零 wal）
         let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
 
-        *db_conn().lock().map_err(|e| e.to_string())? = Some(conn);
+        *db_cache_path().lock().map_err(|e| e.to_string())? = Some(db_path.clone());
         *db_root().lock().map_err(|e| e.to_string())? = Some(root);
+        drop(conn); // 已 WAL checkpoint；连接不驻留，后续命令独立开连接
 
         Ok(DbOpenResult {
             cache_hit: false,
@@ -624,25 +653,19 @@ fn message_scope_filter(
 pub async fn db_filter(q: FilterQuery) -> Result<Vec<HitEntry>, String> {
     let q = q.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = db_conn().lock().map_err(|e| e.to_string())?;
-        let Some(conn) = guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
-        let root_guard = db_root().lock().map_err(|e| e.to_string())?;
-        let Some(root) = root_guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
+        let conn = open_cache()?;
+        let root = cache_root()?;
 
         // 1) rg 引擎扫描（raw scope 直接用；message scope = 整行扫描的超集 + 二次校验）
         let mut hits = crate::raw_search::search_dir(
-            root,
-            conn,
+            &root,
+            &conn,
             &q.pattern,
             q.is_regex,
             q.case_sensitive,
         )?;
         if q.scope == "message" {
-            hits = message_scope_filter(&hits, conn, root, &q)?;
+            hits = message_scope_filter(&hits, &conn, &root, &q)?;
         }
 
         // 2) 写 filter_hits（事务覆盖）
@@ -694,10 +717,14 @@ pub async fn db_filter(q: FilterQuery) -> Result<Vec<HitEntry>, String> {
 #[tauri::command]
 pub async fn db_filter_drop(filter_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = db_conn().lock().map_err(|e| e.to_string())?;
-        let Some(conn) = guard.as_ref() else {
+        let Some(path) = db_cache_path().lock().map_err(|e| e.to_string())?.clone() else {
             return Ok(()); // 未打开视为无操作
         };
+        // 写命令也要 busy_timeout：与 db_filter 的 filter_hits 写事务并发时
+        // 等待而非立即 SQLITE_BUSY
+        let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA busy_timeout=5000;")
+            .map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM filter_hits WHERE filter_id = ?1",
             params![filter_id],
@@ -729,19 +756,13 @@ fn load_line_offsets(conn: &Connection, fid: i64) -> Result<Vec<u64>, String> {
 #[tauri::command]
 pub async fn db_context_lines(from: u32, to: u32) -> Result<Vec<DbContextRow>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = db_conn().lock().map_err(|e| e.to_string())?;
-        let Some(conn) = guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
-        let root_guard = db_root().lock().map_err(|e| e.to_string())?;
-        let Some(root) = root_guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
+        let conn = open_cache()?;
+        let root = cache_root()?;
         if to < from {
             return Ok(Vec::new());
         }
 
-        let files = files_snapshot(conn)?;
+        let files = files_snapshot(&conn)?;
         // ts 查询：区间行号 → ts（一次查齐）
         let mut ts_stmt = conn
             .prepare("SELECT line, ts FROM line_ts WHERE line BETWEEN ?1 AND ?2")
@@ -764,7 +785,7 @@ pub async fn db_context_lines(from: u32, to: u32) -> Result<Vec<DbContextRow>, S
             if lo > hi {
                 continue;
             }
-            let offsets = match load_line_offsets(conn, *fid) {
+            let offsets = match load_line_offsets(&conn, *fid) {
                 Ok(o) => o,
                 Err(_) => continue,
             };
@@ -797,16 +818,10 @@ pub async fn db_context_lines(from: u32, to: u32) -> Result<Vec<DbContextRow>, S
 #[tauri::command]
 pub async fn db_line(no: u32) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = db_conn().lock().map_err(|e| e.to_string())?;
-        let Some(conn) = guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
-        let root_guard = db_root().lock().map_err(|e| e.to_string())?;
-        let Some(root) = root_guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
-        let (fid, path, local) = locate_line(conn, root, no)?;
-        let offsets = load_line_offsets(conn, fid)?;
+        let conn = open_cache()?;
+        let root = cache_root()?;
+        let (fid, path, local) = locate_line(&conn, &root, no)?;
+        let offsets = load_line_offsets(&conn, fid)?;
         read_line_range(&path, &offsets, local, local)?
             .into_iter()
             .next()
@@ -820,10 +835,7 @@ pub async fn db_line(no: u32) -> Result<String, String> {
 #[tauri::command]
 pub async fn db_events_in_window(start: i64, end: i64) -> Result<Vec<HitEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = db_conn().lock().map_err(|e| e.to_string())?;
-        let Some(conn) = guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
+        let conn = open_cache()?;
         let mut stmt = conn
             .prepare("SELECT line, ts FROM line_ts WHERE ts BETWEEN ?1 AND ?2 ORDER BY ts, line")
             .map_err(|e| e.to_string())?;
@@ -865,10 +877,7 @@ pub async fn db_event_index_chunk(
     max: u32,
 ) -> Result<tauri::ipc::Response, String> {
     let bytes = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let guard = db_conn().lock().map_err(|e| e.to_string())?;
-        let Some(conn) = guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
+        let conn = open_cache()?;
         let sql = if after_ts.is_none() {
             // 首块：无下界
             "SELECT line, ts FROM line_ts ORDER BY ts, line LIMIT ?1"
@@ -922,16 +931,9 @@ pub async fn db_lines_by_ids(ids: Vec<u32>) -> Result<tauri::ipc::Response, Stri
         if ids.is_empty() {
             return Ok(vec![0u8; 8]);
         }
-        let guard = db_conn().lock().map_err(|e| e.to_string())?;
-        let Some(conn) = guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
-        let root_guard = db_root().lock().map_err(|e| e.to_string())?;
-        let Some(root) = root_guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
-
-        let files = files_snapshot(conn)?;
+        let conn = open_cache()?;
+        let root = cache_root()?;
+        let files = files_snapshot(&conn)?;
         let mut sorted = ids;
         sorted.sort_unstable();
         sorted.dedup();
@@ -956,7 +958,7 @@ pub async fn db_lines_by_ids(ids: Vec<u32>) -> Result<tauri::ipc::Response, Stri
             }
             let locals: Vec<u32> = sorted[i..j].iter().map(|&l| l - first_line).collect();
             let segs = merge_line_segments(&locals, 64);
-            let offsets = match load_line_offsets(conn, *fid) {
+            let offsets = match load_line_offsets(&conn, *fid) {
                 Ok(o) => o,
                 Err(_) => {
                     i = j;
@@ -988,10 +990,11 @@ pub async fn db_lines_by_ids(ids: Vec<u32>) -> Result<tauri::ipc::Response, Stri
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-/// 关联窗口下推：filter_ids 任一命中的行中，ts ∈ [start, end] 的去重全局行号。
+/// 关联窗口下推：filter_ids 任一命中的行中，ts ∈ [start, end] 的全局行号。
 /// 替代旧版 JS 全量扫 matches（每次视图变化 O(总命中数)）。
-/// CROSS JOIN 强制 line_ts 驱动：(ts,line) 覆盖索引范围扫（窗口小）+
-/// filter_hits 主键点查；窗口外的大 filter 命中完全不触碰。
+/// line_ts (ts,line) 覆盖索引范围扫（窗口行）驱动，每行对 filter_hits
+/// 主键做 EXISTS 点查（命中即短路，免 CROSS JOIN + DISTINCT 的去重开销）；
+/// 窗口外的大 filter 命中完全不触碰。
 #[tauri::command]
 pub async fn db_corr_ids(
     filter_ids: Vec<String>,
@@ -1002,18 +1005,16 @@ pub async fn db_corr_ids(
         if filter_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let guard = db_conn().lock().map_err(|e| e.to_string())?;
-        let Some(conn) = guard.as_ref() else {
-            return Err("cache.db 未打开".into());
-        };
+        let conn = open_cache()?;
         let placeholders = (3..filter_ids.len() + 3)
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT DISTINCT t.line FROM line_ts t \
-             CROSS JOIN filter_hits h ON h.line = t.line AND h.filter_id IN ({placeholders}) \
-             WHERE t.ts BETWEEN ?1 AND ?2"
+            "SELECT t.line FROM line_ts t \
+             WHERE t.ts BETWEEN ?1 AND ?2 \
+               AND EXISTS (SELECT 1 FROM filter_hits h \
+                           WHERE h.filter_id IN ({placeholders}) AND h.line = t.line)"
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(filter_ids.len() + 2);
@@ -1038,7 +1039,7 @@ pub async fn db_corr_ids(
 /// 关闭（切换目录时）
 #[tauri::command]
 pub fn db_close() -> Result<(), String> {
-    *db_conn().lock().map_err(|e| e.to_string())? = None;
+    *db_cache_path().lock().map_err(|e| e.to_string())? = None;
     *db_root().lock().map_err(|e| e.to_string())? = None;
     Ok(())
 }
@@ -1184,9 +1185,10 @@ mod tests {
             [],
         )
         .unwrap();
-        let sql = "SELECT DISTINCT t.line FROM line_ts t \
-                   CROSS JOIN filter_hits h ON h.line = t.line AND h.filter_id IN (?3) \
-                   WHERE t.ts BETWEEN ?1 AND ?2";
+        let sql = "SELECT t.line FROM line_ts t \
+                   WHERE t.ts BETWEEN ?1 AND ?2 \
+                     AND EXISTS (SELECT 1 FROM filter_hits h \
+                                 WHERE h.filter_id IN (?3) AND h.line = t.line)";
         // 结果正确性：ts∈[150,350] 且 f1 命中 → 仅行 12
         let mut stmt = conn.prepare(sql).unwrap();
         let rows: Vec<u32> = stmt
