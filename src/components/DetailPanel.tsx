@@ -6,10 +6,11 @@ import { getRawLine } from '../utils/rawLine';
 import { levelStyle } from '../constants';
 import { FileText, Copy } from './Icon';
 import { GroupMatchesTab } from './GroupMatchesTab';
-import { fetchContextLines, type DbContextRow } from '../io/dbStore';
+import { ContextStream } from './ContextStream';
+import { fetchDbFiles, type DbFileInfo } from '../io/dbStore';
 import styles from './DetailPanel.module.css';
 
-/** 上下文行数可选档位：堆栈往往很长，固定 4 行不够用，交给用户现场调 */
+/** 上下文行数可选档位（非 dbMode；dbMode 详情为无限上下文流） */
 const CONTEXT_PRESETS = [4, 8, 16, 32, 64];
 const DEFAULT_CONTEXT = 8;
 
@@ -22,9 +23,8 @@ export function DetailPanel() {
   const events = useLogStore((s) => s.events);
   const rawLines = useLogStore((s) => s.rawLines);
   const dbMode = useLogStore((s) => s.dbMode);
-  /** dbMode：选中事件 ±CONTEXT_LINES 的真实行（异步拉取） */
-  const [dbCtx, setDbCtx] = useState<DbContextRow[] | null>(null);
-  const dbCtxSeq = useRef(0);
+  /** dbMode：文件清单（无限上下文流的行号→文件定位 + 右键打开 + 头部来源 tag） */
+  const [dbFiles, setDbFiles] = useState<DbFileInfo[]>([]);
   const matches = useLogStore((s) => s.matches);
   const filters = useLogStore((s) => s.filters);
   const groups = useLogStore((s) => s.groups);
@@ -86,32 +86,33 @@ export function DetailPanel() {
     [selectedEventId, dbMode, dbIndex, events],
   );
 
-  // 选中行时滚动到视图
+  // 选中行时滚动到视图（非 dbMode；dbMode 由 ContextStream 的虚拟滚动定位）
   useEffect(() => {
-    if (selected && selectedRef.current) {
+    if (!dbMode && selected && selectedRef.current) {
       selectedRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
-  }, [selected]);
+  }, [selected, dbMode]);
 
-  // dbMode：选中事件 → 异步拉取 ±CONTEXT_LINES 上下文（带序号防过期覆盖）
+  // dbMode：拉文件清单一次（目录切换 = dbIndex 变化时重拉；ContextStream 定位/右键用）
   useEffect(() => {
-    if (!dbMode || selectedEventId === null) {
-      setDbCtx(null);
+    if (!dbMode) {
+      setDbFiles([]);
       return;
     }
-    const seq = ++dbCtxSeq.current;
-    const from = Math.max(0, selectedEventId - ctxSpan);
-    const to = selectedEventId + ctxSpan;
+    let cancelled = false;
     void (async () => {
       try {
-        const rows = await fetchContextLines(from, to);
-        if (dbCtxSeq.current === seq) setDbCtx(rows);
+        const files = await fetchDbFiles();
+        if (!cancelled) setDbFiles(files);
       } catch (err) {
-        console.warn('[DetailPanel] db 上下文拉取失败:', err);
-        if (dbCtxSeq.current === seq) setDbCtx([]);
+        console.warn('[DetailPanel] 文件清单拉取失败:', err);
+        if (!cancelled) setDbFiles([]);
       }
     })();
-  }, [dbMode, selectedEventId, ctxSpan]);
+    return () => {
+      cancelled = true;
+    };
+  }, [dbMode, dbIndex]);
 
   const owningFilters = useMemo(() => {
     if (!selected) return [];
@@ -255,32 +256,28 @@ export function DetailPanel() {
     );
   }
 
-  // dbMode：上下文来自异步拉取的 dbCtx（行文本真值）；selected 的 thread/level 也从 dbCtx 补
-  const dbSel = dbMode
-    ? dbCtx?.find((r) => r.no === selected.id)
-    : undefined;
+  // 非 dbMode：±ctxSpan 固定窗口（数据全在内存，无懒加载需求）
   const startLine = Math.max(0, selected.id - ctxSpan);
   const endLine = Math.min(rawLines.length - 1, selected.id + ctxSpan);
   const ctxLines: { lineno: number; text: string; lineId: number }[] = [];
-  if (dbMode) {
-    for (const r of dbCtx ?? []) {
-      ctxLines.push({ lineno: r.no + 1, text: r.text, lineId: r.no });
-    }
-    if (!dbCtx) {
-      ctxLines.push({ lineno: selected.id + 1, text: '加载上下文…', lineId: selected.id });
-    }
-  } else {
-    for (let i = startLine; i <= endLine; i++) {
-      ctxLines.push({ lineno: i + 1, text: rawLines[i] ?? '', lineId: i });
-    }
+  for (let i = startLine; i <= endLine; i++) {
+    ctxLines.push({ lineno: i + 1, text: rawLines[i] ?? '', lineId: i });
   }
 
-  // v2（rg+瘦SQL）：dbCtx 无 thread/level/sourceFile（瘦表不存）→ dbMode 下隐藏这些 tag
+  // dbMode：选中行所属文件（头部来源 tag；文件清单按 firstLine 升序 → 线性找最后一个 firstLine ≤ id 的）
+  let selFile: DbFileInfo | undefined;
+  let selSource: string | undefined = dbMode ? undefined : selected.sourceFile;
+  if (dbMode) {
+    for (const f of dbFiles) {
+      if (f.firstLine <= selected.id) selFile = f;
+      else break;
+    }
+    selSource = selFile?.name;
+  }
+  // v2（rg+瘦SQL）：瘦表不存 thread/level → dbMode 下隐藏这些 tag
   const selThread = dbMode ? undefined : selected.thread;
   const selLevel = dbMode ? undefined : selected.level;
-  const selSource = dbMode ? undefined : selected.sourceFile;
   const lvlStyle = levelStyle(selLevel);
-  void dbSel;
 
   return (
     <div className={styles.detail}>
@@ -317,23 +314,25 @@ export function DetailPanel() {
         <span className={styles.ts}>{formatDateTime(selected.ts)}</span>
 
         {/* 高频操作：复制原始行 / 调节上下文行数 */}
-        <span className={styles.ctxCtrl}>
-          <label htmlFor="lg-ctx" title="选中行上下各显示的上下文行数">
-            上下文
-          </label>
-          <select
-            id="lg-ctx"
-            className={styles.ctxSelect}
-            value={ctxSpan}
-            onChange={(e) => setCtxSpan(Number(e.target.value))}
-          >
-            {CONTEXT_PRESETS.map((n) => (
-              <option key={n} value={n}>
-                ±{n}
-              </option>
-            ))}
-          </select>
-        </span>
+        {!dbMode && (
+          <span className={styles.ctxCtrl}>
+            <label htmlFor="lg-ctx" title="选中行上下各显示的上下文行数">
+              上下文
+            </label>
+            <select
+              id="lg-ctx"
+              className={styles.ctxSelect}
+              value={ctxSpan}
+              onChange={(e) => setCtxSpan(Number(e.target.value))}
+            >
+              {CONTEXT_PRESETS.map((n) => (
+                <option key={n} value={n}>
+                  ±{n}
+                </option>
+              ))}
+            </select>
+          </span>
+        )}
         <button
           className={styles.copyBtn}
           onClick={() => void copySelectedLine()}
@@ -344,7 +343,10 @@ export function DetailPanel() {
         </button>
 
         {selSource && (
-          <span className={styles.tag} title={`来源文件：${selSource}`}>
+          <span
+            className={styles.tag}
+            title={selFile ? `来源文件：${selFile.path}` : `来源文件：${selSource}`}
+          >
             <FileText size={11} />
             {selSource}
           </span>
@@ -469,30 +471,34 @@ export function DetailPanel() {
         </div>
       )}
       <div className={styles['detail-body']}>
-        {ctxLines.map((l) => {
-          const isSelected = l.lineId === selected.id;
-          const isCorrelated = correlatedEventIds.has(l.lineId);
-          const cls = [
-            styles['ctx-line'],
-            isSelected ? styles.selected : '',
-            isCorrelated && !isSelected ? styles.correlated : '',
-            !isSelected && !isCorrelated ? styles.context : '',
-          ]
-            .filter(Boolean)
-            .join(' ');
-          return (
-            <div
-              key={l.lineId}
-              ref={isSelected ? selectedRef : undefined}
-              className={cls}
-              onClick={() => selectEvent(l.lineId)}
-              style={{ cursor: 'pointer' }}
-            >
-              <span className={styles.lineno}>{l.lineno}</span>
-              <span className={styles.content}>{l.text}</span>
-            </div>
-          );
-        })}
+        {dbMode ? (
+          <ContextStream files={dbFiles} selectedLine={selected.id} />
+        ) : (
+          ctxLines.map((l) => {
+            const isSelected = l.lineId === selected.id;
+            const isCorrelated = correlatedEventIds.has(l.lineId);
+            const cls = [
+              styles['ctx-line'],
+              isSelected ? styles.selected : '',
+              isCorrelated && !isSelected ? styles.correlated : '',
+              !isSelected && !isCorrelated ? styles.context : '',
+            ]
+              .filter(Boolean)
+              .join(' ');
+            return (
+              <div
+                key={l.lineId}
+                ref={isSelected ? selectedRef : undefined}
+                className={cls}
+                onClick={() => selectEvent(l.lineId)}
+                style={{ cursor: 'pointer' }}
+              >
+                <span className={styles.lineno}>{l.lineno}</span>
+                <span className={styles.content}>{l.text}</span>
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );

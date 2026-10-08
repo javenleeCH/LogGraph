@@ -253,7 +253,27 @@ line_ts (ts,line) 覆盖索引范围扫（窗口行）驱动，每行对 filter_
 点查（命中即短路，免 CROSS JOIN + DISTINCT 的去重开销；EXPLAIN 断言 SEARCH +
 idx_line_ts_ts）；前端模块级 `corrSeq` 序号丢弃过期响应。
 
-### 7.7 schema 与兼容
+### 7.7 详情无限上下文流（v3.1）
+旧版详情 = 选中行 ±ctxSpan 固定区间（`db_context_lines`，已删）。改为
+`ContextStream` 组件：**全局行号连续空间的无限虚拟滚动**，滚出文件边界继续显示
+相邻文件内容。
+- **滚动模型**：百万行 × 22px 总高远超浏览器 scrollTop 上限（Chrome ~33.5M px），
+  原生滚动不可用 → wheel 驱动自管 offset + 自绘滚动条 + 键盘（↑↓/PgUp/PgDn），
+  行号空间任意大精确；
+- **item 空间**：行与文件分隔条统一 22px 高；`files[i]` 分隔条 item = firstLine_i + i，
+  行 L（文件 i）item = L + i + 1（bisect O(log files) 互逆，smoke 验证）；
+- **懒加载**：视口 ±120 行 → 缺失行号 `db_lines_by_ids` 批 500 拉取（复用合段 seek），
+  行文本 Map LRU 上限 4000（约 800KB，超限驱逐最旧、保留本批）；
+- **文件名**：文件边界分隔条（名称 + 起始行号，title 绝对路径）+ 头部来源 tag（tooltip
+  绝对路径）。新增 `db_files` 命令（firstLine/name/绝对路径，firstLine 升序）；
+- **右键**（行与分隔条）：在文件管理器中定位（Win `explorer /select,`）、外部应用打开
+  （Win `cmd /C start`；mac `open [-R]`；Linux `xdg-open`）——`std::process::Command`
+  零新依赖（未引入 tauri-plugin-opener，避免该环境拉取新 crate），参数传递无 shell 注入面；
+  失败走 toast。
+- 非 dbMode 保持 ±ctxSpan 固定窗口（数据全在内存）；`db_context_lines`/`DbContextRow`
+  及前端 `fetchContextLines` 已删（无消费者）。
+
+### 7.8 schema 与兼容
 - `SCHEMA_VERSION = "3"`：v2 库打开时自动删库重建（files 表结构变了）
 - meta 新增 `totalEvents`（cache-hit 免 COUNT 全索引扫描）
 - `tsconfig.json` lib ES2020 → ES2024（`Promise.withResolvers`；target 仍 ES2020，产物不变）

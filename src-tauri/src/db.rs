@@ -77,15 +77,6 @@ pub struct HitEntry {
     pub ts: i64,
 }
 
-/// 上下文行（mmap 直读原文件 + line_ts 查 ts）
-#[derive(Serialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct DbContextRow {
-    pub no: u32,
-    pub text: String,
-    pub ts: Option<i64>,
-}
-
 // ---- 工具 ----
 
 fn is_log_file_name(name: &str) -> bool {
@@ -750,69 +741,6 @@ fn load_line_offsets(conn: &Connection, fid: i64) -> Result<Vec<u64>, String> {
 
 // ---- 按需取数（行偏移 seek 直读原文件）----
 
-/// 上下文行：全局行号 [from, to] 闭区间（DetailPanel 选中事件 ±N 行用）。
-/// 按文件求交集后用行偏移 seek 只读相交片段（不整文件重读）；
-/// ts 一次查齐。返回按行号升序。
-#[tauri::command]
-pub async fn db_context_lines(from: u32, to: u32) -> Result<Vec<DbContextRow>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_cache()?;
-        let root = cache_root()?;
-        if to < from {
-            return Ok(Vec::new());
-        }
-
-        let files = files_snapshot(&conn)?;
-        // ts 查询：区间行号 → ts（一次查齐）
-        let mut ts_stmt = conn
-            .prepare("SELECT line, ts FROM line_ts WHERE line BETWEEN ?1 AND ?2")
-            .map_err(|e| e.to_string())?;
-        let ts_map: std::collections::HashMap<u32, i64> = ts_stmt
-            .query_map(params![from as i64, to as i64], |r| {
-                Ok((r.get::<_, u32>(0)?, r.get::<_, i64>(1)?))
-            })
-            .map_err(|e| e.to_string())?
-            .flatten()
-            .collect();
-
-        let mut out: Vec<DbContextRow> = Vec::new();
-        // files 按 first_line 升序 → 下一文件 first_line 即本文件行上界
-        //（免旧版 O(files²) 的循环内嵌套全表过滤）
-        for (idx, (fid, name, first_line)) in files.iter().enumerate() {
-            let next_first = files.get(idx + 1).map(|f| f.2).unwrap_or(u32::MAX);
-            let lo = from.max(*first_line);
-            let hi = to.min(next_first.saturating_sub(1));
-            if lo > hi {
-                continue;
-            }
-            let offsets = match load_line_offsets(&conn, *fid) {
-                Ok(o) => o,
-                Err(_) => continue,
-            };
-            let texts = match read_line_range(
-                &root.join(name),
-                &offsets,
-                lo - first_line,
-                hi - first_line,
-            ) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            for (k, text) in texts.into_iter().enumerate() {
-                let global = lo + k as u32;
-                out.push(DbContextRow {
-                    no: global,
-                    text,
-                    ts: ts_map.get(&global).copied(),
-                });
-            }
-        }
-        out.sort_by_key(|r| r.no);
-        Ok(out)
-    })
-    .await
-    .map_err(|e| format!("db_context_lines 任务失败: {e}"))?
-}
 
 /// 单行文本（tooltip/复制用）：行偏移 seek 直读，不整文件重读
 #[tauri::command]
@@ -1042,6 +970,77 @@ pub fn db_close() -> Result<(), String> {
     *db_cache_path().lock().map_err(|e| e.to_string())? = None;
     *db_root().lock().map_err(|e| e.to_string())? = None;
     Ok(())
+}
+
+/// 文件清单（DetailPanel 无限上下文用：行号 → 所属文件定位 + 右键打开）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbFileInfo {
+    /// 该文件首行的全局行号
+    pub first_line: u32,
+    /// 相对路径（显示用）
+    pub name: String,
+    /// 绝对路径（reveal / 外部打开用）
+    pub path: String,
+}
+
+/// 文件清单（first_line 升序）。无限上下文滚动需要知道每个文件的行号区间与绝对路径。
+#[tauri::command]
+pub async fn db_files() -> Result<Vec<DbFileInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_cache()?;
+        let root = cache_root()?;
+        Ok(files_snapshot(&conn)?
+            .into_iter()
+            .map(|(_fid, name, first_line)| DbFileInfo {
+                first_line,
+                path: root.join(&name).to_string_lossy().into_owned(),
+                name,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("db_files 任务失败: {e}"))?
+}
+
+/// 在系统文件管理器中定位该文件（Windows 选中显示；macOS -R；Linux 打开父目录）。
+/// `Command` 不经 shell 拼接，路径无注入面。
+#[tauri::command]
+pub fn db_reveal_path(path: String) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("路径为空".into());
+    }
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("explorer")
+        .arg(format!("/select,{path}"))
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").args(["-R", &path]).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open")
+        .arg(std::path::Path::new(&path)
+            .parent()
+            .ok_or("无父目录")?)
+        .spawn();
+    r.map(|_| ()).map_err(|e| format!("打开目录失败: {e}"))
+}
+
+/// 用系统默认应用打开该文件。
+#[tauri::command]
+pub fn db_open_path(path: String) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("路径为空".into());
+    }
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("cmd")
+        // start 的 "" 是标题占位；cmd /C 按整串拼接执行，路径必须自带引号
+        .args(["/C", &format!("start \"\" \"{path}\"")])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(&path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(&path).spawn();
+    r.map(|_| ()).map_err(|e| format!("打开文件失败: {e}"))
 }
 
 #[cfg(test)]

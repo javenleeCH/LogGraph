@@ -26,10 +26,14 @@ export interface DbHitEntry {
   ts: number;
 }
 
-export interface DbContextRow {
-  no: number;
-  text: string;
-  ts: number | null;
+/** 文件清单条目（db_files：firstLine 升序） */
+export interface DbFileInfo {
+  /** 该文件首行的全局行号 */
+  firstLine: number;
+  /** 相对路径（显示用） */
+  name: string;
+  /** 绝对路径（reveal / 外部打开用） */
+  path: string;
 }
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -202,13 +206,20 @@ export async function fetchEventsInWindow(
   return Array.isArray(r) ? r : [];
 }
 
-/** 上下文行（全局行号闭区间，按行号升序；DetailPanel 用） */
-export async function fetchContextLines(
-  from: number,
-  to: number,
-): Promise<DbContextRow[]> {
-  const r = await invoke<DbContextRow[]>('db_context_lines', { from, to });
+/** 文件清单（firstLine 升序；详情无限上下文的行号→文件定位 + 右键打开用） */
+export async function fetchDbFiles(): Promise<DbFileInfo[]> {
+  const r = await invoke<DbFileInfo[]>('db_files');
   return Array.isArray(r) ? r : [];
+}
+
+/** 在系统文件管理器中定位该文件（Windows 选中显示）。失败 toast 由调用方处理。 */
+export function revealInDir(path: string): Promise<void> {
+  return invoke('db_reveal_path', { path });
+}
+
+/** 用系统默认应用打开该文件。失败 toast 由调用方处理。 */
+export function openFileExternally(path: string): Promise<void> {
+  return invoke('db_open_path', { path });
 }
 
 /** 单行文本 */
