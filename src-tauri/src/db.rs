@@ -878,9 +878,13 @@ pub async fn db_event_index_chunk(
             "SELECT line, ts FROM line_ts WHERE (ts, line) > (?1, ?2) ORDER BY ts, line LIMIT ?3"
         };
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-        let bind: Vec<&dyn rusqlite::ToSql> = match after_ts {
-            None => vec![&(max as i64)],
-            Some(ts) => vec![&ts, &(after_line as i64), &(max as i64)],
+        // 绑定值先落地为局部变量：`&(expr)` 临时值会在语句结束被释放，
+        // Vec<&dyn ToSql> 悬垂（borrow checker 报 temporary value freed）
+        let max_v = max as i64;
+        let line_v = after_line as i64;
+        let bind: Vec<&dyn rusqlite::ToSql> = match &after_ts {
+            None => vec![&max_v],
+            Some(ts) => vec![ts, &line_v, &max_v],
         };
         let rows = stmt
             .query_map(bind.as_slice(), |r| {
