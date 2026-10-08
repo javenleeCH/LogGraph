@@ -22,10 +22,43 @@ import {
   ensureReadPermission,
   isFSASupported as isFSASupportedDir,
 } from '../io/dirLoader';
-import { dbClose, runDbFilter, runDbSequences, type DbRunSeqGroup } from '../io/dbStore';
+import {
+  dbClose,
+  runDbFilter,
+  runDbSequences,
+  fetchCorrIds,
+  type DbEventIndex,
+  type DbRunSeqGroup,
+} from '../io/dbStore';
 
-// 延迟重算关联，避免拖拽/缩放时每帧都重算导致抖动
 let corrRaf = 0;
+let corrSeq = 0; // dbMode 关联下推的响应序号（过期丢弃）
+
+// ---- dbMode SoA 索引（v3）----
+
+/** 行号 → 事件下标直查表；posByLine[line] = 事件在 lines/ts 中的下标 */
+export interface DbIndex extends DbEventIndex {
+  /** 大小 = maxLine+1；0xFFFFFFFF = 该行无事件 */
+  posByLine: Uint32Array;
+}
+
+const NO_EVENT = 0xffffffff;
+
+/** dbMode 下按行号查事件 ts（O(1)，替代 events.find O(N)）；无事件行返回 null */
+export function dbTsByLine(state: { dbIndex: DbIndex | null }, line: number): number | null {
+  const idx = state.dbIndex;
+  if (!idx || line < 0 || line >= idx.posByLine.length) return null;
+  const p = idx.posByLine[line];
+  return p === NO_EVENT ? null : idx.ts[p];
+}
+
+/** 事件总数（dbMode 走 SoA 索引 count——事件不物化后 events.length 恒为 0） */
+export const selectEventCount = (s: {
+  dbMode: boolean;
+  dbIndex: DbIndex | null;
+  events: LogEvent[];
+}): number => (s.dbMode ? s.dbIndex?.count ?? 0 : s.events.length);
+
 function scheduleCorrRecompute(run: () => void) {
   if (corrRaf) cancelAnimationFrame(corrRaf);
   corrRaf = requestAnimationFrame(() => {
@@ -110,8 +143,8 @@ interface LogState {
   // --- SQLite 数据驻留模式（dbMode）---
   /** true=数据驻留 cache.db（rawLines 空、raw/message 惰性）；过滤走 Rust 下推 */
   dbMode: boolean;
-  /** dbMode：行号 → 索引条目（id/ts），过滤命中组装用 */
-  dbLineIndex: Map<number, { line: number; ts: number }> | null;
+  /** dbMode：SoA 事件索引（事件不物化成对象，行号 O(1) 查 ts） */
+  dbIndex: DbIndex | null;
 
   // --- 过滤器 ---
   filters: Filter[];
@@ -200,11 +233,8 @@ interface LogState {
 
   // --- actions ---
   setLog: (events: LogEvent[], rawLines: string[], meta: LogMeta) => void;
-  /** dbMode 装载：事件索引（骨架）+ 元数据；raw/message 惰性（db 按需取） */
-  setLogDb: (
-    eventIndex: { line: number; ts: number }[],
-    meta: LogMeta,
-  ) => void;
+  /** dbMode 装载：SoA 事件索引 + 元数据；事件不物化，行文本惰性按需取 */
+  setLogDb: (index: DbEventIndex, meta: LogMeta) => void;
   /** 离开 dbMode（切回普通模式/关闭目录） */
   exitDbMode: () => void;
   addFilter: (partial?: Partial<Filter>) => string;
@@ -267,7 +297,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   rawLines: [],
   meta: null,
   dbMode: false,
-  dbLineIndex: null,
+  dbIndex: null,
 
   filters: [],
   matches: [],
@@ -403,32 +433,31 @@ export const useLogStore = create<LogState>((set, get) => ({
     get().recomputeMatches();
   },
 
-  setLogDb: (eventIndex, meta) => {
-    if (eventIndex.length === 0) {
+  setLogDb: (index, meta) => {
+    if (index.count === 0) {
       get().exitDbMode();
       set({ meta });
       return;
     }
-    // 骨架事件：id=行号，ts 就位，raw/message 惰性（详情按需拉取）
-    const events: LogEvent[] = eventIndex.map((e) => ({
-      id: e.line,
-      ts: e.ts,
-      raw: '',
-      message: '',
-    }));
-    // 行号 → 索引（过滤命中组装用）
-    const dbLineIndex = new Map<number, { line: number; ts: number }>();
-    for (const e of eventIndex) dbLineIndex.set(e.line, e);
+    // v3：不物化事件对象（旧版 500 万骨架 LogEvent 是主要 JS 开销）——
+    // 索引即 SoA 数组，行号经 posByLine O(1) 查 ts
+    let maxLine = 0;
+    for (let i = 0; i < index.count; i++) {
+      if (index.lines[i] > maxLine) maxLine = index.lines[i];
+    }
+    const posByLine = new Uint32Array(maxLine + 1).fill(NO_EVENT);
+    for (let i = 0; i < index.count; i++) posByLine[index.lines[i]] = i;
+    const dbIndex: DbIndex = { ...index, posByLine };
     const fullRange = {
-      start: events[0].ts,
-      end: events[events.length - 1].ts,
+      start: index.ts[0],
+      end: index.ts[index.count - 1],
     };
     set({
-      events,
-      rawLines: [], // dbMode：不驻留行文本
+      events: [], // dbMode：事件不物化，视口/详情按需拉
+      rawLines: [],
       meta,
       dbMode: true,
-      dbLineIndex,
+      dbIndex,
       fullRange,
       viewRange: { ...fullRange },
       matches: [],
@@ -447,7 +476,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       rawLines: [],
       meta: null,
       dbMode: false,
-      dbLineIndex: null,
+      dbIndex: null,
       fullRange: null,
       viewRange: null,
       matches: [],
@@ -491,7 +520,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   recomputeFilterMatch: (id) => {
     const { events, filters, matches, dbMode } = get();
     const filter = filters.find((f) => f.id === id);
-    if (!filter || events.length === 0) {
+    if (!filter || (dbMode ? (get().dbIndex?.count ?? 0) === 0 : events.length === 0)) {
       get().recomputeMatches();
       return;
     }
@@ -831,7 +860,7 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   recomputeMatches: () => {
     const { events, filters, dbMode } = get();
-    if (events.length === 0 || filters.length === 0) {
+    if ((dbMode ? (get().dbIndex?.count ?? 0) : events.length) === 0 || filters.length === 0) {
       set({ matches: [], correlatedEventIds: new Set(), sequenceResults: {} });
       return;
     }
@@ -980,26 +1009,25 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   selectEvent: (id) => {
     set({ selectedEventId: id });
-    const { events } = get();
     if (id !== null) {
-      const ev = events.find((e) => e.id === id);
-      if (ev) {
-        set({ scrubberTs: ev.ts });
-      }
+      const s = get();
+      const ts = s.dbMode ? dbTsByLine(s, id) : (s.events.find((e) => e.id === id)?.ts ?? null);
+      if (ts !== null) set({ scrubberTs: ts });
     }
     get().recomputeCorrelations();
   },
 
   focusEvent: (id) => {
     get().selectEvent(id);
-    const { events, viewRange, fullRange } = get();
-    const ev = events.find((e) => e.id === id);
-    if (!ev || !viewRange || !fullRange) return;
+    const s = get();
+    const { viewRange, fullRange } = s;
+    const evTs = s.dbMode ? dbTsByLine(s, id) : (s.events.find((e) => e.id === id)?.ts ?? null);
+    if (evTs === null || !viewRange || !fullRange) return;
     // 已在可视范围内则不平移
-    if (ev.ts >= viewRange.start && ev.ts <= viewRange.end) return;
+    if (evTs >= viewRange.start && evTs <= viewRange.end) return;
     // 平移视图使事件居中（宽度保持不变）
     const span = viewRange.end - viewRange.start || 1;
-    let start = ev.ts - span / 2;
+    let start = evTs - span / 2;
     let end = start + span;
     if (start < fullRange.start) {
       start = fullRange.start;
@@ -1024,25 +1052,21 @@ export const useLogStore = create<LogState>((set, get) => ({
   },
 
   recomputeCorrelations: () => {
-    const {
-      matches,
-      selectedEventId,
-      events,
-      viewRange,
-      correlationHalfWindow,
-      scrubberTs,
-    } = get();
+    const s = get();
+    const { matches, selectedEventId, events, viewRange, correlationHalfWindow, scrubberTs } = s;
 
     // 选中事件驱动关联；若无选中则用游标
     let centerTs: number | null = null;
     if (selectedEventId !== null) {
-      const ev = events.find((e) => e.id === selectedEventId);
-      if (ev) centerTs = ev.ts;
+      centerTs = s.dbMode
+        ? dbTsByLine(s, selectedEventId)
+        : (events.find((e) => e.id === selectedEventId)?.ts ?? null);
     } else if (scrubberTs !== null) {
       centerTs = scrubberTs;
     }
 
-    if (centerTs === null || matches.length === 0) {
+    const filterIds = matches.filter((m) => m.events.length > 0).map((m) => m.filterId);
+    if (centerTs === null || filterIds.length === 0) {
       if (get().correlatedEventIds.size > 0) {
         set({ correlatedEventIds: new Set() });
       }
@@ -1053,6 +1077,22 @@ export const useLogStore = create<LogState>((set, get) => ({
     const half =
       correlationHalfWindow ??
       (viewRange ? (viewRange.end - viewRange.start) * 0.02 : 1000);
+
+    if (s.dbMode) {
+      // v3：关联窗口下推 SQL（line_ts 覆盖索引范围扫 × filter_hits 点查），
+      // 替代 JS 全量扫 matches（每次视图变化 O(总命中数)）
+      const seq = ++corrSeq; // 视图快速变化时丢弃过期响应
+      void fetchCorrIds(filterIds, centerTs - half, centerTs + half)
+        .then((ids) => {
+          if (seq !== corrSeq) return;
+          set({ correlatedEventIds: new Set(ids) });
+        })
+        .catch(() => {
+          if (seq !== corrSeq) return;
+          set({ correlatedEventIds: new Set() });
+        });
+      return;
+    }
 
     const ids = new Set<number>();
     const lo = centerTs - half;

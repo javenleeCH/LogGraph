@@ -13,6 +13,7 @@ import {
 } from '../io/dirLoader';
 import { ChevronDown, ChevronRight, Folder, FileText } from './Icon';
 import { toast } from '../store/uiStore';
+import * as dbStore from '../io/dbStore';
 import styles from './FileTreePanel.module.css';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -150,7 +151,7 @@ export function FileTreePanel() {
       const allSelected = names.length === files.length;
       if (isTauriDir && allSelected) {
         const dir = String((logsDirHandle as { path?: string }).path ?? '');
-        const { dbOpen, fetchEventIndex } = await import('../io/dbStore');
+        const { dbOpen, fetchEventIndex } = dbStore;
         const opened = await dbOpen(dir, (loaded, total, cur) => {
           if (mountedRef.current) {
             setProgress(`建库 ${loaded}/${total} ${cur}`);

@@ -5,7 +5,7 @@
  * 新用户拿到的是一张白板：不知道能拖什么、也不知道下一步该点哪儿。
  * 这里把「入口」直接摆出来——三个主操作 + 格式说明 + 快捷键线索。
  */
-import { useLogStore } from '../store/logStore';
+import { useLogStore, selectEventCount } from '../store/logStore';
 import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
 import { FileText, Folder, Plus, Search } from './Icon';
 import styles from './EmptyState.module.css';
@@ -84,7 +84,7 @@ export function WelcomeState() {
 export function NoFilterState() {
   const addFilter = useLogStore((s) => s.addFilter);
   const setEditingFilterId = useLogStore((s) => s.setEditingFilterId);
-  const total = useLogStore((s) => s.events.length);
+  const total = useLogStore(selectEventCount);
 
   const quick = (label: string, pattern: string, color: string) => {
     const id = addFilter({ label, pattern, isRegex: true, color });

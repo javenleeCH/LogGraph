@@ -667,30 +667,35 @@ fn match_group(conn: &Connection, spec: &GroupSpec) -> Result<SeqResult, String>
     })
 }
 
-/// 入口命令：对每个 group 跑 SQL 加速匹配；任一不支持 → fallback=true（前端整体回退 TS）
+/// 入口命令：对每个 group 跑 SQL 加速匹配；任一不支持 → fallback=true（前端整体回退 TS）。
+/// CEP 匹配可达百万级事件 → 阻塞线程池执行，不占主线程。
 #[tauri::command]
-pub fn db_run_sequences(groups: Vec<GroupSpec>) -> Result<RunSeqResponse, String> {
-    let guard = db_conn().lock().map_err(|e| e.to_string())?;
-    let Some(conn) = guard.as_ref() else {
-        return Err("cache.db 未打开".into());
-    };
-    let mut results: HashMap<String, SeqResult> = HashMap::new();
-    let mut fallback = false;
-    for spec in &groups {
-        if !is_supported(spec) {
-            fallback = true;
-            continue;
-        }
-        match match_group(conn, spec) {
-            Ok(r) => {
-                results.insert(spec.group_id.clone(), r);
-            }
-            Err(_) => {
+pub async fn db_run_sequences(groups: Vec<GroupSpec>) -> Result<RunSeqResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = db_conn().lock().map_err(|e| e.to_string())?;
+        let Some(conn) = guard.as_ref() else {
+            return Err("cache.db 未打开".into());
+        };
+        let mut results: HashMap<String, SeqResult> = HashMap::new();
+        let mut fallback = false;
+        for spec in &groups {
+            if !is_supported(spec) {
                 fallback = true;
+                continue;
+            }
+            match match_group(conn, spec) {
+                Ok(r) => {
+                    results.insert(spec.group_id.clone(), r);
+                }
+                Err(_) => {
+                    fallback = true;
+                }
             }
         }
-    }
-    Ok(RunSeqResponse { fallback, results })
+        Ok(RunSeqResponse { fallback, results })
+    })
+    .await
+    .map_err(|e| format!("db_run_sequences 任务失败: {e}"))?
 }
 
 #[cfg(test)]

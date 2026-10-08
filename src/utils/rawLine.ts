@@ -1,5 +1,6 @@
 import { useLogStore } from '../store/logStore';
 import { isTauri } from '../lib/tauri';
+import { fetchLine } from '../io/dbStore';
 
 /**
  * 取得某一行的原始文本。
@@ -16,7 +17,6 @@ export async function getRawLine(no: number): Promise<string> {
 
   if (st.dbMode && isTauri()) {
     try {
-      const { fetchLine } = await import('../io/dbStore');
       const text = await fetchLine(no);
       return typeof text === 'string' ? text : '';
     } catch (err) {

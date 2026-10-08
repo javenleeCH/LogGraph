@@ -21,8 +21,9 @@ pub fn run() {
             db::db_filter,
             db::db_filter_drop,
             db::db_events_in_window,
+            db::db_lines_by_ids,
+            db::db_corr_ids,
             db::db_context_lines,
-            db::db_line,
             db::db_close,
             sequence::db_run_sequences
         ])

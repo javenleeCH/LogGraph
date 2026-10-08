@@ -7,6 +7,7 @@ import { ChevronLeft, ChevronRight, AlignCenter, Columns, Globe } from './Icon';
 import { WelcomeState, NoFilterState } from './EmptyState';
 import type { LogEvent, Filter } from '../types';
 import styles from './LogStreamView.module.css';
+import { fetchLinesByIds } from '../io/dbStore';
 
 const CARD_H = 20; // 单个事件卡片高度
 const ROW_PAD = 4; // 行内上下留白
@@ -16,6 +17,8 @@ const GLOBAL_TICK_H = 80; // 全局模式：每个刻度最小高度
 const GLOBAL_CASCADE = 16; // 全局模式：同时间事件级联偏移（略小于卡片高，形成层叠）
 const DENSITY_BUCKET_H = 3; // 全局模式密度桶高度（px）
 const DENSITY_CARD_THRESHOLD = 3; // 桶内事件数超过此值则只显示密度、不显示卡片
+const LINE_TEXT_BATCH = 500; // dbMode 行文本分批拉取批量
+const LINE_TEXT_LRU_MAX = 20_000; // dbMode 行文本缓存上限（防长滚动内存膨胀）
 
 /** hex 颜色 -> [r, g, b] */
 function hexToRgb(hex: string): [number, number, number] {
@@ -590,26 +593,37 @@ export function LogStreamView() {
     return Array.from(new Set(ids));
   }, [dbMode, mode, visibleRows, laneByTs, laneEvents, viewRange, globalData, scrollTop, viewportH]);
 
-  // dbMode：仅取视口内缺失行文本（一次性区间查询，写入 lineText 缓存）
+  // dbMode：按视口事件 id 分批取行文本（v3 id 契约，替代旧 min/max 区间——
+  // 多文件时间交叠时区间会横跨数百万行）+ LRU 上限防长时间滚动内存膨胀
   useEffect(() => {
     if (!dbMode || renderedIds.length === 0) return;
     const missing = renderedIds.filter((id) => !lineText.has(id));
     if (missing.length === 0) return;
-    const min = Math.min(...missing);
-    const max = Math.max(...missing);
     let cancelled = false;
     (async () => {
-      try {
-        const { fetchContextLines } = await import('../io/dbStore');
-        const rows = await fetchContextLines(min, max);
-        if (cancelled) return;
-        setLineText((prev) => {
-          const next = new Map(prev);
-          for (const r of rows) next.set(r.no, r.text);
-          return next;
-        });
-      } catch (err) {
-        console.warn('[dbMode] 行文本惰性加载失败:', err);
+      for (let i = 0; i < missing.length && !cancelled; i += LINE_TEXT_BATCH) {
+        try {
+          const got = await fetchLinesByIds(missing.slice(i, i + LINE_TEXT_BATCH));
+          if (cancelled) return;
+          setLineText((prev) => {
+            const next = new Map(prev);
+            for (const [k, v] of got) next.set(k, v);
+            // LRU：Map 插入序即新旧序，超限删最旧
+            if (next.size > LINE_TEXT_LRU_MAX) {
+              let over = next.size - LINE_TEXT_LRU_MAX;
+              for (const k of next.keys()) {
+                if (over <= 0) break;
+                if (got.has(k)) continue; // 本批刚取回的不驱逐
+                next.delete(k);
+                over--;
+              }
+            }
+            return next;
+          });
+        } catch (err) {
+          console.warn('[dbMode] 行文本惰性加载失败:', err);
+          return;
+        }
       }
     })();
     return () => {

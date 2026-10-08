@@ -6,7 +6,7 @@ import { DetailPanel } from './components/DetailPanel';
 import { SidePanel } from './components/SidePanel';
 import { FilterChips } from './components/FilterChips';
 import { GroupEditorPage, FilterDetailModal } from './components/NodeCanvasView';
-import { useLogStore } from './store/logStore';
+import { useLogStore, selectEventCount } from './store/logStore';
 import {
   loadFromDataTransfer,
   loadTauriPaths,
@@ -44,7 +44,7 @@ export default function App() {
   const filters = useLogStore((s) => s.filters);
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const workspaceDirName = useLogStore((s) => s.workspaceDirName);
-  const events = useLogStore((s) => s.events);
+  const eventCount = useLogStore(selectEventCount);
   const fullRange = useLogStore((s) => s.fullRange);
 
   // 左侧文件树 / 主区域 可拖拽分隔：treeRatio = 文件树占比 [0, 0.4]
@@ -117,10 +117,10 @@ export default function App() {
     if (workspaceDirName) wsDirNameRef.current = workspaceDirName;
   }, [workspaceDirName]);
   useEffect(() => {
-    if (wsDirNameRef.current && events.length > 0) {
+    if (wsDirNameRef.current && eventCount > 0) {
       useLogStore.getState().saveFiltersNow();
     }
-  }, [events.length]);
+  }, [eventCount]);
 
   // 上方视图 / 详情面板 上下分隔拖拽（两种模式均纵向堆叠）
   useEffect(() => {
@@ -305,7 +305,7 @@ export default function App() {
   // 侧栏（文件树 / 分组 / 过滤器）可见条件：
   // 原先仅绑了日志目录才渲染，导致「只打开单个日志文件」时用户完全没有入口
   // 去新建过滤器——而过滤器正是本应用的核心能力。这里补上「已载入日志」的条件。
-  const hasContent = !!logsDirHandle || events.length > 0;
+  const hasContent = !!logsDirHandle || eventCount > 0;
 
   return (
     <div

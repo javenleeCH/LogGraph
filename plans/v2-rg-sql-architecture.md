@@ -23,6 +23,19 @@
 > 背景：v1（SQL 存全量文本）实测失败——720MB 原始日志建库膨胀到 3GB+、建库数分钟、
 > 扫描路径远慢于 rg（1 秒）。用户裁决：**SQL 存全量是本末倒置**。
 > rg 实测基准：`rg -o "pengtest frame|pengtest vk" <目录>` 720MB 约 1 秒。
+> ## v3 性能改造（2026-10-08，本轮）
+> 前端三份 JS 物化（500 万骨架 LogEvent + dbLineIndex Map + 视口行文本整区间）与
+> 同步命令阻塞 UI 是 dbMode 剩余瓶颈，本轮五项修复（详见 §7）：
+> 1. 索引改二进制 SoA IPC（`db_event_index_chunk` 返回 `ipc::Response`，前端 typed array 直读），
+>    事件不再物化成对象（`events: []`），行号 → ts 走 `posByLine` O(1) 直查；
+> 2. message scope 二次校验改按文件单趟（O(总字节)，替代 O(hits×文件大小) 的逐行整文件重读）；
+> 3. files 表新增 `line_offsets` BLOB，`db_line/db_context_lines/视口行文本` 全部 seek 直读片段；
+>    视口契约从 min/max 行号区间改为 **id 集合分批**（`db_lines_by_ids`，500/批 + 20k LRU）；
+> 4. 同步命令全部 `spawn_blocking`（`db_filter_drop/db_context_lines/db_line/db_events_in_window/
+>    db_event_index_chunk/db_run_sequences`；此前同步 command 在主线程执行，百万行 DELETE 会卡 UI）；
+> 5. 关联窗口下推 SQL（`db_corr_ids`：line_ts 覆盖索引范围扫 × filter_hits 主键点查，
+>    替代 JS 每次视图变化 O(总命中数) 扫 matches）。
+> schemaVersion → **3**（旧库自动重建）；`tsconfig` lib 升 ES2024（Promise.withResolvers）。
 
 ## 1. 核心思想
 
@@ -180,3 +193,60 @@ ORDER BY a.ts, b.ts;
 | filter（不敏感子串） | 数秒~数十秒（慢路径） | **~1 秒（rg 同速）** |
 | filter（敏感 ≥3 字符） | FTS 毫秒级 | ~1 秒（rg；如需毫秒可保留 FTS 作为可选加速层） |
 | 内存驻留 | 前端 60MB 骨架 + Rust 3GB | 前端 60MB 骨架 + Rust ~100MB |
+
+## 7. v3 性能改造（2026-10-08）
+
+v2 落地后 dbMode 的剩余瓶颈（性能分析核实）：索引搬运/物化/逐行回读，而非扫描本身。
+
+### 7.1 索引 SoA + 二进制 IPC
+- `db_event_index_chunk` 返回 `tauri::ipc::Response`（原始字节），布局
+  `[count u32][pad u32][ts × f64 LE][line × u32 LE]`——ts 落 offset 8（Float64Array 对齐），
+  epoch ms < 2^53 用 f64 无损编码；前端 `fetchEventIndex` typed array 直读，零对象解析
+- 前端不再物化 500 万骨架 `LogEvent`（旧版 `events.map(...)` + `dbLineIndex` Map + 视口行文本
+  三份拷贝）：`dbMode` 下 `events: []`，`dbIndex = { count, lines, ts, posByLine }`
+  （`posByLine[line]` = 事件下标，0xFFFFFFFF = 无事件行），`dbTsByLine` O(1) 查 ts
+  （替代 `events.find` O(N)，用于 selectEvent/focusEvent/recomputeCorrelations/TimelineCanvas）
+- 事件总数显示统一走 `selectEventCount` selector（dbMode = `dbIndex.count`）
+
+### 7.2 message scope 单趟校验
+旧版对每个候选命中行 `read_file_lossy` 整文件重读 + 每 hit 编译一次正则
+（O(hits × 文件大小)）。新版 `message_scope_filter`：候选行号排序去重后按文件分组
+（files 与候选均按 first_line 升序 → 双指针），每文件单趟行游标单调推进，
+正则只编译一次（编译失败 = Never，保持旧语义）。总代价 O(总字节)。
+
+### 7.3 行偏移 BLOB + seek 读取
+- `files` 表新增 `line_offsets BLOB`（每行起始字节偏移 u64 LE 数组，行 i 区间 =
+  `[off[i], off[i+1] 或文件尾)`），建库扫描单趟顺带记录（与 `split('\n')` 分段语义一致，
+  含尾部空行段）
+- `db_line` / `db_context_lines` 改 `read_line_range` seek 只读目标片段（不再整文件读）；
+  `db_context_lines` 的文件行上界改 `files.get(idx+1)`（修掉循环内嵌套 filter 的 O(files²)）
+- **视口行文本契约变更**：旧版「视口 min/max 行号区间」（多文件时间交叠时区间横跨数百万行）
+  改为 **id 集合分批**——新命令 `db_lines_by_ids(ids)`：排序去重 + 同文件 gap≤64 合并段
+  seek 读取，返回 `[count][pad] + 每行 [line][len][utf-8]`；前端 500/批拉取 +
+  20,000 行 LRU（Map 插入序驱逐）。DetailPanel 的 ±ctxSpan 小区间仍走 `db_context_lines`
+
+### 7.4 同步命令 spawn_blocking
+Tauri 同步 command（`pub fn`）在主线程执行。`db_filter_drop`（百万行 DELETE）、
+`db_context_lines`、`db_line`、`db_events_in_window`、`db_event_index_chunk`、
+`db_run_sequences` 全部改 `pub async fn` + `spawn_blocking`。
+
+### 7.5 关联窗口下推 SQL
+`recomputeCorrelations` 旧版每次视图变化 JS 全量扫 `matches`（O(总命中数)）。
+新命令 `db_corr_ids(filterIds, start, end)`：
+```sql
+SELECT DISTINCT t.line FROM line_ts t
+CROSS JOIN filter_hits h ON h.line = t.line AND h.filter_id IN (...)
+WHERE t.ts BETWEEN ?1 AND ?2
+```
+CROSS JOIN 强制 line_ts (ts,line) 覆盖索引范围扫驱动 + filter_hits 主键点查（EXPLAIN 断言
+SEARCH + idx_line_ts_ts）；前端模块级 `corrSeq` 序号丢弃过期响应。
+
+### 7.6 schema 与兼容
+- `SCHEMA_VERSION = "3"`：v2 库打开时自动删库重建（files 表结构变了）
+- meta 新增 `totalEvents`（cache-hit 免 COUNT 全索引扫描）
+- `tsconfig.json` lib ES2020 → ES2024（`Promise.withResolvers`；target 仍 ES2020，产物不变）
+- Rust 单测（db.rs 尾）：偏移语义（split('\n') 对齐含 CRLF/多字节）、`read_line_range`
+  边界、`merge_line_segments` gap 边界、`message_scope_filter`（双文件/无 ts 行/大小写/
+  时间戳串不在 message 域/乱序去重）、`db_corr_ids` SQL 结果 + 查询计划断言
+  （注：编写机 cargo/gnu 工具链存在 `--check-cfg` 参数传递 bug 无法本地跑测试，需在正常环境执行
+  `cd src-tauri && cargo check && cargo test`）

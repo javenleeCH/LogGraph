@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { useLogStore } from '../store/logStore';
+import { useLogStore, dbTsByLine } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
 import { copyWithFallback } from '../utils/copyFlow';
 import { getRawLine } from '../utils/rawLine';
 import { levelStyle } from '../constants';
 import { FileText, Copy } from './Icon';
 import { GroupMatchesTab } from './GroupMatchesTab';
-import type { DbContextRow } from '../io/dbStore';
+import { fetchContextLines, type DbContextRow } from '../io/dbStore';
 import styles from './DetailPanel.module.css';
 
 /** 上下文行数可选档位：堆栈往往很长，固定 4 行不够用，交给用户现场调 */
@@ -18,6 +18,7 @@ type DetailTab = string;
 
 export function DetailPanel() {
   const selectedEventId = useLogStore((s) => s.selectedEventId);
+  const dbIndex = useLogStore((s) => s.dbIndex);
   const events = useLogStore((s) => s.events);
   const rawLines = useLogStore((s) => s.rawLines);
   const dbMode = useLogStore((s) => s.dbMode);
@@ -68,12 +69,21 @@ export function DetailPanel() {
     }
   }, [seqGroups, activeTab]);
 
+  // dbMode：事件不物化（events=[]），用 dbIndex O(1) 查 ts 构造轻量对象；
+  // raw/message 留空，上下文/详情由 dbCtx 拉取
   const selected = useMemo(
     () =>
       selectedEventId !== null
-        ? events.find((e) => e.id === selectedEventId)
+        ? dbMode
+          ? {
+              id: selectedEventId,
+              ts: dbTsByLine({ dbIndex }, selectedEventId) ?? 0,
+              raw: '',
+              message: '',
+            }
+          : events.find((e) => e.id === selectedEventId)
         : undefined,
-    [selectedEventId, events],
+    [selectedEventId, dbMode, dbIndex, events],
   );
 
   // 选中行时滚动到视图
@@ -94,7 +104,6 @@ export function DetailPanel() {
     const to = selectedEventId + ctxSpan;
     void (async () => {
       try {
-        const { fetchContextLines } = await import('../io/dbStore');
         const rows = await fetchContextLines(from, to);
         if (dbCtxSeq.current === seq) setDbCtx(rows);
       } catch (err) {

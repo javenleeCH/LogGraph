@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { useLogStore } from '../store/logStore';
+import { useLogStore, selectEventCount } from '../store/logStore';
 import { useTheme } from '../hooks/useTheme';
 import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
@@ -16,7 +16,7 @@ export function Toolbar() {
   const fullRange = useLogStore((s) => s.fullRange);
   const viewRange = useLogStore((s) => s.viewRange);
   const resetView = useLogStore((s) => s.resetView);
-  const events = useLogStore((s) => s.events);
+  const eventCount = useLogStore(selectEventCount);
   const matches = useLogStore((s) => s.matches);
   const filters = useLogStore((s) => s.filters);
   const selectedEventId = useLogStore((s) => s.selectedEventId);
@@ -143,7 +143,7 @@ export function Toolbar() {
           <div className={styles['status-left']}>
             {meta && (
               <span className={styles['status-file']}>
-                {meta.fileName} · {events.length.toLocaleString()} 行
+                {meta.fileName} · {eventCount.toLocaleString()} 行
                 {meta.skipped > 0 ? ` · 跳过 ${meta.skipped}` : ''}
               </span>
             )}

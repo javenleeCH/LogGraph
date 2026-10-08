@@ -77,37 +77,61 @@ export function dbClose(): void {
   invoke('db_close').catch(() => {});
 }
 
-// ---- 事件索引（键集分页） ----
+// ---- 事件索引（键集分页，二进制 SoA 通道） ----
 
 const INDEX_CHUNK = 60_000;
 
-/** 拉取全量事件索引：(line, ts)[]，按 (ts, line) 升序 */
+/** SoA 事件索引：平行数组按 (ts, line) 升序 */
+export interface DbEventIndex {
+  count: number;
+  lines: Uint32Array;
+  ts: Float64Array;
+}
+
+/**
+ * 拉取全量事件索引（二进制 SoA，零对象解析）。
+ * 每块字节布局（Rust db_event_index_chunk）：
+ * `[count u32][pad u32][ts × count f64 LE][line × count u32 LE]`
+ * 注意：首块用 null 作为「无下界」哨兵（Rust 侧 after_ts: Option<i64>）。
+ */
 export async function fetchEventIndex(
   totalEvents: number,
   onProgress?: (frac: number) => void,
-): Promise<{ line: number; ts: number }[]> {
-  const out: { line: number; ts: number }[] = [];
-  // 注意：首块用 null 作为「无下界」哨兵（Rust 侧 after_ts: Option<i64>）。
-  // 不能用 Number.NEGATIVE_INFINITY —— 它不是合法 JSON/serde 值，
-  // 会被序列化成 null 后触发 Rust 端反序列化报错，进而 invoke 直接 reject。
+): Promise<DbEventIndex> {
+  const lines = new Uint32Array(totalEvents);
+  const ts = new Float64Array(totalEvents);
+  let filled = 0;
   let afterTs: number | null = null;
   let afterLine = 0;
-  while (out.length < totalEvents) {
-    // 用 as 断言而非 invoke<T> 泛型：避免 tsc 对元组数组的推断环路（TS7022）
-    const chunk = (await invoke('db_event_index_chunk', {
+  while (filled < totalEvents) {
+    const buf = (await invoke('db_event_index_chunk', {
       afterTs,
       afterLine,
       max: INDEX_CHUNK,
-    })) as [number, number][];
-    if (!Array.isArray(chunk) || chunk.length === 0) break;
-    for (const [line, ts] of chunk) out.push({ line, ts });
-    const last = chunk[chunk.length - 1];
-    afterLine = last[0];
-    afterTs = last[1];
-    onProgress?.(out.length / Math.max(1, totalEvents));
-    await new Promise((r) => setTimeout(r, 0));
+    })) as ArrayBuffer;
+    if (!(buf instanceof ArrayBuffer) || buf.byteLength < 8) break;
+    const count = new Uint32Array(buf, 0, 1)[0];
+    if (count === 0) break;
+    const partLines = new Uint32Array(buf, 8 + count * 8, count);
+    const partTs = new Float64Array(buf, 8, count);
+    lines.set(partLines, filled);
+    ts.set(partTs, filled);
+    filled += count;
+    afterLine = partLines[count - 1];
+    afterTs = partTs[count - 1];
+    onProgress?.(filled / Math.max(1, totalEvents));
+    const { promise: yieldToUi, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, 0);
+    await yieldToUi;
   }
-  return out;
+  // 库在打开后行数变化（重建并发）→ 截断到实收
+  return filled === totalEvents
+    ? { count: totalEvents, lines, ts }
+    : {
+        count: filled,
+        lines: lines.subarray(0, filled),
+        ts: ts.subarray(0, filled),
+      };
 }
 
 // ---- 过滤下推（v2：rg 引擎 + filter_hits 落库）----
@@ -131,6 +155,40 @@ export async function runDbFilter(q: DbFilterQuery): Promise<DbHitEntry[]> {
 export function dropDbFilter(filterId: string): void {
   if (!isTauri()) return;
   invoke('db_filter_drop', { filterId }).catch(() => {});
+}
+
+/**
+ * 视口行文本：按全局行号集合批量取（任意顺序；Rust 侧排序去重 + 分段 seek）。
+ * 字节布局：`[count u32][pad u32] + 每行 [line u32][len u32][utf-8 bytes]`
+ */
+export async function fetchLinesByIds(ids: number[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  if (ids.length === 0) return out;
+  const buf = (await invoke('db_lines_by_ids', { ids })) as ArrayBuffer;
+  if (!(buf instanceof ArrayBuffer) || buf.byteLength < 8) return out;
+  const view = new DataView(buf);
+  const count = view.getUint32(0, true);
+  const decoder = new TextDecoder();
+  let p = 8;
+  for (let i = 0; i < count; i++) {
+    const line = view.getUint32(p, true);
+    const len = view.getUint32(p + 4, true);
+    p += 8;
+    out.set(line, decoder.decode(new Uint8Array(buf, p, len)));
+    p += len;
+  }
+  return out;
+}
+
+/** 关联窗口下推：filter_ids 任一命中且 ts∈[start,end] 的去重全局行号（SQL 侧完成） */
+export async function fetchCorrIds(
+  filterIds: string[],
+  start: number,
+  end: number,
+): Promise<number[]> {
+  if (filterIds.length === 0) return [];
+  const r = await invoke<number[]>('db_corr_ids', { filterIds, start, end });
+  return Array.isArray(r) ? r : [];
 }
 
 // ---- 按需取数 ----
