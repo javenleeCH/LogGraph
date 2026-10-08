@@ -101,6 +101,17 @@
   line-height: 1.6;
 }
 
+/* dbMode：详情主体为无限上下文流组件（自身管理虚拟滚动），容器不滚动不留白 */
+.detail-body-flush {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 .ctx-line {
   display: flex;
   padding: 1px 16px;

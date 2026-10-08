@@ -470,7 +470,7 @@ export function DetailPanel() {
           })}
         </div>
       )}
-      <div className={styles['detail-body']}>
+      <div className={dbMode ? styles['detail-body-flush'] : styles['detail-body']}>
         {dbMode ? (
           <ContextStream files={dbFiles} selectedLine={selected.id} />
         ) : (
