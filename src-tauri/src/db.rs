@@ -759,7 +759,7 @@ fn scan_filters_once(
             // ts 提取 → msg 域匹配
             if !msg_regexes.is_empty() {
                 msg_candidates.sort_unstable_by_key(|&(li, _)| li);
-                msg_candidates.dedup_by_key(|&(li, _)| li);
+                msg_candidates.dedup_by_key(|e| e.0);
                 for (li, global) in msg_candidates {
                     let s = starts[li] as usize;
                     let e = if li + 1 < starts.len() {
