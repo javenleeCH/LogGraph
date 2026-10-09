@@ -1109,11 +1109,17 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   // ---- 工作区持久化（目录即工作区） ----
   applyPersistedFilters: (saved) => {
-    // 旧 filter id → 新 filter id 的映射（filter 加载时重新生成 id）
+    // filter id 沿用持久化原值(缺失/重复才生成新 id):
+    // db 缓存(filter_meta 指纹 → filter_hits 复用)按 filter_id 命中,
+    // 换 id = 每次打开目录都全量重扫+重写百万级命中行,且旧行成为
+    // 无人清理的死数据(实测 cache.db 膨胀到 3.74GB)。
     const oldToNewFid = new Map<string, string>();
+    const seenIds = new Set<string>();
     // 从 JSON 恢复过滤器（补全默认字段；保留原 groupId 用于迁移）
     const restoredRaw: Filter[] = saved.filters.map((f: any, i: number) => {
-      const newId = genFilterId();
+      const keep = typeof f.id === 'string' && !!f.id && !seenIds.has(f.id);
+      const newId = keep ? f.id : genFilterId();
+      seenIds.add(newId);
       if (f.id) oldToNewFid.set(f.id, newId);
       return {
         id: newId,

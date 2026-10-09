@@ -1112,6 +1112,9 @@ pub async fn db_filters_batch(
                 );
             }
         }
+        // 写入归并:百万级命中行的 DELETE+INSERT 会把 wal 推到数百 MB,
+        // 提交后截断归位(与 db_open 建库尾部同款)
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         let t = Instant::now();
         let enc = encode_filter_batch(&out);
         let total_rows: usize = out.iter().map(|(_, h)| h.len()).sum();
