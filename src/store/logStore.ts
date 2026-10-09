@@ -24,11 +24,12 @@ import {
 } from '../io/dirLoader';
 import {
   dbClose,
-  runDbFilter,
+  runDbFiltersBatch,
   runDbSequences,
   fetchCorrIds,
   type DbEventIndex,
   type DbRunSeqGroup,
+  type DbFilterHits,
 } from '../io/dbStore';
 
 let corrRaf = 0;
@@ -58,6 +59,16 @@ export const selectEventCount = (s: {
   dbIndex: DbIndex | null;
   events: LogEvent[];
 }): number => (s.dbMode ? s.dbIndex?.count ?? 0 : s.events.length);
+
+/** 二进制命中 → 骨架事件数组（raw/message 按需拉行；ts 升序由 Rust 保证） */
+function skelEvents(hits: DbFilterHits | undefined): LogEvent[] {
+  if (!hits || hits.lines.length === 0) return [];
+  const out = new Array<LogEvent>(hits.lines.length);
+  for (let i = 0; i < hits.lines.length; i++) {
+    out[i] = { id: hits.lines[i], ts: hits.ts[i], raw: '', message: '' };
+  }
+  return out;
+}
 
 function scheduleCorrRecompute(run: () => void) {
   if (corrRaf) cancelAnimationFrame(corrRaf);
@@ -529,26 +540,26 @@ export const useLogStore = create<LogState>((set, get) => ({
       chunkedCancel();
       chunkedCancel = null;
     }
-    // dbMode：单 filter 下推 Rust（rg 引擎；返回 (line,ts)[] 直接组装骨架事件）
+    // dbMode：单 filter 也走批量下推（缓存命中直接读库；否则并入单遍扫描），
+    // 二进制 (line, ts)[] 直接组装骨架事件
     if (dbMode) {
       void (async () => {
-        const match: FilterMatch = !filter.pattern || !filter.enabled
-          ? { filterId: id, events: [] }
-          : {
+        let events: LogEvent[] = [];
+        if (filter.pattern && filter.enabled) {
+          try {
+            const res = await runDbFiltersBatch([{
               filterId: id,
-              events: (await runDbFilter({
-                filterId: id,
-                pattern: filter.pattern,
-                isRegex: filter.isRegex,
-                caseSensitive: filter.caseSensitive,
-                scope: filter.scope,
-              })).map((h) => ({
-                id: h.line,
-                ts: h.ts,
-                raw: '',
-                message: '',
-              })),
-            };
+              pattern: filter.pattern,
+              isRegex: filter.isRegex,
+              caseSensitive: filter.caseSensitive,
+              scope: filter.scope,
+            }]);
+            events = skelEvents(res.get(id));
+          } catch (err) {
+            console.warn('[dbMode] db_filters_batch 失败，该 filter 置空:', id, err);
+          }
+        }
+        const match: FilterMatch = { filterId: id, events };
         // 编辑期间 filter 又变了 → 丢弃本次结果
         const cur = get().filters.find((f) => f.id === id);
         if (cur !== filter) return;
@@ -864,37 +875,28 @@ export const useLogStore = create<LogState>((set, get) => ({
       set({ matches: [], correlatedEventIds: new Set(), sequenceResults: {} });
       return;
     }
-    // dbMode：过滤下推 Rust（rg 引擎 + filter_hits 落库），逐 filter 执行后组装
+    // dbMode：全部 filter 一次批量下推（单遍扫描；缓存命中的 filter 直接读库）
     if (dbMode) {
       void (async () => {
-        const out: FilterMatch[] = [];
-        for (const f of filters) {
-          if (!f.pattern || !f.enabled) {
-            out.push({ filterId: f.id, events: [] });
-            continue;
-          }
+        const active = filters.filter((f) => f.pattern && f.enabled);
+        let results = new Map<string, DbFilterHits>();
+        if (active.length > 0) {
           try {
-            const hits = await runDbFilter({
+            results = await runDbFiltersBatch(active.map((f) => ({
               filterId: f.id,
               pattern: f.pattern,
               isRegex: f.isRegex,
               caseSensitive: f.caseSensitive,
               scope: f.scope,
-            });
-            out.push({
-              filterId: f.id,
-              events: hits.map((h) => ({
-                id: h.line,
-                ts: h.ts,
-                raw: '',
-                message: '',
-              })),
-            });
+            })));
           } catch (err) {
-            console.warn('[dbMode] db_filter 失败，该 filter 置空:', f.id, err);
-            out.push({ filterId: f.id, events: [] });
+            console.warn('[dbMode] db_filters_batch 失败，全部置空:', err);
           }
         }
+        const out: FilterMatch[] = filters.map((f) => ({
+          filterId: f.id,
+          events: skelEvents(results.get(f.id)),
+        }));
         // 过滤期间用户可能又改了 filters → 结果以最新为准重新跑
         if (get().filters !== filters) {
           get().recomputeMatches();

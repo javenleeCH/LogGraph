@@ -23,11 +23,6 @@ serde_json = "1"
 regex = "1"
 # SQLite 数据驻留层（bundled 自带 SQLite 源码编译，无系统依赖）
 rusqlite = { version = "0.32", features = ["bundled"] }
-# rg 搜索引擎（ripgrep 内核：mmap + SIMD + memchr），v2 架构直扫原文件
-grep-searcher = "0.1.17"
-grep-regex = "0.1.14"
-# 行终止符类型（LineTerminator::crlf()），需与 searcher 的 CRLF 配置配对
-grep-matcher = "0.1.9"
 
 [profile.release]
 codegen-units = 1

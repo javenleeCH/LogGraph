@@ -3,7 +3,7 @@
  *
  * - 打开目录：db_open（指纹缓存 / ts 扫描建瘦表，带进度）
  * - 事件索引：db_event_index_chunk 键集分页（line, ts）
- * - 过滤：db_filter（rg 引擎直扫原文件 + filter_hits 落库）→ (line, ts)[]
+ * - 过滤：db_filters_batch（单遍批量扫描 + filter_hits 落库）→ 二进制 (line, ts)[]
  * - 详情/上下文：db_context_lines / db_line（mmap 直读原文件）
  */
 
@@ -20,7 +20,7 @@ export interface DbOpenResult {
   timestampFormatId: string | null;
 }
 
-/** db_filter 命中条目（line + ts，按 ts 升序） */
+/** db_events_in_window 条目（line + ts，按 ts 升序） */
 export interface DbHitEntry {
   line: number;
   ts: number;
@@ -149,10 +149,49 @@ export interface DbFilterQuery {
   scope: 'raw' | 'message';
 }
 
-/** 运行一个过滤器：rg 直扫原文件 → (line, ts)[]（按 ts 升序；Rust 侧已 JOIN line_ts） */
-export async function runDbFilter(q: DbFilterQuery): Promise<DbHitEntry[]> {
-  const r = await invoke<DbHitEntry[]>('db_filter', { q });
-  return Array.isArray(r) ? r : [];
+/** 单个 filter 的命中：平行数组（ts 升序；raw/message 由前端按需拉行） */
+export interface DbFilterHits {
+  lines: Uint32Array;
+  ts: Float64Array;
+}
+
+/**
+ * 批量运行过滤器（单遍扫描下推：全部 filter 一次 invoke）。
+ * 二进制布局（Rust encode_filter_batch）：
+ * `[filterCount u32]` + 每 filter `[idLen u32][id utf8][hitCount u32][pad u32][line u32×n][ts f64×n]`
+ * （百万级命中走 JSON 会 100MB+/双端数秒序列化，故走 ArrayBuffer 路径）
+ */
+export async function runDbFiltersBatch(
+  queries: DbFilterQuery[],
+): Promise<Map<string, DbFilterHits>> {
+  const out = new Map<string, DbFilterHits>();
+  if (queries.length === 0) return out;
+  const buf = await invoke<ArrayBuffer>('db_filters_batch', { queries });
+  if (!(buf instanceof ArrayBuffer) || buf.byteLength < 4) return out;
+  const v = new DataView(buf);
+  const dec = new TextDecoder();
+  const fc = v.getUint32(0, true);
+  let p = 4;
+  for (let i = 0; i < fc; i++) {
+    const idLen = v.getUint32(p, true);
+    p += 4;
+    const id = dec.decode(new Uint8Array(buf, p, idLen));
+    p += idLen;
+    const n = v.getUint32(p, true);
+    p += 8; // hitCount + pad
+    const lines = new Uint32Array(n);
+    for (let k = 0; k < n; k++) {
+      lines[k] = v.getUint32(p + k * 4, true);
+    }
+    p += n * 4;
+    const ts = new Float64Array(n);
+    for (let k = 0; k < n; k++) {
+      ts[k] = v.getFloat64(p + k * 8, true);
+    }
+    p += n * 8;
+    out.set(id, { lines, ts });
+  }
+  return out;
 }
 
 /** 删除 filter 的命中记录（filter 被删时调用） */
