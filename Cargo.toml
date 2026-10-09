@@ -4,7 +4,7 @@
 #   src-tauri/ —— Tauri 薄壳层（窗口 + IPC 命令，转发给 engine）
 #   src/       —— React UI 层
 [workspace]
-members = ["engine", "src-tauri"]
+members = ["engine", "cli", "src-tauri"]
 resolver = "2"
 
 [workspace.package]
