@@ -93,12 +93,14 @@ pub(crate) fn search_dir(
     let mut all_hits: Vec<u32> = if threads <= 1 {
         scan_files(root, &files, 0, 1, pattern, is_regex, case_sensitive)?
     } else {
-        // 交错分配（stride）：files 按 first_line 升序，大文件天然分散到各线程
+        // 交错分配（stride）：files 按 first_line 升序，大文件天然分散到各线程。
+        // 先落成共享 slice 引用（Copy），spawn 闭包按值捕获，免 Vec 借用歧义。
+        let files_ref: &[(String, u32)] = &files;
         let results: Vec<Result<Vec<u32>, String>> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..threads)
                 .map(|t| {
                     scope.spawn(move || {
-                        scan_files(root, &files, t, threads, pattern, is_regex, case_sensitive)
+                        scan_files(root, files_ref, t, threads, pattern, is_regex, case_sensitive)
                     })
                 })
                 .collect();
