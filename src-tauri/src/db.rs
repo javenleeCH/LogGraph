@@ -44,7 +44,7 @@ pub(crate) fn open_cache() -> Result<Connection, String> {
         return Err("cache.db 未打开".into());
     };
     let conn = Connection::open(&path).map_err(|e| e.to_string())?;
-    conn.execute_batch("PRAGMA cache_size=-65536; PRAGMA busy_timeout=5000;")
+    conn.execute_batch("PRAGMA cache_size=-262144; PRAGMA busy_timeout=5000;")
         .map_err(|e| e.to_string())?;
     Ok(conn)
 }
@@ -239,7 +239,6 @@ CREATE TABLE IF NOT EXISTS filter_hits (  -- filter 命中结果（rg 扫描后�
   line      INTEGER NOT NULL,
   PRIMARY KEY (filter_id, line)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS idx_hits_line ON filter_hits(line);
 CREATE TABLE IF NOT EXISTS filter_meta ( -- filter 定义指纹（命中则跳过 rg 重扫，直接复用 filter_hits）
   filter_id TEXT PRIMARY KEY,
   fp        TEXT NOT NULL
@@ -290,12 +289,16 @@ pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult,
                         .map(|v| v == SCHEMA_VERSION)
                         .unwrap_or(false);
                 if ok {
-                // 老库升级：幂等补建 filter_meta（新增表，新库走 SCHEMA）
+                // 老库升级：幂等补建 filter_meta + 删除死索引 idx_hits_line
+                //（所有查询走主键 (filter_id, line) 前缀，二级索引零引用，
+                //  只放大百万级命中行的 INSERT/DELETE——实测 324 万行写放大
+                //  让 db_filters_batch 到 63.8s）
                 let _ = conn.execute_batch(
                     "CREATE TABLE IF NOT EXISTS filter_meta (
                        filter_id TEXT PRIMARY KEY,
                        fp        TEXT NOT NULL
-                     );",
+                     );
+                     DROP INDEX IF EXISTS idx_hits_line;",
                 );
                     // meta 缓存优先（免 COUNT(*) 全索引扫描）；缺省兜底 COUNT
                     let total_events: u32 = conn
@@ -860,6 +863,11 @@ fn scan_filters_once(
         for (qi, v) in b.into_iter().enumerate() {
             per_filter[qi].extend(v);
         }
+    }
+    // 行号升序:多线程 stride 合并后乱序,B-tree (filter_id, line)
+    // 随机页插入是百万级命中行 INSERT 变慢的主因之一(实测 324 万行 63.8s)
+    for v in per_filter.iter_mut() {
+        v.sort_unstable();
     }
     // 每文件计时落地(一次写;目录无 .logGraph 时静默跳过——测试用例)
     if let Ok(logs) = perf.lock() {
