@@ -14,6 +14,7 @@ use crate::parser::timestamp::{extract_timestamp, find_format, detect_timestamp_
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
