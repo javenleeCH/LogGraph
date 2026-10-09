@@ -67,7 +67,8 @@ pub(crate) fn search_dir(
     if pattern.is_empty() {
         return Ok(Vec::new());
     }
-    let matcher = build_matcher(pattern, is_regex, case_sensitive)?;
+    // 入口先编译一次校验 pattern 合法（线程内各自重建，失败即整体失败）
+    build_matcher(pattern, is_regex, case_sensitive)?;
 
     // 文件清单（first_line 升序 = 全局行号升序）
     let files = {
@@ -82,32 +83,67 @@ pub(crate) fn search_dir(
         rows.flatten().collect::<Vec<_>>()
     };
 
-    let mut all_hits: Vec<u32> = Vec::new();
-    // 注意：SearcherBuilder 没有 crlf() 方法（crlf() 只在 grep_regex::RegexMatcherBuilder 上），
-    // searcher 侧的 CRLF 由 line_terminator(LineTerminator::crlf()) 表达，
-    // 且必须与上面的 b.crlf(true) 成对出现（见 check_config 的一致性校验）。
-    // 行号始终按 \n 字节计数（LineTerminator::as_byte() 对 CRLF 也返回 b'\n'），
-    // 与 db.rs 建库的 split('\n') 全局行号语义天然一致。
-    let mut searcher = SearcherBuilder::new()
-        .line_number(true)
-        .line_terminator(LineTerminator::crlf())
-        .build();
+    // ---- 文件级并行（rg CLI 同款策略）：单线程串行扫描比 rg 慢一个核数倍 ----
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(files.len())
+        .max(1);
 
-    for (name, first_line) in files {
-        let path = root.join(&name);
-        let mut sink = LineCollector {
-            first_line,
-            out: Vec::new(),
-        };
-        // 读取失败跳过（与建库语义一致）
-        let _ = searcher.search_path(&matcher, &path, &mut sink);
-        all_hits.extend(sink.out);
-    }
+    let mut all_hits: Vec<u32> = if threads <= 1 {
+        scan_files(root, &files, 0, 1, pattern, is_regex, case_sensitive)?
+    } else {
+        // 交错分配（stride）：files 按 first_line 升序，大文件天然分散到各线程
+        let results: Vec<Result<Vec<u32>, String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|t| {
+                    scope.spawn(move || {
+                        scan_files(root, &files, t, threads, pattern, is_regex, case_sensitive)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Ok(Vec::new()))).collect()
+        });
+        let mut out = Vec::new();
+        for r in results {
+            out.extend(r?);
+        }
+        out
+    };
 
     // 跨文件按 first_line 顺序收集已天然升序；稳妥去重排序
     all_hits.sort_unstable();
     all_hits.dedup();
     Ok(all_hits)
+}
+
+/// 扫描 files 中 `idx % stride == offset` 的文件（线程任务体）。
+/// 每线程独立 matcher/searcher（RegexMatcher 的 Sync 性不承担，重建成本 ~ms 级）。
+fn scan_files(
+    root: &Path,
+    files: &[(String, u32)],
+    offset: usize,
+    stride: usize,
+    pattern: &str,
+    is_regex: bool,
+    case_sensitive: bool,
+) -> Result<Vec<u32>, String> {
+    let matcher = build_matcher(pattern, is_regex, case_sensitive)?;
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .line_terminator(LineTerminator::crlf())
+        .build();
+    let mut hits = Vec::new();
+    for (name, first_line) in files.iter().skip(offset).step_by(stride) {
+        let mut sink = LineCollector {
+            first_line: *first_line,
+            out: Vec::new(),
+        };
+        // 读取失败跳过（与建库语义一致）
+        let _ = searcher.search_path(&matcher, &root.join(name), &mut sink);
+        hits.extend(sink.out);
+    }
+    Ok(hits)
 }
 
 #[cfg(test)]
