@@ -14,8 +14,8 @@ use crate::parser::timestamp::{extract_timestamp, find_format, detect_timestamp_
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 /// cache.db 路径（打开目录后设置）。每命令独立开连接：WAL 支持并发读，
 /// 慢查询（如 db_corr_ids 的窗口扫描）不再持全局锁阻塞其它命令——
@@ -142,6 +142,22 @@ fn js_trim(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
 
+
+/// 性能诊断日志（追加写 <root>/.logGraph/perf.log，ms 时间戳；失败静默）
+fn perf_log(root: &Path, msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join(".logGraph").join("perf.log"))
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
 
 // ---- 行偏移 seek 读取（schema v3）----
 
@@ -694,6 +710,9 @@ fn scan_filters_once(
     let regexes = build(&raw_pats)?;
     let msg_regexes = build(&msg_pats)?;
 
+    // 每文件计时(读/迭代/精筛)聚合,函数尾部一次写入 perf.log
+    let perf: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+
     // ---- 文件级并行（stride 交错，first_line 升序 → 大文件分散） ----
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -705,9 +724,11 @@ fn scan_filters_once(
     let scan = |part: &[(i64, String, u32, Vec<u64>)]| -> Vec<Vec<u32>> {
         let mut buckets: Vec<Vec<u32>> = (0..n_q).map(|_| Vec::new()).collect();
         for (_fid, name, first_line, offsets) in part {
+            let t_read = Instant::now();
             let Ok(bytes) = std::fs::read(root.join(name)) else {
                 continue; // 读取失败跳过（与建库语义一致）
             };
+            let ms_read = t_read.elapsed().as_millis();
             // 行起始偏移：优先库内 line_offsets（schema v3 必有）；
             // 空/越界（异常）→ 手扫 \n 兜底
             let starts: Vec<u64> = if !offsets.is_empty()
@@ -731,7 +752,8 @@ fn scan_filters_once(
             };
             // 每 expr 独立 find_iter（prefilter SIMD 跳过 miss 字节）；
             // match 直接归属该 expr 的 filter 集；同行多 match 用 last_li 去重。
-            // message filter 的行只收集候选（跨 expr 同行重复），统一精筛。
+            let t_iter = Instant::now();
+            let mut raw_hits = 0usize; // 粗筛命中数(同行去重后)
             let mut msg_candidates: Vec<(usize, u32)> = Vec::new();
             for (ei, re) in regexes.iter().enumerate() {
                 let mut last_li = usize::MAX;
@@ -741,6 +763,7 @@ fn scan_filters_once(
                         continue;
                     }
                     last_li = li;
+                    raw_hits += 1;
                     let global = first_line + li as u32;
                     let mut need_msg = false;
                     for &(qi, is_msg) in &raw_slots[ei] {
@@ -755,6 +778,9 @@ fn scan_filters_once(
                     }
                 }
             }
+            let ms_iter = t_iter.elapsed().as_millis();
+            let n_cand = msg_candidates.len(); // for 会 move,提前取
+            let t_msg = Instant::now();
             // message 精筛：候选行去重（跨 expr 同行可能重复入列）后逐行
             // ts 提取 → msg 域匹配
             if !msg_regexes.is_empty() {
@@ -797,33 +823,54 @@ fn scan_filters_once(
                     }
                 }
             }
+            if let Ok(mut v) = perf.lock() {
+                v.push(format!(
+                    "scan {name} {:.1}MB read={ms_read}ms iter={ms_iter}ms msg={:?} hits={raw_hits} cand={n_cand}",
+                    bytes.len() as f64 / 1048576.0,
+                    t_msg.elapsed()
+                ));
+            }
         }
         buckets
     };
-    if threads <= 1 {
-        return Ok(scan(files_ref));
-    }
-    let results: Vec<Vec<Vec<u32>>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|t| {
-                let part: Vec<(i64, String, u32, Vec<u64>)> = files_ref
-                    .iter()
-                    .skip(t)
-                    .step_by(threads)
-                    .cloned()
-                    .collect();
-                scope.spawn(move || scan(&part))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_default())
-            .collect()
-    });
+    let results: Vec<Vec<Vec<u32>>> = if threads <= 1 {
+        vec![scan(files_ref)]
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|t| {
+                    let part: Vec<(i64, String, u32, Vec<u64>)> = files_ref
+                        .iter()
+                        .skip(t)
+                        .step_by(threads)
+                        .cloned()
+                        .collect();
+                    scope.spawn(move || scan(&part))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        })
+    };
     let mut per_filter: Vec<Vec<u32>> = (0..n_q).map(|_| Vec::new()).collect();
     for b in results {
         for (qi, v) in b.into_iter().enumerate() {
             per_filter[qi].extend(v);
+        }
+    }
+    // 每文件计时落地(一次写;目录无 .logGraph 时静默跳过——测试用例)
+    if let Ok(logs) = perf.lock() {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join(".logGraph").join("perf.log"))
+        {
+            use std::io::Write;
+            for l in logs.iter() {
+                let _ = writeln!(f, "{l}");
+            }
         }
     }
     Ok(per_filter)
@@ -912,8 +959,13 @@ pub async fn db_filters_batch(
     queries: Vec<FilterQuery>,
 ) -> Result<tauri::ipc::Response, String> {
     let bytes = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let t0 = Instant::now();
         let conn = open_cache()?;
         let root = cache_root()?;
+        perf_log(
+            &root,
+            &format!("---- db_filters_batch: {} queries ----", queries.len()),
+        );
 
         let mut out: FilterBatchOut = Vec::new();
         let mut miss: Vec<FilterQuery> = Vec::new();
@@ -932,8 +984,18 @@ pub async fn db_filters_batch(
                 miss.push(q.clone());
             }
         }
+        perf_log(
+            &root,
+            &format!(
+                "fingerprint: {} cached, {} miss {:?}",
+                queries.len() - miss.len(),
+                miss.len(),
+                t0.elapsed()
+            ),
+        );
         if !miss.is_empty() {
             // 行偏移从库内 line_offsets 取（scan 反查行号用，免手扫全文）
+            let t = Instant::now();
             let files: Vec<(i64, String, u32, Vec<u64>)> = files_snapshot(&conn)?
                 .into_iter()
                 .map(|(fid, name, first_line)| {
@@ -949,9 +1011,25 @@ pub async fn db_filters_batch(
                     detect_timestamp_format(&lines)
                 })
             });
+            perf_log(
+                &root,
+                &format!(
+                    "prep: {} files, fmt={:?} {:?}",
+                    files.len(),
+                    ts_fmt.map(|f| f.id),
+                    t.elapsed()
+                ),
+            );
+            let t = Instant::now();
             let per_filter = scan_filters_once(&root, &files, &miss, ts_fmt)?;
+            let hits: Vec<usize> = per_filter.iter().map(|v| v.len()).collect();
+            perf_log(
+                &root,
+                &format!("scan: hits={hits:?} {:?}", t.elapsed()),
+            );
             for (qi, q) in miss.iter().enumerate() {
                 let lines = &per_filter[qi];
+                let t = Instant::now();
                 // 事务覆盖写（同 filter_id 重定义 = 覆盖旧命中）
                 conn.execute_batch("BEGIN")
                     .map_err(|e| e.to_string())?;
@@ -998,15 +1076,47 @@ pub async fn db_filters_batch(
                     }
                 }
                 conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+                perf_log(
+                    &root,
+                    &format!(
+                        "insert {}: {} rows {:?}",
+                        q.filter_id,
+                        lines.len(),
+                        t.elapsed()
+                    ),
+                );
                 // 定义指纹随结果写入（失败仅失去缓存）
                 let _ = conn.execute(
                     "INSERT OR REPLACE INTO filter_meta(filter_id, fp) VALUES (?1, ?2)",
                     params![q.filter_id, filter_def_fp(q)],
                 );
+                let t = Instant::now();
                 out.push((q.filter_id.clone(), filter_hits_join(&conn, &q.filter_id)?));
+                perf_log(
+                    &root,
+                    &format!(
+                        "join {}: {} rows {:?}",
+                        q.filter_id,
+                        out.last().map(|(_, h)| h.len()).unwrap_or(0),
+                        t.elapsed()
+                    ),
+                );
             }
         }
-        Ok(encode_filter_batch(&out))
+        let t = Instant::now();
+        let enc = encode_filter_batch(&out);
+        let total_rows: usize = out.iter().map(|(_, h)| h.len()).sum();
+        perf_log(
+            &root,
+            &format!(
+                "encode: {} rows, {} MB {:?}",
+                total_rows,
+                enc.len() / 1048576,
+                t.elapsed()
+            ),
+        );
+        perf_log(&root, &format!("total(rust): {:?}", t0.elapsed()));
+        Ok(enc)
     })
     .await
     .map_err(|e| format!("db_filters_batch 任务失败: {e}"))??;
@@ -1585,5 +1695,217 @@ mod tests {
             vec![(20, 100), (10, 200), (30, 300)]
         );
         assert!(filter_hits_join(&conn, "nope").unwrap().is_empty());
+    }
+
+    /// 大规模基准(用户实测复现):`cargo test --release bench_db_filters_scale -- --ignored --nocapture`
+    /// 复刻 db_filters_batch 首次 miss 全链路(建库→snapshot→scan→INSERT→JOIN→encode),
+    /// 分阶段计时——扫描方式已四轮大改而总耗时不变,瓶颈在固定环节,用数据定位。
+    #[test]
+    #[ignore]
+    fn bench_db_filters_scale() {
+        use std::time::Instant;
+        let dir = std::env::temp_dir().join("loggraph_bench_scale");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 8 文件 × 80 万行 × ~95B ≈ 600MB / 640 万行;55% 行含 alpha → ~352 万命中
+        let t0 = Instant::now();
+        let variants: Vec<String> = (0..2000u32)
+            .map(|i| {
+                let msg = if i % 100 < 55 {
+                    format!("processing request payload alpha id={i} seq={} done", i * 7)
+                } else {
+                    format!("idle tick beta gamma id={i} seq={}", i * 7)
+                };
+                format!(
+                    "2024-06-01 10:{:02}:{:02}.{:03} INFO  [worker-{}] {}\n",
+                    (i / 60) % 60,
+                    i % 60,
+                    i % 1000,
+                    i % 8,
+                    msg
+                )
+            })
+            .collect();
+        for f in 0..8u32 {
+            let mut buf = String::with_capacity(80_000_000);
+            for _ in 0..400 {
+                for v in &variants {
+                    buf.push_str(v);
+                }
+            }
+            std::fs::write(dir.join(format!("app{f}.log")), &buf).unwrap();
+        }
+        println!("[bench] 生成 640 万行/600MB: {:?}", t0.elapsed());
+
+        // ---- 建库(复刻 db_open)----
+        let db_path = dir.join("bench.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-262144;",
+        )
+        .unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let t1 = Instant::now();
+        let tx = conn.unchecked_transaction().unwrap();
+        {
+            let mut ins_file = tx
+                .prepare("INSERT INTO files(fid, name, first_line, line_offsets) VALUES (?1, ?2, ?3, ?4)")
+                .unwrap();
+            let mut ins_ts = tx
+                .prepare("INSERT OR IGNORE INTO line_ts(line, ts) VALUES (?1, ?2)")
+                .unwrap();
+            let mut total_lines: u32 = 0;
+            for (i, f) in (0..8u32).enumerate() {
+                let rel = format!("app{f}.log");
+                let text = read_file_lossy(&dir.join(&rel)).unwrap();
+                let fid = (i + 1) as i64;
+                let first_line = total_lines;
+                let mut offsets: Vec<u8> = Vec::with_capacity(64 + text.len() / 16 * 8);
+                let bytes = text.as_bytes();
+                let mut pos = 0usize;
+                let mut line_no = 0u32;
+                loop {
+                    let start = pos;
+                    let end = match bytes[pos..].iter().position(|&b| b == b'\n') {
+                        Some(k) => pos + k,
+                        None => bytes.len(),
+                    };
+                    offsets.extend_from_slice(&(start as u64).to_le_bytes());
+                    let line = text[start..end].strip_suffix('\r').unwrap_or(&text[start..end]);
+                    if let Some(ext) = extract_timestamp(line, None) {
+                        ins_ts
+                            .execute(params![(first_line + line_no) as i64, ext.ts])
+                            .unwrap();
+                    }
+                    if end == bytes.len() {
+                        break;
+                    }
+                    pos = end + 1;
+                    line_no += 1;
+                }
+                ins_file
+                    .execute(params![fid, rel, first_line as i64, offsets])
+                    .unwrap();
+                total_lines += line_no + 1;
+            }
+        }
+        tx.commit().unwrap();
+        println!("[bench] 建库(ts 扫描 640 万行): {:?}", t1.elapsed());
+
+        // ---- db_filters_batch 复刻 ----
+        let root = dir.as_path();
+        let t2 = Instant::now();
+        let files: Vec<(i64, String, u32, Vec<u64>)> = files_snapshot(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|(fid, name, first_line)| {
+                let off = load_line_offsets(&conn, fid).unwrap_or_default();
+                (fid, name, first_line, off)
+            })
+            .collect();
+        let ts_fmt = files.first().and_then(|(_fid, name, ..)| {
+            std::fs::read(root.join(name)).ok().and_then(|b| {
+                let s = String::from_utf8_lossy(&b[..b.len().min(64 * 1024)]);
+                let lines: Vec<&str> = s.split('\n').take(10).collect();
+                detect_timestamp_format(&lines)
+            })
+        });
+        println!(
+            "[bench] snapshot+offsets+格式探测: {:?} (fmt={:?})",
+            t2.elapsed(),
+            ts_fmt.map(|f| f.id)
+        );
+
+        let queries = vec![
+            FilterQuery {
+                filter_id: "rawA".into(),
+                pattern: "alpha".into(),
+                is_regex: false,
+                case_sensitive: false,
+                scope: "raw".into(),
+            },
+            FilterQuery {
+                filter_id: "msgP".into(),
+                pattern: "payload".into(),
+                is_regex: false,
+                case_sensitive: false,
+                scope: "message".into(),
+            },
+        ];
+        let t3 = Instant::now();
+        let per_filter = scan_filters_once(root, &files, &queries, ts_fmt).unwrap();
+        println!(
+            "[bench] scan(raw alpha + message payload,命中 {}/{}): {:?}",
+            per_filter[0].len(),
+            per_filter[1].len(),
+            t3.elapsed()
+        );
+        assert!(
+            per_filter[0].len() > 3_000_000,
+            "raw 命中应 ~352 万,实际 {}",
+            per_filter[0].len()
+        );
+        assert!(
+            per_filter[1].len() > 3_000_000,
+            "msg 命中应 ~352 万,实际 {}",
+            per_filter[1].len()
+        );
+
+        let t4 = Instant::now();
+        for (qi, q) in queries.iter().enumerate() {
+            let lines = &per_filter[qi];
+            conn.execute_batch("BEGIN").unwrap();
+            let _ = conn.execute(
+                "DELETE FROM filter_hits WHERE filter_id = ?1",
+                params![q.filter_id],
+            );
+            let ins_sql = format!(
+                "INSERT OR IGNORE INTO filter_hits(filter_id, line) VALUES {}",
+                (0..500)
+                    .map(|i| format!("(?{},?{})", i * 2 + 1, i * 2 + 2))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            {
+                let mut ins_full = conn.prepare(&ins_sql).unwrap();
+                let mut ins_one = conn
+                    .prepare("INSERT OR IGNORE INTO filter_hits(filter_id, line) VALUES (?1, ?2)")
+                    .unwrap();
+                let fid: &str = &q.filter_id;
+                let mut lv: Vec<i64> = Vec::with_capacity(500);
+                for chunk in lines.chunks(500) {
+                    if chunk.len() == 500 {
+                        lv.clear();
+                        lv.extend(chunk.iter().map(|&l| l as i64));
+                        let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1000);
+                        for k in 0..500 {
+                            bind.push(&fid);
+                            bind.push(&lv[k]);
+                        }
+                        ins_full.execute(bind.as_slice()).unwrap();
+                    } else {
+                        for &l in chunk {
+                            ins_one.execute(params![q.filter_id, l as i64]).unwrap();
+                        }
+                    }
+                }
+            }
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        println!("[bench] INSERT 2×352 万行: {:?}", t4.elapsed());
+
+        let t5 = Instant::now();
+        let mut out: FilterBatchOut = Vec::new();
+        for q in &queries {
+            out.push((q.filter_id.clone(), filter_hits_join(&conn, &q.filter_id).unwrap()));
+        }
+        println!("[bench] JOIN(2 filter): {:?}", t5.elapsed());
+
+        let t6 = Instant::now();
+        let bytes = encode_filter_batch(&out);
+        println!("[bench] encode: {:?} ({} MB)", t6.elapsed(), bytes.len() / 1048576);
+
+        println!("[bench] 链路总耗时(scan 起): {:?}", t2.elapsed());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
