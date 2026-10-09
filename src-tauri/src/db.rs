@@ -860,7 +860,7 @@ pub async fn db_filters_batch(
             let files: Vec<(i64, String, u32, Vec<u64>)> = files_snapshot(&conn)?
                 .into_iter()
                 .map(|(fid, name, first_line)| {
-                    let off = load_line_offsets(&conn, &fid).unwrap_or_default();
+                    let off = load_line_offsets(&conn, fid).unwrap_or_default();
                     (fid, name, first_line, off)
                 })
                 .collect();
