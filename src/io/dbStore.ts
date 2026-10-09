@@ -83,7 +83,7 @@ export function dbClose(): void {
 
 // ---- 事件索引（键集分页，二进制 SoA 通道） ----
 
-const INDEX_CHUNK = 60_000;
+const INDEX_CHUNK = 200_000;
 
 /** SoA 事件索引：平行数组按 (ts, line) 升序 */
 export interface DbEventIndex {

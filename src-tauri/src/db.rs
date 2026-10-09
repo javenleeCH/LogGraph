@@ -223,6 +223,10 @@ CREATE TABLE IF NOT EXISTS filter_hits (  -- filter 命中结果（rg 扫描后�
   PRIMARY KEY (filter_id, line)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_hits_line ON filter_hits(line);
+CREATE TABLE IF NOT EXISTS filter_meta ( -- filter 定义指纹（命中则跳过 rg 重扫，直接复用 filter_hits）
+  filter_id TEXT PRIMARY KEY,
+  fp        TEXT NOT NULL
+);
 "#;
 
 // ---- db_open：指纹校验 / ts 扫描 ----
@@ -269,6 +273,13 @@ pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult,
                         .map(|v| v == SCHEMA_VERSION)
                         .unwrap_or(false);
                 if ok {
+                // 老库升级：幂等补建 filter_meta（新增表，新库走 SCHEMA）
+                let _ = conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS filter_meta (
+                       filter_id TEXT PRIMARY KEY,
+                       fp        TEXT NOT NULL
+                     );",
+                );
                     // meta 缓存优先（免 COUNT(*) 全索引扫描）；缺省兜底 COUNT
                     let total_events: u32 = conn
                         .query_row(
@@ -637,6 +648,46 @@ fn message_scope_filter(
     Ok(kept)
 }
 
+/// filter 定义指纹：pattern/正则/大小写/scope 任一变化 → 缓存失效重扫。
+/// （目录变化由 cache.db 整库重建保证，无需纳入。）
+fn filter_def_fp(q: &FilterQuery) -> String {
+    let mut h: u64 = 1469598103934665603;
+    let part = format!(
+        "{}\u{0}{}\u{0}{}\u{0}{}\n",
+        q.pattern, q.is_regex, q.case_sensitive, q.scope
+    );
+    for b in part.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    format!("{h:016x}")
+}
+
+/// filter_hits ⋈ line_ts → (line, ts)[]（ts 升序）。rg 扫描后与缓存命中共用。
+fn filter_hits_join(conn: &Connection, filter_id: &str) -> Result<Vec<HitEntry>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT h.line, t.ts FROM filter_hits h
+             JOIN line_ts t ON t.line = h.line
+             WHERE h.filter_id = ?1
+             ORDER BY t.ts, h.line",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![filter_id], |r| {
+            Ok(HitEntry {
+                line: r.get(0)?,
+                ts: r.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows.flatten() {
+        out.push(r);
+    }
+    Ok(out)
+}
+
 /// 运行一个过滤器：rg 引擎直扫原文件 → 命中全局行号 → 写 filter_hits →
 /// JOIN line_ts 返回 (line, ts)[]（按 ts 升序）。
 /// filter 编辑 = 同 filter_id 覆盖重写（事务内 DELETE+INSERT）。
@@ -646,6 +697,20 @@ pub async fn db_filter(q: FilterQuery) -> Result<Vec<HitEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_cache()?;
         let root = cache_root()?;
+
+        // 缓存复用：filter 定义（pattern/regex/大小写/scope）没变且上次已落库 →
+        // 跳过 rg 全目录重扫，直接读 filter_hits。定义指纹不匹配才重扫覆盖。
+        let def_fp = filter_def_fp(&q);
+        let cached: Option<String> = conn
+            .query_row(
+                "SELECT fp FROM filter_meta WHERE filter_id = ?1",
+                params![q.filter_id],
+                |r| r.get(0),
+            )
+            .ok();
+        if cached.as_deref() == Some(def_fp.as_str()) {
+            return filter_hits_join(&conn, &q.filter_id);
+        }
 
         // 1) rg 引擎扫描（raw scope 直接用；message scope = 整行扫描的超集 + 二次校验）
         let mut hits = crate::raw_search::search_dir(
@@ -676,29 +741,13 @@ pub async fn db_filter(q: FilterQuery) -> Result<Vec<HitEntry>, String> {
             }
         }
         conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+        // 定义指纹随结果同事务后写入（结果已提交，指纹单独写；失败仅失去缓存）
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO filter_meta(filter_id, fp) VALUES (?1, ?2)",
+            params![q.filter_id, def_fp],
+        );
 
-        // 3) JOIN line_ts → (line, ts) 按 ts 升序（filter_hits 有 line 主键索引，走 idx）
-        let mut stmt = conn
-            .prepare(
-                "SELECT h.line, t.ts FROM filter_hits h
-                 JOIN line_ts t ON t.line = h.line
-                 WHERE h.filter_id = ?1
-                 ORDER BY t.ts, h.line",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![q.filter_id], |r| {
-                Ok(HitEntry {
-                    line: r.get(0)?,
-                    ts: r.get(1)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for r in rows.flatten() {
-            out.push(r);
-        }
-        Ok(out)
+        filter_hits_join(&conn, &q.filter_id)
     })
     .await
     .map_err(|e| format!("db_filter 任务失败: {e}"))?
@@ -721,6 +770,10 @@ pub async fn db_filter_drop(filter_id: String) -> Result<(), String> {
             params![filter_id],
         )
         .map_err(|e| e.to_string())?;
+        let _ = conn.execute(
+            "DELETE FROM filter_meta WHERE filter_id = ?1",
+            params![filter_id],
+        );
         Ok(())
     })
     .await
@@ -1210,5 +1263,54 @@ mod tests {
             all.contains("SEARCH") && all.contains("idx_line_ts_ts"),
             "query plan 走了全表扫描: {all}"
         );
+    }
+
+    #[test]
+    fn filter_def_fp_stability() {
+        let base = FilterQuery {
+            filter_id: "f1".into(),
+            pattern: "ERROR".into(),
+            is_regex: false,
+            case_sensitive: false,
+            scope: "raw".into(),
+        };
+        assert_eq!(filter_def_fp(&base), filter_def_fp(&base)); // 稳定
+        // 任一定义字段变化 → 指纹变化（缓存失效）；filter_id 不参与
+        for mut q in [
+            FilterQuery { pattern: "WARN".into(), ..base.clone() },
+            FilterQuery { is_regex: true, ..base.clone() },
+            FilterQuery { case_sensitive: true, ..base.clone() },
+            FilterQuery { scope: "message".into(), ..base.clone() },
+        ] {
+            q.filter_id = "other".into();
+            assert_ne!(filter_def_fp(&base), filter_def_fp(&q));
+        }
+        let other_id = FilterQuery { filter_id: "f2".into(), ..base.clone() };
+        assert_eq!(filter_def_fp(&base), filter_def_fp(&other_id));
+    }
+
+    #[test]
+    fn filter_hits_join_orders_by_ts() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        // 行号/时间戳乱序插入 → JOIN 输出必须 ts 升序
+        for (line, ts) in [(30, 300), (10, 200), (20, 100)] {
+            conn.execute(
+                "INSERT INTO line_ts(line, ts) VALUES (?1, ?2)",
+                params![line, ts],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO filter_hits(filter_id, line) VALUES ('f1', ?1)",
+                params![line],
+            )
+            .unwrap();
+        }
+        let out = filter_hits_join(&conn, "f1").unwrap();
+        assert_eq!(
+            out.iter().map(|h| (h.line, h.ts)).collect::<Vec<_>>(),
+            vec![(20, 100), (10, 200), (30, 300)]
+        );
+        assert!(filter_hits_join(&conn, "nope").unwrap().is_empty());
     }
 }
