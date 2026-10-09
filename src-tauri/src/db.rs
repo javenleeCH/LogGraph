@@ -10,7 +10,7 @@
 //! 索引/视口行文本走 `tauri::ipc::Response` 二进制通道（SoA，前端零对象解析）。
 //! 缓存指纹：目录内日志文件 (rel, size, mtime) 的 FNV；schemaVersion=3 不符自动重建。
 
-use crate::parser::timestamp::{extract_timestamp, find_format, detect_timestamp_format};
+use crate::parser::timestamp::{extract_timestamp, find_format, detect_timestamp_format, TsFormat};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
@@ -545,30 +545,92 @@ pub struct FilterQuery {
     pub scope: String,
 }
 
+/// 字节级 JS trim（White_Space + U+FEFF 的 UTF-8 序列全集）。
+/// msg 域精筛用——域匹配走 bytes regex，免整行 utf8 str 化。
+fn js_trim_bytes(b: &[u8]) -> &[u8] {
+    /// b[i..] 起始的空白序列长度（非 0 = 命中）
+    #[inline]
+    fn ws_at(b: &[u8], i: usize) -> usize {
+        match b[i] {
+            c if (0x09..=0x0d).contains(&c) || c == 0x20 => 1,
+            // U+0085 / U+00A0
+            0xc2 if i + 1 < b.len() && (b[i + 1] == 0x85 || b[i + 1] == 0xa0) => 2,
+            // U+1680
+            0xe1 if i + 2 < b.len() && b[i + 1] == 0x9a && b[i + 2] == 0x80 => 3,
+            0xe2 if i + 2 < b.len() => {
+                // U+2000-200A / U+2028 / U+2029 / U+202F（80 前缀）/ U+205F（81 前缀）
+                let (a, c) = (b[i + 1], b[i + 2]);
+                if (a == 0x80 && ((0x80..=0x8a).contains(&c) || c == 0xa8 || c == 0xa9 || c == 0xaf))
+                    || (a == 0x81 && c == 0x9f)
+                {
+                    3
+                } else {
+                    0
+                }
+            }
+            // U+3000
+            0xe3 if i + 2 < b.len() && b[i + 1] == 0x80 && b[i + 2] == 0x80 => 3,
+            // U+FEFF
+            0xef if i + 2 < b.len() && b[i + 1] == 0xbb && b[i + 2] == 0xbf => 3,
+            _ => 0,
+        }
+    }
+    let mut s = 0usize;
+    let mut e = b.len();
+    while s < e {
+        let n = ws_at(b, s);
+        if n == 0 {
+            break;
+        }
+        s += n;
+    }
+    while e > s {
+        // 尾部按最长序列检查（先 3 后 2 后 1）
+        let start = if e >= 3 && ws_at(b, e - 3) == 3 {
+            Some(e - 3)
+        } else if e >= 2 && ws_at(b, e - 2) == 2 {
+            Some(e - 2)
+        } else if ws_at(b, e - 1) == 1 {
+            Some(e - 1)
+        } else {
+            None
+        };
+        match start {
+            Some(st) => e = st,
+            None => break,
+        }
+    }
+    &b[s..e]
+}
+
 /// 单遍多过滤器扫描（文件级并行）。
-/// - 全部 pattern 合成一个**交替正则**在文件全文 find_iter：regex 引擎的
-///   prefilter（memchr/Aho-Corasick SIMD）跳过不匹配字节——与 rg 同款。
-///   （逐行调用 RegexSet::matches 的每行固定引擎开销 × 百万行是性能陷阱。）
-/// - 命中 match → line_offsets 二分行号 → **仅命中行**整行确认 filter 归属
-///   （RegexSet）；同行多 match 由「上一个行号」去重（match 按位置升序）。
-/// - message scope：命中行提取时间戳 → msg 域精筛（msg ⊆ line，整行命中是
-///   msg 命中的必要条件）；无 ts 行 message 域为空 → 不可能命中。
-/// - ^/$ 以 multi_line 语义锚定行边界（与 rg per-line 一致）；CRLF 行尾
-///   `$` 与 \r 相邻的边缘差异不处理（rg 用 crlf terminator）。
-/// - 每文件单线程、行号升序 → 免 sort/dedup。
+/// - **每 expr 独立正则**对文件全文 find_iter：match 直接归属该 expr 的
+///   filter 集（无二次确认）；regex 引擎 prefilter（memchr/Aho-Corasick
+///   SIMD）跳过 miss 字节，与 rg 同款。expr 去重后 K 趟全文扫描（K =
+/// 不同 pattern 数，prefilter 后每趟 ~0.3s/GB）。
+/// - 命中 match → line_offsets 二分行号（库内偏移，免手扫）；同行多
+///   match 由「上一个行号」去重（match 按位置升序）。
+/// - message scope：expr 粗筛（msg ⊆ line，整行命中是必要条件）收集候选
+///   行去重后精筛——ts 只在前 64B 前缀提取（**指定格式**单次调用，探测
+///   失败/格式突变回退全格式），msg 域字节级匹配（免整行 utf8 转换）。
+///   无 ts 行 message 域为空 → 不可能命中。
+/// - ^/$ 以 multi_line 语义锚定行边界；CRLF 行尾 `$` 与 \r 相邻的边缘
+///   差异不处理。
+/// - 每文件单线程、行号升序 → 免 sort/dedup（msg 候选除外，跨 expr 需去重）。
 /// 返回与 queries 同序的全局行号列表。
 #[allow(clippy::type_complexity)]
 fn scan_filters_once(
     root: &Path,
     files: &[(i64, String, u32, Vec<u64>)],
     queries: &[FilterQuery],
+    ts_fmt: Option<&'static TsFormat>,
 ) -> Result<Vec<Vec<u32>>, String> {
     use std::collections::HashMap;
 
-    // ---- pattern 编译（同 expr 多 filter 共享 set 位） ----
+    // ---- pattern 编译（同 expr 多 filter 共享）----
     let mut raw_pats: Vec<String> = Vec::new();
     let mut raw_idx: HashMap<String, usize> = HashMap::new();
-    // set 位 → (query 序号, 是否 message 需精筛)
+    // expr 序号 → (query 序号, 是否 message 需精筛)
     let mut raw_slots: Vec<Vec<(usize, bool)>> = Vec::new();
     let mut msg_pats: Vec<String> = Vec::new();
     let mut msg_idx: HashMap<String, usize> = HashMap::new();
@@ -618,26 +680,19 @@ fn scan_filters_once(
         // 全部 pattern 为空 → 无可扫描（调用方已过滤，防御）
         return Ok(vec![Vec::new(); queries.len()]);
     }
-    // 全文交替正则（multi_line：^/$ 锚定行边界）
-    let alt = raw_pats
-        .iter()
-        .map(|p| format!("(?:{p})"))
-        .collect::<Vec<_>>()
-        .join("|");
-    let alt_re = regex::bytes::RegexBuilder::new(&alt)
-        .multi_line(true)
-        .build()
-        .map_err(|e| format!("构建交替正则失败: {e}"))?;
-    let raw_set = regex::bytes::RegexSet::new(&raw_pats)
-        .map_err(|e| format!("构建 RegexSet 失败: {e}"))?;
-    let msg_set = if msg_pats.is_empty() {
-        None
-    } else {
-        Some(
-            regex::bytes::RegexSet::new(&msg_pats)
-                .map_err(|e| format!("构建 RegexSet 失败: {e}"))?,
-        )
+    // 每 expr 独立正则（multi_line：^/$ 锚定行边界）
+    let build = |pats: &[String]| -> Result<Vec<regex::bytes::Regex>, String> {
+        pats.iter()
+            .map(|p| {
+                regex::bytes::RegexBuilder::new(p)
+                    .multi_line(true)
+                    .build()
+                    .map_err(|e| format!("构建正则失败: {e}"))
+            })
+            .collect()
     };
+    let regexes = build(&raw_pats)?;
+    let msg_regexes = build(&msg_pats)?;
 
     // ---- 文件级并行（stride 交错，first_line 升序 → 大文件分散） ----
     let threads = std::thread::available_parallelism()
@@ -674,47 +729,69 @@ fn scan_filters_once(
                 }
                 v
             };
-            // 全文单趟：alt_re find_iter（引擎 prefilter SIMD 跳过 miss 字节），
-            // 仅命中处反查行号并整行确认归属；同行多 match 用 last_li 去重
-            let mut last_li = usize::MAX;
-            for m in alt_re.find_iter(&bytes) {
-                let li = starts.partition_point(|&s| s <= m.start() as u64) - 1;
-                if li == last_li {
-                    continue;
-                }
-                last_li = li;
-                let s = starts[li] as usize;
-                let e = if li + 1 < starts.len() {
-                    starts[li + 1] as usize - 1 // 剥 \n
-                } else {
-                    bytes.len()
-                };
-                let mut line = &bytes[s..e];
-                if line.last() == Some(&b'\r') {
-                    line = &line[..line.len() - 1];
-                }
-                let global = first_line + li as u32;
-                let m2 = raw_set.matches(line);
-                let mut need_msg = false;
-                for si in m2.iter() {
-                    for &(qi, is_msg) in &raw_slots[si] {
+            // 每 expr 独立 find_iter（prefilter SIMD 跳过 miss 字节）；
+            // match 直接归属该 expr 的 filter 集；同行多 match 用 last_li 去重。
+            // message filter 的行只收集候选（跨 expr 同行重复），统一精筛。
+            let mut msg_candidates: Vec<(usize, u32)> = Vec::new();
+            for (ei, re) in regexes.iter().enumerate() {
+                let mut last_li = usize::MAX;
+                for m in re.find_iter(&bytes) {
+                    let li = starts.partition_point(|&s| s <= m.start() as u64) - 1;
+                    if li == last_li {
+                        continue;
+                    }
+                    last_li = li;
+                    let global = first_line + li as u32;
+                    let mut need_msg = false;
+                    for &(qi, is_msg) in &raw_slots[ei] {
                         if is_msg {
                             need_msg = true;
                         } else {
                             buckets[qi].push(global);
                         }
                     }
+                    if need_msg {
+                        msg_candidates.push((li, global));
+                    }
                 }
-                if need_msg {
-                    let line_str = String::from_utf8_lossy(line);
-                    if let Some(ext) = extract_timestamp(&line_str, None) {
-                        let msg = js_trim(&line_str[ext.end..]);
-                        if let Some(mset) = &msg_set {
-                            let mm = mset.matches(msg.as_bytes());
-                            for msi in mm.iter() {
-                                for &qi in &msg_slots[msi] {
-                                    buckets[qi].push(global);
-                                }
+            }
+            // message 精筛：候选行去重（跨 expr 同行可能重复入列）后逐行
+            // ts 提取 → msg 域匹配
+            if !msg_regexes.is_empty() {
+                msg_candidates.sort_unstable_by_key(|&(li, _)| li);
+                msg_candidates.dedup_by_key(|&(li, _)| li);
+                for (li, global) in msg_candidates {
+                    let s = starts[li] as usize;
+                    let e = if li + 1 < starts.len() {
+                        starts[li + 1] as usize - 1 // 剥 \n
+                    } else {
+                        bytes.len()
+                    };
+                    let mut line = &bytes[s..e];
+                    if line.last() == Some(&b'\r') {
+                        line = &line[..line.len() - 1];
+                    }
+                    // ts 只在前 64B 前缀找（截断回退到 UTF-8 字符边界，
+                    // 避免 lossy 替换改变字节布局）；指定格式失败回退全格式
+                    let mut plen = line.len().min(64);
+                    while plen < line.len() && (line[plen] & 0xc0) == 0x80 {
+                        plen -= 1;
+                    }
+                    let prefix = String::from_utf8_lossy(&line[..plen]);
+                    let ext = match extract_timestamp(&prefix, ts_fmt) {
+                        Some(x) => Some(x),
+                        None if ts_fmt.is_some() => extract_timestamp(&prefix, None),
+                        None => None,
+                    };
+                    let Some(ext) = ext else {
+                        continue; // 无 ts → message 域为空
+                    };
+                    // msg 域 = 原始行 ts 之后（字节级匹配 + 字节级 trim，免整行 str 化）
+                    let msg = js_trim_bytes(&line[ext.end..]);
+                    for (mi, mre) in msg_regexes.iter().enumerate() {
+                        if mre.is_match(msg) {
+                            for &qi in &msg_slots[mi] {
+                                buckets[qi].push(global);
                             }
                         }
                     }
@@ -864,7 +941,15 @@ pub async fn db_filters_batch(
                     (fid, name, first_line, off)
                 })
                 .collect();
-            let per_filter = scan_filters_once(&root, &files, &miss)?;
+            // 时间戳格式探测（首个文件前 10 行）：msg 精筛免每行全格式尝试
+            let ts_fmt = files.first().and_then(|(_fid, name, ..)| {
+                std::fs::read(root.join(name)).ok().and_then(|b| {
+                    let s = String::from_utf8_lossy(&b[..b.len().min(64 * 1024)]);
+                    let lines: Vec<&str> = s.split('\n').take(10).collect();
+                    detect_timestamp_format(&lines)
+                })
+            });
+            let per_filter = scan_filters_once(&root, &files, &miss, ts_fmt)?;
             for (qi, q) in miss.iter().enumerate() {
                 let lines = &per_filter[qi];
                 // 事务覆盖写（同 filter_id 重定义 = 覆盖旧命中）
@@ -1372,7 +1457,7 @@ mod tests {
             q("raw", "plain", false, true, "raw"),     // 整行 → 1
             q("re", "wor.d", true, true, "message"),   // 正则 msg → 2
         ];
-        let r = scan_filters_once(&dir, &files, &queries).unwrap();
+        let r = scan_filters_once(&dir, &files, &queries, None).unwrap();
         assert_eq!(r[0], vec![0, 2, 4]);
         assert_eq!(r[1], vec![1]);
         assert_eq!(r[2], vec![2]);
@@ -1381,15 +1466,15 @@ mod tests {
             q("m", "HELLO", false, false, "message"),
             q("r", "ALPHA", false, false, "raw"),
         ];
-        let r = scan_filters_once(&dir, &files, &queries).unwrap();
+        let r = scan_filters_once(&dir, &files, &queries, None).unwrap();
         assert_eq!(r[0], vec![0, 2, 4]);
         assert_eq!(r[1], vec![0, 4]);
         // 时间戳部分不属于 message 域
-        let r = scan_filters_once(&dir, &files, &[q("t", "10:00:00", false, true, "message")])
+        let r = scan_filters_once(&dir, &files, &[q("t", "10:00:00", false, true, "message")], None)
             .unwrap();
         assert!(r[0].is_empty());
         // 无 ts 行的 message 域视为空 → 不可能命中（即使整行含 pattern）
-        let r = scan_filters_once(&dir, &files, &[q("p", "plain", false, true, "message")])
+        let r = scan_filters_once(&dir, &files, &[q("p", "plain", false, true, "message")], None)
             .unwrap();
         assert!(r[0].is_empty());
         // 同 pattern 多 filter 共享 set 位，raw/message 各自分桶
@@ -1397,14 +1482,16 @@ mod tests {
             q("a", "hello", false, true, "raw"),
             q("b", "hello", false, true, "message"),
         ];
-        let r = scan_filters_once(&dir, &files, &queries).unwrap();
+        let r = scan_filters_once(&dir, &files, &queries, None).unwrap();
         assert_eq!(r[0], vec![0, 2, 4]);
         assert_eq!(r[1], vec![0, 2, 4]);
         // ^/$ 按行边界锚定（multi_line）：「no ts」仅在行 1 行尾
-        let r = scan_filters_once(&dir, &files, &[q("a", "no ts$", true, true, "raw")]).unwrap();
+        let r = scan_filters_once(&dir, &files, &[q("a", "no ts$", true, true, "raw")], None)
+            .unwrap();
         assert_eq!(r[0], vec![1]);
         // 空行（两文件尾空段 = 全局行 3、5）：^$ 只命中空行
-        let r = scan_filters_once(&dir, &files, &[q("e", "^$", true, true, "raw")]).unwrap();
+        let r = scan_filters_once(&dir, &files, &[q("e", "^$", true, true, "raw")], None)
+            .unwrap();
         assert_eq!(r[0], vec![3, 5]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
