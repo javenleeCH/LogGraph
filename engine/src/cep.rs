@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 // ---- 请求 DTO ----
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct GroupSpec {
     pub group_id: String,
     pub filter_ids: Vec<String>,
@@ -27,6 +28,7 @@ pub struct GroupSpec {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct EdgeSpec {
     pub id: String,
     pub from_filter_id: String,

@@ -4,7 +4,9 @@
 
 > 你可以定义**多条正则/关键词过滤器**，每条过滤器对应一条**堆叠的时间线轨道（lane）**，共享同一根时间轴。通过轨道间的**垂直对齐**，多个搜索结果之间基于时间维度的关联一目了然——无需像 Notepad++ 那样靠人工对照前后时间戳来判断。
 
-在此之上，logGraph 还支持把过滤器组织成**分组（group）**，用类 EPL/CEP 的**序列模式**（顺序 / 禁止 / 汇聚 / 分支 / 周期 / 可选 / 循环计数…）在时间轴上自动匹配事件链，实现故障规则的图形化编排与自动检测；桌面端对超大日志目录（GB 级）提供 **rg 直扫 + 瘦 SQL** 的大数据架构。
+在此之上，logGraph 还支持把过滤器组织成**分组（group）**，用类 EPL/CEP 的**序列模式**（顺序 / 禁止 / 汇聚 / 分支 / 周期 / 可选 / 循环计数…）在时间轴上自动匹配事件链，实现故障规则的图形化编排与自动检测。
+
+架构分三层：**引擎（纯 Rust：rg 直扫 + CEP）+ Tauri 薄壳 + React UI**。引擎同时提供**命令行 CLI**，第一版**零数据库依赖**（不引入 SQLite，扫描/解析/匹配全程流式、内存中只留命中行）；桌面端对超大日志目录（GB 级）另有 **rg 直扫 + 瘦 SQL** 的可选驻留路径。
 
 ## ✨ 特性
 
@@ -31,6 +33,13 @@
 - **结果消费**：详情面板「匹配结果」Tab 展示匹配链 / 异常列表，支持检索与 focusEvent 定位回时间线。
 - **建边手势**：拖拽 = `seq`，`Shift` = AND，`Alt` = OR，`Ctrl/⌘` = OPT，自环 = periodic。
 - 设计文档见 [`plans/pattern-family-spec.md`](plans/pattern-family-spec.md)、[`plans/epl-cep-spec.md`](plans/epl-cep-spec.md)。
+
+### 引擎 CLI（无数据库）
+
+- **rg 同内核全家桶**：`ignore`（尊重 `.gitignore` / `.ignore` / `.rgignore` / 全局 gitignore / `info/exclude`，默认跳过隐藏文件）+ `grep-searcher`（mmap + SIMD + memchr）+ `grep-regex`，速度与语义对齐命令行 rg。
+- **rg 没有的 CEP**：一条命令完成「多过滤器扫描 → 时间戳提取 → 序列模式匹配」，直接输出匹配链 / NOT 违规 / 边统计。
+- **开关**：`-i` 忽略大小写、`-F` 纯文本（默认正则）、`-g` glob（`!` 排除，可多次）、`--hidden`、`--no-ignore`、`--json` 结构化输出。
+- 规则样例见 [`sample/cep-rules.example.json`](sample/cep-rules.example.json)。
 
 ### 大规模日志（桌面端 dbMode）
 
@@ -64,7 +73,43 @@ npm run tauri:dev  # 桌面开发模式（自动起 vite + cargo build 后打开
 npm run tauri:build  # 打包桌面安装包（产物在 src-tauri/target/release/bundle/）
 
 npm run test:wasm  # wasm 正则引擎冒烟测试（12 项）
-cd src-tauri && cargo test   # Rust 侧单测
+
+# 引擎 CLI（纯 Rust，无数据库）
+cargo run -p loggraph-cli -- search sample -i "ERROR|FATAL"
+cargo run -p loggraph-cli -- cep sample -R sample/cep-rules.example.json
+cargo install --path cli   # 安装 loggraph 命令到 PATH
+
+cargo test -p loggraph-engine   # 引擎单测（19 项）
+cd src-tauri && cargo test      # 桌面侧单测
+```
+
+### CLI 用法
+
+```bash
+# 搜索（默认正则，与 rg 一致；-F 切字面量）
+loggraph search <文件或目录> <模式> [-i] [-F] [-g '<glob>'] [--hidden] [--no-ignore] [--json]
+
+# CEP：规则文件描述过滤器与分组/边
+loggraph cep <文件或目录> -R <rules.json> [--json]
+```
+
+`rules.json` 格式（camelCase，与 UI 数据模型一致）：
+
+```json
+{
+  "filters": [
+    { "id": "A", "pattern": "启动完成", "isRegex": false, "caseSensitive": true }
+  ],
+  "groups": [
+    {
+      "groupId": "g1", "filterIds": ["A", "B"], "scope": "global",
+      "edges": [
+        { "id": "e1", "fromFilterId": "A", "toFilterId": "B",
+          "kind": "seq", "maxGapMs": 20000 }
+      ]
+    }
+  ]
+}
 ```
 
 打开应用后：
@@ -157,8 +202,10 @@ thread/level 提取、行分割、稳定排序、skipped 统计）：
 | 节点画布 | @xyflow/react v12（ReactFlow） |
 | 状态管理 | Zustand 5 |
 | 样式 | CSS Modules |
+| 核心引擎 | Rust：`ignore` + `grep-searcher` + `grep-regex` + `regex`（第一版无数据库） |
+| 引擎 CLI | clap v4（`loggraph` 命令，search / cep 两个子命令） |
 | 桌面打包 | Tauri v2（Rust + WebView2 / WKWebView） |
-| 桌面数据层 | grep-searcher（rg 内核直扫）+ rusqlite（瘦 SQL） |
+| 桌面数据层 | grep-searcher（rg 内核直扫）+ rusqlite（可选瘦 SQL 驻留） |
 | Web 正则引擎 | wasm-bindgen 编译的 Rust `regex` crate |
 
 ## 🗂️ 项目结构
@@ -210,12 +257,20 @@ src/
     ToastHost.tsx               # Toast 通知 + 忙碌指示
     ParserDriftBanner.tsx       # 双引擎解析漂移告警横幅
     ManualCopyDialog.tsx        # 复制兜底（剪贴板不可用手动复制）
+engine/                         # 纯 Rust 引擎（无 tauri、第一版无数据库）
+  src/
+    search.rs                   # rg 直扫（grep-searcher + grep-regex）+ ignore 遍历
+    parser/timestamp.rs         # 时间戳探测/提取（5 格式）
+    cep.rs                      # CEP 序列匹配纯算法（seq/not/and/or…）
+    pipeline.rs                 # 无数据库流水线：扫描→时间戳→CEP
+  examples/                     # rg_scan / walk_list 实测
+cli/                            # 引擎 CLI（loggraph 命令，clap v4）
 src-tauri/
   src/
     parser/                     # Rust 解析引擎（parse_log / parse_dir，语义对齐 JS）
     raw_search.rs               # rg 直扫引擎（grep-searcher 封装）
     db.rs                       # 瘦 SQL（指纹缓存 / line_ts / filter_hits / 按需取数）
-    sequence.rs                 # 序列下推（db_run_sequences）
+    sequence.rs                 # 序列下推（db_run_sequences，待改为转发 engine）
   tauri.conf.json               # 窗口 / 构建 / 打包配置
   capabilities/default.json     # 对话框 + 文件系统权限
 filter-wasm/                    # wasm crate：Rust regex 编译给浏览器端

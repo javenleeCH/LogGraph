@@ -1,0 +1,18 @@
+{
+  "filters": [
+    { "id": "A", "pattern": "Startup phase complete", "isRegex": false, "caseSensitive": true },
+    { "id": "B", "pattern": "Upstream recovered", "isRegex": false, "caseSensitive": true },
+    { "id": "C", "pattern": "Connection reset", "isRegex": false, "caseSensitive": true }
+  ],
+  "groups": [
+    {
+      "groupId": "startup",
+      "filterIds": ["A", "B", "C"],
+      "scope": "global",
+      "edges": [
+        { "id": "e_seq", "fromFilterId": "A", "toFilterId": "B", "kind": "seq", "maxGapMs": 20000 },
+        { "id": "e_not", "fromFilterId": "A", "toFilterId": "C", "kind": "not", "maxGapMs": 20000 }
+      ]
+    }
+  ]
+}

@@ -129,6 +129,76 @@ fn search_file_with(path: &Path, matcher: &RegexMatcher) -> Result<FileHits, Str
     Ok(FileHits { path: path.to_path_buf(), hits: sink.hits })
 }
 
+/// 目录遍历选项（对齐 rg 语义）
+#[derive(Debug, Clone, Default)]
+pub struct WalkOptions {
+    /// 搜索隐藏文件/目录（rg `--hidden`）；默认跳过
+    pub hidden: bool,
+    /// 不尊重任何 ignore 规则（rg `--no-ignore`）
+    pub no_ignore: bool,
+    /// glob 过滤（rg `-g`，`!` 前缀为排除），可多条
+    pub globs: Vec<String>,
+    /// 扩展名白名单（如 ["log","txt"]）；**空 = 不限制**（rg 默认不限制）
+    pub exts: Vec<String>,
+}
+
+/// 目录遍历：基于 rg 的 `ignore` 内核，尊重 `.gitignore` / `.ignore` /
+/// `.rgignore` / 全局 gitignore / `$GIT_DIR/info/exclude`，默认跳过隐藏文件。
+/// `root` 为文件时直接返回它。
+pub fn walk(root: &Path, opts: &WalkOptions) -> Result<Vec<PathBuf>, String> {
+    if root.is_file() {
+        return Ok(vec![root.to_path_buf()]);
+    }
+    let mut wb = ignore::WalkBuilder::new(root);
+    wb.hidden(!opts.hidden)
+        .parents(true)
+        .git_ignore(!opts.no_ignore)
+        .git_global(!opts.no_ignore)
+        .git_exclude(!opts.no_ignore)
+        .ignore(!opts.no_ignore);
+    // rg 额外读取 .rgignore
+    wb.add_custom_ignore_filename(".rgignore");
+    // rg -g：overrides（whitelist + ! 排除），与 rg 同一实现路径
+    if !opts.globs.is_empty() {
+        let mut ob = ignore::overrides::OverrideBuilder::new(root);
+        for g in &opts.globs {
+            ob.add(g).map_err(|e| format!("非法 glob '{g}': {e}"))?;
+        }
+        let overrides = ob.build().map_err(|e| format!("glob 规则构建失败: {e}"))?;
+        wb.overrides(overrides);
+    }
+
+    let mut out = Vec::new();
+    for entry in wb.build() {
+        let entry = entry.map_err(|e| format!("遍历 {} 失败: {e}", root.display()))?;
+        let p = entry.path();
+        let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+        if is_file {
+            if !opts.exts.is_empty() {
+                let ok = p
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| opts.exts.iter().any(|e| e == x))
+                    .unwrap_or(false);
+                if !ok {
+                    continue;
+                }
+            }
+            out.push(p.to_path_buf());
+        }
+    }
+    Ok(out)
+}
+
+/// 便捷封装：`exts` 为空 = 不限制扩展名（rg 语义）
+pub fn walk_files(root: &Path, exts: &[&str]) -> Vec<PathBuf> {
+    let opts = WalkOptions {
+        exts: exts.iter().map(|s| s.to_string()).collect(),
+        ..WalkOptions::default()
+    };
+    walk(root, &opts).unwrap_or_default()
+}
+
 /// 多文件并行直扫（按文件并行，文件内有序；输出顺序与输入一致）
 pub fn search_all(paths: &[PathBuf], pattern: &Pattern) -> Result<(Vec<FileHits>, SearchStats), String> {
     let start = Instant::now();

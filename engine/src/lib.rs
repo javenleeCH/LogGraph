@@ -4,6 +4,8 @@
 //! - [`cep`]：EPL/CEP 风格的事件序列模式匹配（seq / not / and / or…）
 
 pub mod cep;
+pub mod parser;
+pub mod pipeline;
 pub mod search;
 
-pub use search::{FileHits, Hit, Pattern, SearchStats};
+pub use search::{walk_files, FileHits, Hit, Pattern, SearchStats};
