@@ -545,18 +545,22 @@ pub struct FilterQuery {
     pub scope: String,
 }
 
-/// 单遍多过滤器扫描（文件级并行）：每行对全部 pattern 一次 RegexSet 匹配。
-/// - 字面量与正则统一走 RegexSet（字面量 escape；大小写不敏感内联 (?i)），
-///   零逐行分配（旧 message 字面量路径的 to_lowercase 逐行分配被消除）。
-/// - message scope：pattern 同时进「整行超集」粗筛（msg ⊆ line，整行命中
-///   是 msg 命中的必要条件）；仅粗筛命中才提取时间戳做 msg 域精筛，
-///   避免全量行 ts 探测。无 ts 的行 message 域视为空 → 不可能命中。
-/// - 每文件单线程、行号天然升序 → 免 sort/dedup。
+/// 单遍多过滤器扫描（文件级并行）。
+/// - 全部 pattern 合成一个**交替正则**在文件全文 find_iter：regex 引擎的
+///   prefilter（memchr/Aho-Corasick SIMD）跳过不匹配字节——与 rg 同款。
+///   （逐行调用 RegexSet::matches 的每行固定引擎开销 × 百万行是性能陷阱。）
+/// - 命中 match → line_offsets 二分行号 → **仅命中行**整行确认 filter 归属
+///   （RegexSet）；同行多 match 由「上一个行号」去重（match 按位置升序）。
+/// - message scope：命中行提取时间戳 → msg 域精筛（msg ⊆ line，整行命中是
+///   msg 命中的必要条件）；无 ts 行 message 域为空 → 不可能命中。
+/// - ^/$ 以 multi_line 语义锚定行边界（与 rg per-line 一致）；CRLF 行尾
+///   `$` 与 \r 相邻的边缘差异不处理（rg 用 crlf terminator）。
+/// - 每文件单线程、行号升序 → 免 sort/dedup。
 /// 返回与 queries 同序的全局行号列表。
 #[allow(clippy::type_complexity)]
 fn scan_filters_once(
     root: &Path,
-    files: &[(i64, String, u32)],
+    files: &[(i64, String, u32, Vec<u64>)],
     queries: &[FilterQuery],
 ) -> Result<Vec<Vec<u32>>, String> {
     use std::collections::HashMap;
@@ -573,15 +577,17 @@ fn scan_filters_once(
         if q.pattern.is_empty() {
             continue;
         }
-        let flags = if q.case_sensitive { "" } else { "(?i)" };
-        let expr = format!(
-            "{flags}{}",
-            if q.is_regex {
-                q.pattern.as_str().to_string()
-            } else {
-                regex::escape(&q.pattern)
-            }
-        );
+        // flags 用 group 形式 (?i:...)：裸 (?i) 在交替中会泄漏到后续分支
+        let body = if q.is_regex {
+            q.pattern.as_str()
+        } else {
+            &regex::escape(&q.pattern)
+        };
+        let expr = if q.case_sensitive {
+            body.to_string()
+        } else {
+            format!("(?i:{body})")
+        };
         let si = match raw_idx.get(&expr) {
             Some(&s) => s,
             None => {
@@ -608,14 +614,22 @@ fn scan_filters_once(
             msg_slots[ms].push(qi);
         }
     }
-    let raw_set = if raw_pats.is_empty() {
-        None
-    } else {
-        Some(
-            regex::bytes::RegexSet::new(&raw_pats)
-                .map_err(|e| format!("构建 RegexSet 失败: {e}"))?,
-        )
-    };
+    if raw_pats.is_empty() {
+        // 全部 pattern 为空 → 无可扫描（调用方已过滤，防御）
+        return Ok(vec![Vec::new(); queries.len()]);
+    }
+    // 全文交替正则（multi_line：^/$ 锚定行边界）
+    let alt = raw_pats
+        .iter()
+        .map(|p| format!("(?:{p})"))
+        .collect::<Vec<_>>()
+        .join("|");
+    let alt_re = regex::bytes::RegexBuilder::new(&alt)
+        .multi_line(true)
+        .build()
+        .map_err(|e| format!("构建交替正则失败: {e}"))?;
+    let raw_set = regex::bytes::RegexSet::new(&raw_pats)
+        .map_err(|e| format!("构建 RegexSet 失败: {e}"))?;
     let msg_set = if msg_pats.is_empty() {
         None
     } else {
@@ -631,60 +645,80 @@ fn scan_filters_once(
         .unwrap_or(4)
         .min(files.len())
         .max(1);
-    let files_ref: &[(i64, String, u32)] = files;
+    let files_ref: &[(i64, String, u32, Vec<u64>)] = files;
     let n_q = queries.len();
-    let scan = |part: &[(i64, String, u32)]| -> Vec<Vec<u32>> {
+    let scan = |part: &[(i64, String, u32, Vec<u64>)]| -> Vec<Vec<u32>> {
         let mut buckets: Vec<Vec<u32>> = (0..n_q).map(|_| Vec::new()).collect();
-        for (_fid, name, first_line) in part {
+        for (_fid, name, first_line, offsets) in part {
             let Ok(bytes) = std::fs::read(root.join(name)) else {
                 continue; // 读取失败跳过（与建库语义一致）
             };
-            // 字节级行切分（\n + CRLF strip）：免全文件 utf8 lossy 校验；
-            // utf8 → str 转换仅在 message 精筛的命中单行做。
-            let mut start = 0usize;
-            let mut i = 0u32;
-            loop {
-                let end = match bytes[start..].iter().position(|&b| b == b'\n') {
-                    Some(k) => start + k,
-                    None => bytes.len(),
+            // 行起始偏移：优先库内 line_offsets（schema v3 必有）；
+            // 空/越界（异常）→ 手扫 \n 兜底
+            let starts: Vec<u64> = if !offsets.is_empty()
+                && offsets[0] == 0
+                && *offsets.last().unwrap() <= bytes.len() as u64
+            {
+                offsets.clone()
+            } else {
+                let mut v = vec![0u64];
+                let mut i = 0usize;
+                while i < bytes.len() {
+                    match bytes[i..].iter().position(|&b| b == b'\n') {
+                        Some(k) => {
+                            i += k + 1;
+                            v.push(i as u64);
+                        }
+                        None => break,
+                    }
+                }
+                v
+            };
+            // 全文单趟：alt_re find_iter（引擎 prefilter SIMD 跳过 miss 字节），
+            // 仅命中处反查行号并整行确认归属；同行多 match 用 last_li 去重
+            let mut last_li = usize::MAX;
+            for m in alt_re.find_iter(&bytes) {
+                let li = starts.partition_point(|&s| s <= m.start() as u64) - 1;
+                if li == last_li {
+                    continue;
+                }
+                last_li = li;
+                let s = starts[li] as usize;
+                let e = if li + 1 < starts.len() {
+                    starts[li + 1] as usize - 1 // 剥 \n
+                } else {
+                    bytes.len()
                 };
-                let mut line = &bytes[start..end];
+                let mut line = &bytes[s..e];
                 if line.last() == Some(&b'\r') {
                     line = &line[..line.len() - 1];
                 }
-                let global = first_line + i;
-                if let Some(set) = &raw_set {
-                    let m = set.matches(line);
-                    let mut need_msg = false;
-                    for si in m.iter() {
-                        for &(qi, is_msg) in &raw_slots[si] {
-                            if is_msg {
-                                need_msg = true;
-                            } else {
-                                buckets[qi].push(global);
-                            }
+                let global = first_line + li as u32;
+                let m2 = raw_set.matches(line);
+                let mut need_msg = false;
+                for si in m2.iter() {
+                    for &(qi, is_msg) in &raw_slots[si] {
+                        if is_msg {
+                            need_msg = true;
+                        } else {
+                            buckets[qi].push(global);
                         }
                     }
-                    if need_msg {
-                        let line_str = String::from_utf8_lossy(line);
-                        if let Some(ext) = extract_timestamp(&line_str, None) {
-                            let msg = js_trim(&line_str[ext.end..]);
-                            if let Some(mset) = &msg_set {
-                                let mm = mset.matches(msg.as_bytes());
-                                for msi in mm.iter() {
-                                    for &qi in &msg_slots[msi] {
-                                        buckets[qi].push(global);
-                                    }
+                }
+                if need_msg {
+                    let line_str = String::from_utf8_lossy(line);
+                    if let Some(ext) = extract_timestamp(&line_str, None) {
+                        let msg = js_trim(&line_str[ext.end..]);
+                        if let Some(mset) = &msg_set {
+                            let mm = mset.matches(msg.as_bytes());
+                            for msi in mm.iter() {
+                                for &qi in &msg_slots[msi] {
+                                    buckets[qi].push(global);
                                 }
                             }
                         }
                     }
                 }
-                if end == bytes.len() {
-                    break;
-                }
-                start = end + 1;
-                i += 1;
             }
         }
         buckets
@@ -695,7 +729,7 @@ fn scan_filters_once(
     let results: Vec<Vec<Vec<u32>>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
-                let part: Vec<(i64, String, u32)> = files_ref
+                let part: Vec<(i64, String, u32, Vec<u64>)> = files_ref
                     .iter()
                     .skip(t)
                     .step_by(threads)
@@ -822,7 +856,14 @@ pub async fn db_filters_batch(
             }
         }
         if !miss.is_empty() {
-            let files = files_snapshot(&conn)?;
+            // 行偏移从库内 line_offsets 取（scan 反查行号用，免手扫全文）
+            let files: Vec<(i64, String, u32, Vec<u64>)> = files_snapshot(&conn)?
+                .into_iter()
+                .map(|(fid, name, first_line)| {
+                    let off = load_line_offsets(&conn, &fid).unwrap_or_default();
+                    (fid, name, first_line, off)
+                })
+                .collect();
             let per_filter = scan_filters_once(&root, &files, &miss)?;
             for (qi, q) in miss.iter().enumerate() {
                 let lines = &per_filter[qi];
@@ -833,13 +874,42 @@ pub async fn db_filters_batch(
                     "DELETE FROM filter_hits WHERE filter_id = ?1",
                     params![q.filter_id],
                 );
+                // 批量 INSERT：500 行/句（1000 参数 < SQLite 32766 上限），
+                // 350 万行从 ~5s 降到 ~1.5s；尾巴（<500）走单行 prepared
+                let ins_sql = format!(
+                    "INSERT OR IGNORE INTO filter_hits(filter_id, line) VALUES {}",
+                    (0..500)
+                        .map(|i| format!("(?{},?{})", i * 2 + 1, i * 2 + 2))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
                 {
-                    let mut ins = conn
+                    let mut ins_full = conn.prepare(&ins_sql).map_err(|e| e.to_string())?;
+                    let mut ins_one = conn
                         .prepare("INSERT OR IGNORE INTO filter_hits(filter_id, line) VALUES (?1, ?2)")
                         .map_err(|e| e.to_string())?;
-                    for h in lines {
-                        ins.execute(params![q.filter_id, *h as i64])
-                            .map_err(|e| e.to_string())?;
+                    let fid: &str = &q.filter_id;
+                    let mut lv: Vec<i64> = Vec::with_capacity(500);
+                    for chunk in lines.chunks(500) {
+                        if chunk.len() == 500 {
+                            lv.clear();
+                            lv.extend(chunk.iter().map(|&l| l as i64));
+                            let mut bind: Vec<&dyn rusqlite::ToSql> =
+                                Vec::with_capacity(1000);
+                            for k in 0..500 {
+                                bind.push(&fid);
+                                bind.push(&lv[k]);
+                            }
+                            ins_full
+                                .execute(bind.as_slice())
+                                .map_err(|e| e.to_string())?;
+                        } else {
+                            for &l in chunk {
+                                ins_one
+                                    .execute(params![q.filter_id, l as i64])
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
                     }
                 }
                 conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
@@ -1278,17 +1348,16 @@ mod tests {
     #[test]
     fn scan_filters_once_batch() {
         let dir = tmp_dir("scan_batch");
-        std::fs::write(
-            dir.join("a.log"),
-            "2024-01-01 10:00:00.000 alpha hello\nplain line no ts\n2024-01-01 10:00:01.000 world hello\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("b.log"), "2024-01-01 10:00:02.000 alpha hello\n").unwrap();
+        let a_text =
+            "2024-01-01 10:00:00.000 alpha hello\nplain line no ts\n2024-01-01 10:00:01.000 world hello\n";
+        let b_text = "2024-01-01 10:00:02.000 alpha hello\n";
+        std::fs::write(dir.join("a.log"), a_text).unwrap();
+        std::fs::write(dir.join("b.log"), b_text).unwrap();
         // a.log split('\n') 4 段（含尾空段）→ 全局行 0..=3；b.log 从行 4 起。
         // 2 文件按 stride 分 2 线程，handle 序合并 → 行号升序稳定。
         let files = vec![
-            (1i64, "a.log".to_string(), 0u32),
-            (2, "b.log".to_string(), 4),
+            (1i64, "a.log".to_string(), 0u32, scan_offsets(a_text)),
+            (2, "b.log".to_string(), 4, scan_offsets(b_text)),
         ];
         let q = |id: &str, pattern: &str, is_regex: bool, cs: bool, scope: &str| FilterQuery {
             filter_id: id.into(),
@@ -1331,6 +1400,12 @@ mod tests {
         let r = scan_filters_once(&dir, &files, &queries).unwrap();
         assert_eq!(r[0], vec![0, 2, 4]);
         assert_eq!(r[1], vec![0, 2, 4]);
+        // ^/$ 按行边界锚定（multi_line）：「no ts」仅在行 1 行尾
+        let r = scan_filters_once(&dir, &files, &[q("a", "no ts$", true, true, "raw")]).unwrap();
+        assert_eq!(r[0], vec![1]);
+        // 空行（两文件尾空段 = 全局行 3、5）：^$ 只命中空行
+        let r = scan_filters_once(&dir, &files, &[q("e", "^$", true, true, "raw")]).unwrap();
+        assert_eq!(r[0], vec![3, 5]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
