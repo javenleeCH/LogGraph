@@ -2,17 +2,21 @@
 //! 只保留命中行，不引入 SQLite 等任何数据库。CLI 与 Tauri 层共用此入口。
 
 use crate::cep::{self, GroupSpec, RunSeqResponse, SeqEvent};
+use crate::error::EngineResult;
 use crate::parser::timestamp::{detect_timestamp_format, extract_timestamp, TsFormat};
 use crate::search::{self, Pattern};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// 过滤器定义（= 带 id 的搜索模式）
+/// 过滤器定义（= 带 id 的搜索模式；规则文件 `filters[]` 条目，契约 §3.3：
+/// camelCase + `deny_unknown_fields`，`label` 为展示元数据、引擎忽略）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilterDef {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub pattern: String,
     #[serde(default)]
     pub case_sensitive: bool,
@@ -38,7 +42,7 @@ pub fn run_cep(
     paths: &[PathBuf],
     filters: &[FilterDef],
     groups: &[GroupSpec],
-) -> Result<(RunSeqResponse, PipelineStats), String> {
+) -> EngineResult<(RunSeqResponse, PipelineStats)> {
     // 1) 每个过滤器跑一次 rg 直扫
     let mut hits_by_filter: HashMap<String, Vec<search::FileHits>> = HashMap::new();
     let mut filter_hits_count = HashMap::new();

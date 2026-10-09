@@ -8,6 +8,7 @@ description = "logGraph core engine: ripgrep-style search (grep-searcher) + CEP 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
 # 时间戳解析正则（parser::timestamp）
 regex = "1"
 # rg 同内核：grep-searcher（mmap + SIMD + memchr 行扫描）+ grep-regex（regex-automata 封装）

@@ -1,17 +1,21 @@
 {
+  "$schema": "https://loggraph.dev/schemas/cep-rules-1.schema.json",
+  "version": 1,
+  "description": "示例：启动完成 → 上游恢复的顺序链 + 启动后禁止连接重置",
   "filters": [
-    { "id": "A", "pattern": "Startup phase complete", "isRegex": false, "caseSensitive": true },
-    { "id": "B", "pattern": "Upstream recovered", "isRegex": false, "caseSensitive": true },
-    { "id": "C", "pattern": "Connection reset", "isRegex": false, "caseSensitive": true }
+    { "id": "A", "label": "启动完成", "pattern": "Startup phase complete" },
+    { "id": "B", "label": "上游恢复", "pattern": "Upstream recovered" },
+    { "id": "C", "label": "连接重置", "pattern": "Connection reset" }
   ],
   "groups": [
     {
       "groupId": "startup",
-      "filterIds": ["A", "B", "C"],
+      "label": "启动健康链",
       "scope": "global",
+      "filterIds": ["A", "B", "C"],
       "edges": [
-        { "id": "e_seq", "fromFilterId": "A", "toFilterId": "B", "kind": "seq", "maxGapMs": 20000 },
-        { "id": "e_not", "fromFilterId": "A", "toFilterId": "C", "kind": "not", "maxGapMs": 20000 }
+        { "id": "e_seq", "kind": "seq", "fromFilterId": "A", "toFilterId": "B", "maxGapMs": 20000 },
+        { "id": "e_not", "kind": "not", "fromFilterId": "A", "toFilterId": "C", "maxGapMs": 20000 }
       ]
     }
   ]

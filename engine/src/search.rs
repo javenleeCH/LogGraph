@@ -2,6 +2,7 @@
 //! 的多文件直扫。语义与命令行 rg 对齐：默认 Unicode 行模式、CRLF 自适应、
 //! 命中二进制（NUL）即停。
 
+use crate::error::{EngineError, EngineResult};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, Sink, SinkMatch};
 use serde::{Deserialize, Serialize};
@@ -9,8 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// 搜索模式（对齐前端 Filter 的关键字段）
+/// 搜索模式（对齐前端 Filter 的关键字段；serde 形状 = 契约 §2.2
+/// `{"pattern","caseSensitive","isRegex"}`，未知字段拒绝）
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Pattern {
     /// 用户输入的关键词或正则
     pub pattern: String,
@@ -34,7 +37,8 @@ impl Pattern {
     }
 }
 
-/// 单条命中（1-based 行号 + 去行尾终止符的文本）
+/// 单条命中（1-based 行号 + 去行尾终止符的文本；`line_number` 保持
+/// snake_case，对齐 `rg --json` 先例，契约 §0.3/D4）
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Hit {
     pub line_number: u64,
@@ -48,7 +52,9 @@ pub struct FileHits {
     pub hits: Vec<Hit>,
 }
 
+/// 扫描统计（序列化 camelCase，契约 §5.1）
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchStats {
     pub files_searched: usize,
     pub files_with_matches: usize,
@@ -70,8 +76,8 @@ fn escape_literal(s: &str) -> String {
 }
 
 impl Pattern {
-    /// 编译为 rg 同内核 matcher
-    pub fn compile(&self) -> Result<RegexMatcher, String> {
+    /// 编译为 rg 同内核 matcher（失败 → `E_PATTERN`，契约 §2.2）
+    pub fn compile(&self) -> EngineResult<RegexMatcher> {
         let expr = if self.is_regex {
             self.pattern.clone()
         } else {
@@ -82,7 +88,7 @@ impl Pattern {
         RegexMatcherBuilder::new()
             .case_insensitive(!self.case_sensitive)
             .build(&expr)
-            .map_err(|e| format!("非法正则 '{}': {e}", self.pattern))
+            .map_err(|source| EngineError::InvalidPattern { input: self.pattern.clone(), source })
     }
 }
 
@@ -115,17 +121,20 @@ fn new_searcher() -> Searcher {
 }
 
 /// 直扫单个文件
-pub fn search_file(path: impl AsRef<Path>, pattern: &Pattern) -> Result<FileHits, String> {
+pub fn search_file(path: impl AsRef<Path>, pattern: &Pattern) -> EngineResult<FileHits> {
     let matcher = pattern.compile()?;
     search_file_with(path.as_ref(), &matcher)
 }
 
-fn search_file_with(path: &Path, matcher: &RegexMatcher) -> Result<FileHits, String> {
+fn search_file_with(path: &Path, matcher: &RegexMatcher) -> EngineResult<FileHits> {
     let mut searcher = new_searcher();
     let mut sink = CollectSink { hits: Vec::new() };
-    searcher
-        .search_path(matcher, path, &mut sink)
-        .map_err(|e| format!("扫描 {} 失败: {e}", path.display()))?;
+    searcher.search_path(matcher, path, &mut sink).map_err(|source| {
+        EngineError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::Other, source),
+        }
+    })?;
     Ok(FileHits { path: path.to_path_buf(), hits: sink.hits })
 }
 
@@ -144,8 +153,8 @@ pub struct WalkOptions {
 
 /// 目录遍历：基于 rg 的 `ignore` 内核，尊重 `.gitignore` / `.ignore` /
 /// `.rgignore` / 全局 gitignore / `$GIT_DIR/info/exclude`，默认跳过隐藏文件。
-/// `root` 为文件时直接返回它。
-pub fn walk(root: &Path, opts: &WalkOptions) -> Result<Vec<PathBuf>, String> {
+/// `root` 为文件时直接返回它。glob 非法 → `E_GLOB`，遍历 io 错误 → `E_IO`。
+pub fn walk(root: &Path, opts: &WalkOptions) -> EngineResult<Vec<PathBuf>> {
     if root.is_file() {
         return Ok(vec![root.to_path_buf()]);
     }
@@ -162,15 +171,22 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> Result<Vec<PathBuf>, String> {
     if !opts.globs.is_empty() {
         let mut ob = ignore::overrides::OverrideBuilder::new(root);
         for g in &opts.globs {
-            ob.add(g).map_err(|e| format!("非法 glob '{g}': {e}"))?;
+            ob.add(g)
+                .map_err(|source| EngineError::InvalidGlob { glob: g.clone(), source })?;
         }
-        let overrides = ob.build().map_err(|e| format!("glob 规则构建失败: {e}"))?;
+        let overrides = ob.build().map_err(|source| EngineError::InvalidGlob {
+            glob: opts.globs.join(" "),
+            source,
+        })?;
         wb.overrides(overrides);
     }
 
     let mut out = Vec::new();
     for entry in wb.build() {
-        let entry = entry.map_err(|e| format!("遍历 {} 失败: {e}", root.display()))?;
+        let entry = entry.map_err(|source| EngineError::Io {
+            path: root.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::Other, source),
+        })?;
         let p = entry.path();
         let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
         if is_file {
@@ -200,11 +216,14 @@ pub fn walk_files(root: &Path, exts: &[&str]) -> Vec<PathBuf> {
 }
 
 /// 多文件并行直扫（按文件并行，文件内有序；输出顺序与输入一致）
-pub fn search_all(paths: &[PathBuf], pattern: &Pattern) -> Result<(Vec<FileHits>, SearchStats), String> {
+pub fn search_all(
+    paths: &[PathBuf],
+    pattern: &Pattern,
+) -> EngineResult<(Vec<FileHits>, SearchStats)> {
     let start = Instant::now();
     let matcher = Arc::new(pattern.compile()?);
 
-    let results: Vec<Result<FileHits, String>> = std::thread::scope(|scope| {
+    let results: Vec<EngineResult<FileHits>> = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(paths.len());
         for path in paths {
             let matcher = Arc::clone(&matcher);
@@ -270,6 +289,6 @@ mod tests {
     fn invalid_regex_reported() {
         let p = tmp_log("bad.log", "x\n");
         let r = search_file(&p, &Pattern::regex("(unclosed"));
-        assert!(r.is_err());
+        assert!(matches!(r, Err(EngineError::InvalidPattern { .. })));
     }
 }

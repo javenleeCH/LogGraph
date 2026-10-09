@@ -7,19 +7,26 @@
 //! 当前覆盖（global 作用域）：`seq` / `not` / `and` / `or` 四类边。
 //! 未覆盖（调用方应回退/后续迭代）：`thread` 分桶、`opt`、`periodic`、
 //! 节点循环计数、节点条件表达式——见 [`GroupSpec::is_supported`]。
+//! DTO 形状按契约 §2.4/§3：camelCase + `deny_unknown_fields`，
+//! `toFilterId` 对 and/or 边不提供（S06），多目标走 `toFilterIds`。
 
+use crate::error::EngineResult;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 // ---- 请求 DTO ----
 
 #[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupSpec {
     pub group_id: String,
-    pub filter_ids: Vec<String>,
+    /// 展示名（UI 元数据，引擎忽略，契约 §3.4）
     #[serde(default)]
+    pub label: Option<String>,
+    /// "global" | "thread"（缺省 global，契约 §3.4）
+    #[serde(default = "default_scope")]
     pub scope: String,
+    pub filter_ids: Vec<String>,
     pub edges: Vec<EdgeSpec>,
     #[serde(default)]
     pub node_conditions: Option<HashMap<String, String>>,
@@ -27,23 +34,32 @@ pub struct GroupSpec {
     pub node_counts: Option<HashMap<String, NodeCountSpec>>,
 }
 
+fn default_scope() -> String {
+    "global".to_string()
+}
+
 #[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EdgeSpec {
     pub id: String,
     pub from_filter_id: String,
-    pub to_filter_id: String,
+    /// seq/not/opt/periodic 必填；and/or 禁止（S06，契约 §3.5）
+    #[serde(default)]
+    pub to_filter_id: Option<String>,
+    /// and/or 必填（2..16 项）；其余 kind 禁止（S06）
     #[serde(default)]
     pub to_filter_ids: Option<Vec<String>>,
     /// seq（默认）/ not / and / or / opt / periodic
     #[serde(default)]
     pub kind: Option<String>,
     pub max_gap_ms: i64,
+    /// 仅 periodic（S07）
     #[serde(default)]
     pub period_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct NodeCountSpec {
     #[serde(default)]
     pub min: Option<i64>,
@@ -174,7 +190,8 @@ pub struct SeqResult {
 pub struct RunSeqResponse {
     /// true → 存在引擎当前不支持的 group，调用方应整体回退
     pub fallback: bool,
-    pub results: HashMap<String, SeqResult>,
+    /// BTreeMap：--json 输出按 groupId 字典序（agent 可依赖键序，契约 §5.2）
+    pub results: BTreeMap<String, SeqResult>,
 }
 
 /// 事件源：filter_id -> 按 (ts, id) 升序的事件流
@@ -189,8 +206,18 @@ fn targets_of(e: &EdgeSpec) -> Vec<String> {
     {
         e.to_filter_ids.clone().unwrap()
     } else {
-        vec![e.to_filter_id.clone()]
+        e.to_filter_id.clone().map(|t| vec![t]).unwrap_or_default()
     }
+}
+
+/// 链推进的后继锚点：单目标边即 `toFilterId`；and/or 多目标边取首个目标
+/// （对齐 TS `SequenceMatcher.dfsChain` 用 `e.toFilterId` 作延续锚点的
+/// 语义，UI 约定 toFilterId = 首个目标；契约 §3.5）。
+fn anchor_of(e: &EdgeSpec) -> String {
+    e.to_filter_id
+        .clone()
+        .or_else(|| e.to_filter_ids.as_ref().and_then(|v| v.first().cloned()))
+        .unwrap_or_default()
 }
 
 fn edge_kind(e: &EdgeSpec) -> String {
@@ -359,7 +386,7 @@ fn resolve_chains(edges: &[EdgeSpec]) -> Vec<Vec<EdgeSpec>> {
         flow: &[EdgeSpec],
         out: &mut Vec<Vec<EdgeSpec>>,
     ) {
-        let nexts = all.get(&flow[start].to_filter_id).cloned().unwrap_or_default();
+        let nexts = all.get(&anchor_of(&flow[start])).cloned().unwrap_or_default();
         let mut extended = false;
         for nx in nexts {
             if used.contains(&nx) {
@@ -421,7 +448,7 @@ impl GroupSpec {
 }
 
 /// 对单个 group 跑序列匹配。事件流由 [`EventStore`] 提供（纯算法，不接触存储层）。
-pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> Result<SeqResult, String> {
+pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<SeqResult> {
     let get_events = |fid: &str| -> &[SeqEvent] {
         store.get(fid).map(|v| v.as_slice()).unwrap_or(&[])
     };
@@ -445,11 +472,14 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> Result<SeqResult
         if edge_kind(edge) != "not" {
             continue;
         }
+        let Some(to_fid) = edge.to_filter_id.as_deref() else {
+            continue;
+        };
         let from_events = get_events(&edge.from_filter_id).to_vec();
-        let to_events = get_events(&edge.to_filter_id).to_vec();
+        let to_events = get_events(to_fid).to_vec();
         let no_consumed = HashSet::new();
         for fe in &from_events {
-            let ev_by_target = HashMap::from([(edge.to_filter_id.clone(), to_events.clone())]);
+            let ev_by_target = HashMap::from([(to_fid.to_string(), to_events.clone())]);
             let r = advance_edge(edge, &from_events, &ev_by_target, &no_consumed, fe.ts);
             if let Advance::Violation(tgt) = r {
                 violations.push(NotViolation {
@@ -542,9 +572,9 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> Result<SeqResult
                                         .iter()
                                         .find(|(_, evs)| evs.contains(&mt))
                                         .map(|(k, _)| k.clone())
-                                        .unwrap_or_else(|| edge.to_filter_id.clone())
+                                        .unwrap_or_else(|| anchor_of(edge))
                                 } else {
-                                    edge.to_filter_id.clone()
+                                    anchor_of(edge)
                                 };
                                 steps.push(Step {
                                     edge_id: Some(edge.id.clone()),
@@ -603,7 +633,7 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> Result<SeqResult
 
 /// 批量入口：对每个 group 跑匹配；任一不支持 → fallback=true（调用方整体回退）。
 pub fn run_sequences(groups: &[GroupSpec], store: &EventStore<'_>) -> RunSeqResponse {
-    let mut results: HashMap<String, SeqResult> = HashMap::new();
+    let mut results: BTreeMap<String, SeqResult> = BTreeMap::new();
     let mut fallback = false;
     for spec in groups {
         if !spec.is_supported() {
@@ -637,7 +667,7 @@ mod tests {
         EdgeSpec {
             id: "e1".into(),
             from_filter_id: "A".into(),
-            to_filter_id: "B".into(),
+            to_filter_id: Some("B".into()),
             to_filter_ids: None,
             kind: Some("seq".into()),
             max_gap_ms: 1000,
@@ -652,6 +682,7 @@ mod tests {
         let spec = GroupSpec {
             group_id: "g1".into(),
             filter_ids: vec!["A".into(), "B".into()],
+            label: None,
             scope: "global".into(),
             edges: vec![seq_edge()],
             node_conditions: None,
@@ -674,6 +705,7 @@ mod tests {
         let spec = GroupSpec {
             group_id: "g2".into(),
             filter_ids: vec!["A".into(), "B".into()],
+            label: None,
             scope: "global".into(),
             edges: vec![EdgeSpec { kind: Some("not".into()), ..seq_edge() }],
             node_conditions: None,
@@ -692,11 +724,12 @@ mod tests {
         let spec = GroupSpec {
             group_id: "g3".into(),
             filter_ids: vec!["A".into(), "B".into(), "C".into()],
+            label: None,
             scope: "global".into(),
             edges: vec![EdgeSpec {
                 id: "e_and".into(),
                 from_filter_id: "A".into(),
-                to_filter_id: "B".into(),
+                to_filter_id: None,
                 to_filter_ids: Some(vec!["B".into(), "C".into()]),
                 kind: Some("and".into()),
                 max_gap_ms: 1000,
@@ -715,11 +748,56 @@ mod tests {
         let spec = GroupSpec {
             group_id: "g4".into(),
             filter_ids: vec!["A".into()],
+            label: None,
             scope: "thread".into(),
             edges: vec![],
             node_conditions: None,
             node_counts: None,
         };
         assert!(!spec.is_supported());
+    }
+
+    #[test]
+    fn and_edge_chain_anchor_is_first_target() {
+        // and 边作链中段：锚点 = toFilterIds[0]（B），链 A→(B∧C)→D 中
+        // B 之后应从 edge2（B→D）继续推进
+        let s = store(&[
+            ("A", &[(1, 100)]),
+            ("B", &[(2, 150)]),
+            ("C", &[(3, 160)]),
+            ("D", &[(4, 300)]),
+        ]);
+        let spec = GroupSpec {
+            group_id: "g5".into(),
+            filter_ids: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![
+                EdgeSpec {
+                    id: "e_and".into(),
+                    from_filter_id: "A".into(),
+                    to_filter_id: None,
+                    to_filter_ids: Some(vec!["B".into(), "C".into()]),
+                    kind: Some("and".into()),
+                    max_gap_ms: 1000,
+                    period_ms: None,
+                },
+                EdgeSpec {
+                    id: "e_bd".into(),
+                    from_filter_id: "B".into(),
+                    to_filter_id: Some("D".into()),
+                    to_filter_ids: None,
+                    kind: Some("seq".into()),
+                    max_gap_ms: 1000,
+                    period_ms: None,
+                },
+            ],
+            node_conditions: None,
+            node_counts: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.chains.len(), 1, "应成一条 A→(B∧C)→D 链");
+        let ids: Vec<u32> = r.chains[0].steps.iter().map(|st| st.event.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
     }
 }

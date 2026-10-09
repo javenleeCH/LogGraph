@@ -79,7 +79,7 @@ cargo run -p loggraph-cli -- search sample -i "ERROR|FATAL"
 cargo run -p loggraph-cli -- cep sample -R sample/cep-rules.example.json
 cargo install --path cli   # 安装 loggraph 命令到 PATH
 
-cargo test -p loggraph-engine   # 引擎单测（19 项）
+cargo test -p loggraph-engine   # 引擎单测（42 项：search/parser/cep/rules）
 cd src-tauri && cargo test      # 桌面侧单测
 ```
 
@@ -89,16 +89,26 @@ cd src-tauri && cargo test      # 桌面侧单测
 # 搜索（默认正则，与 rg 一致；-F 切字面量）
 loggraph search <文件或目录> <模式> [-i] [-F] [-g '<glob>'] [--hidden] [--no-ignore] [--json]
 
-# CEP：规则文件描述过滤器与分组/边
-loggraph cep <文件或目录> -R <rules.json> [--json]
+# CEP：`.cep.json` 规则文件描述过滤器与分组/边（先过 schema 校验）
+loggraph cep <文件或目录> -R <rules.cep.json> [--json] [--fail-on-violation] [--fail-on-unsupported]
+
+# 规则文件校验（语法 + schema + 语义 S01–S10 / W01–W05）
+loggraph validate <rules.cep.json> [--json]
+
+# 导出规则 JSON Schema（管道给补全/LSP 用）
+loggraph schema cep
 ```
 
-`rules.json` 格式（camelCase，与 UI 数据模型一致）：
+**退出码**：`0` 成功（含校验通过）｜`1` 无命中 / 校验失败 / `--fail-on-violation` 触发｜`2` 错误（E_IO、E_RULES_* 等，错误信息走 stderr）｜`3` `--fail-on-unsupported` 触发（v1 不支持的特性走了 fallback）。
+
+`.cep.json` 格式（camelCase + `$schema`/`version` 声明，完整契约见 `plans/engine-cli-api-contract.md` §3，示例见 `sample/cep-rules.example.json`）：
 
 ```json
 {
+  "$schema": "https://loggraph.dev/schemas/cep-rules-1.schema.json",
+  "version": 1,
   "filters": [
-    { "id": "A", "pattern": "启动完成", "isRegex": false, "caseSensitive": true }
+    { "id": "A", "label": "启动完成", "pattern": "启动完成", "isRegex": false, "caseSensitive": true }
   ],
   "groups": [
     {
@@ -203,7 +213,7 @@ thread/level 提取、行分割、稳定排序、skipped 统计）：
 | 状态管理 | Zustand 5 |
 | 样式 | CSS Modules |
 | 核心引擎 | Rust：`ignore` + `grep-searcher` + `grep-regex` + `regex`（第一版无数据库） |
-| 引擎 CLI | clap v4（`loggraph` 命令，search / cep 两个子命令） |
+| 引擎 CLI | clap v4（`loggraph` 命令：search / cep / validate / schema 四个子命令） |
 | 桌面打包 | Tauri v2（Rust + WebView2 / WKWebView） |
 | 桌面数据层 | grep-searcher（rg 内核直扫）+ rusqlite（可选瘦 SQL 驻留） |
 | Web 正则引擎 | wasm-bindgen 编译的 Rust `regex` crate |

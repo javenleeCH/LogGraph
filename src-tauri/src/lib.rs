@@ -1,4 +1,5 @@
 mod db;
+mod engine_api;
 mod parser;
 mod sequence;
 
@@ -25,7 +26,11 @@ pub fn run() {
             db::db_reveal_path,
             db::db_open_path,
             db::db_close,
-            sequence::db_run_sequences
+            sequence::db_run_sequences,
+            engine_api::engine_search,
+            engine_api::engine_run_cep,
+            engine_api::engine_validate_rules,
+            engine_api::engine_walk
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
