@@ -14,6 +14,9 @@ perfetto
 # 构建缓存
 tsconfig.tsbuildinfo
 
+# Cargo workspace 构建产物（workspace 根统一 target/）
+/target/
+
 # 前端依赖锁定文件（不入库）
 package-lock.json
 

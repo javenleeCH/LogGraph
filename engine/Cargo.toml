@@ -1,0 +1,13 @@
+[package]
+name = "loggraph-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "logGraph core engine: ripgrep-style search (grep-searcher) + CEP sequence matching"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# rg 同内核：grep-searcher（mmap + SIMD + memchr 行扫描）+ grep-regex（regex-automata 封装）
+grep-searcher = "0.1"
+grep-regex = "0.1"
