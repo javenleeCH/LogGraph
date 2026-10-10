@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLogStore, dbTsByLine } from '../store/logStore';
+import { useLogStore, hitTsByLine } from '../store/logStore';
 import {
   LAYOUT,
   buildVisibleRows,
@@ -63,7 +63,6 @@ export function TimelineCanvas() {
 
   // store 订阅
   const dbMode = useLogStore((s) => s.dbMode);
-  const dbIndex = useLogStore((s) => s.dbIndex);
   const events = useLogStore((s) => s.events);
   const filters = useLogStore((s) => s.filters);
   const matches = useLogStore((s) => s.matches);
@@ -294,7 +293,7 @@ export function TimelineCanvas() {
     const centerTs =
       selectedEventId !== null
         ? st.dbMode
-          ? dbTsByLine(st, selectedEventId)
+          ? hitTsByLine(st, selectedEventId)
           : events.find((e) => e.id === selectedEventId)?.ts ?? null
         : scrubberTs;
     drawCorrelationLinks(rc, filters, matches, centerTs, selectedEventId);
@@ -782,7 +781,7 @@ export function TimelineCanvas() {
       ? dbMode
         ? {
             id: hoveredEventId,
-            ts: dbTsByLine({ dbIndex }, hoveredEventId) ?? 0,
+            ts: hitTsByLine({ matches }, hoveredEventId) ?? 0,
             raw: '',
             message: '',
           }

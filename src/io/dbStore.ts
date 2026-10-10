@@ -1,10 +1,9 @@
 /**
- * v2 数据层桥接：rg 直扫 + 瘦 SQL（plans/v2-rg-sql-architecture.md）。
+ * v4 数据层桥接：便宜通道建库 + 命中缓存。
  *
- * - 打开目录：db_open（指纹缓存 / ts 扫描建瘦表，带进度）
- * - 事件索引：db_event_index_chunk 键集分页（line, ts）
- * - 过滤：db_filters_batch（单遍批量扫描 + filter_hits 落库）→ 二进制 (line, ts)[]
- * - 详情/上下文：db_context_lines / db_line（mmap 直读原文件）
+ * - 打开目录：db_open（读 + 行偏移 + 计数 + 首/末行 ts，带进度；无逐行事件索引）
+ * - 过滤：db_filters_batch（单遍批量扫描，命中行 ts 内联解析）→ 二进制 (line, ts)[]
+ * - 详情/上下文：db_lines_by_ids / db_line（行偏移 seek 直读原文件）
  */
 
 import { isTauri } from '../lib/tauri';
@@ -14,17 +13,14 @@ import { isTauri } from '../lib/tauri';
 export interface DbOpenResult {
   cacheHit: boolean;
   totalLines: number;
-  totalEvents: number;
   skipped: number;
   fileCount: number;
   timestampFormatId: string | null;
+  /** 时间轴范围（epoch ms）；目录无任何 ts → null（退回非 dbMode） */
+  rangeStart: number | null;
+  rangeEnd: number | null;
 }
 
-/** db_events_in_window 条目（line + ts，按 ts 升序） */
-export interface DbHitEntry {
-  line: number;
-  ts: number;
-}
 
 /** 文件清单条目（db_files：firstLine 升序） */
 export interface DbFileInfo {
@@ -62,7 +58,7 @@ export async function dbOpen(
     if (
       !r ||
       typeof r.totalLines !== 'number' ||
-      typeof r.totalEvents !== 'number'
+      (r.rangeStart !== null && typeof r.rangeStart !== 'number')
     ) {
       console.warn('[dbStore] db_open 返回形状异常', r);
       return null;
@@ -81,62 +77,6 @@ export function dbClose(): void {
   invoke('db_close').catch(() => {});
 }
 
-// ---- 事件索引（键集分页，二进制 SoA 通道） ----
-
-const INDEX_CHUNK = 200_000;
-
-/** SoA 事件索引：平行数组按 (ts, line) 升序 */
-export interface DbEventIndex {
-  count: number;
-  lines: Uint32Array;
-  ts: Float64Array;
-}
-
-/**
- * 拉取全量事件索引（二进制 SoA，零对象解析）。
- * 每块字节布局（Rust db_event_index_chunk）：
- * `[count u32][pad u32][ts × count f64 LE][line × count u32 LE]`
- * 注意：首块用 null 作为「无下界」哨兵（Rust 侧 after_ts: Option<i64>）。
- */
-export async function fetchEventIndex(
-  totalEvents: number,
-  onProgress?: (frac: number) => void,
-): Promise<DbEventIndex> {
-  const lines = new Uint32Array(totalEvents);
-  const ts = new Float64Array(totalEvents);
-  let filled = 0;
-  let afterTs: number | null = null;
-  let afterLine = 0;
-  while (filled < totalEvents) {
-    const buf = (await invoke('db_event_index_chunk', {
-      afterTs,
-      afterLine,
-      max: INDEX_CHUNK,
-    })) as ArrayBuffer;
-    if (!(buf instanceof ArrayBuffer) || buf.byteLength < 8) break;
-    const count = new Uint32Array(buf, 0, 1)[0];
-    if (count === 0) break;
-    const partLines = new Uint32Array(buf, 8 + count * 8, count);
-    const partTs = new Float64Array(buf, 8, count);
-    lines.set(partLines, filled);
-    ts.set(partTs, filled);
-    filled += count;
-    afterLine = partLines[count - 1];
-    afterTs = partTs[count - 1];
-    onProgress?.(filled / Math.max(1, totalEvents));
-    const { promise: yieldToUi, resolve } = Promise.withResolvers<void>();
-    setTimeout(resolve, 0);
-    await yieldToUi;
-  }
-  // 库在打开后行数变化（重建并发）→ 截断到实收
-  return filled === totalEvents
-    ? { count: totalEvents, lines, ts }
-    : {
-        count: filled,
-        lines: lines.subarray(0, filled),
-        ts: ts.subarray(0, filled),
-      };
-}
 
 // ---- 过滤下推（v2：rg 引擎 + filter_hits 落库）----
 
@@ -234,16 +174,6 @@ export async function fetchCorrIds(
   return Array.isArray(r) ? r : [];
 }
 
-// ---- 按需取数 ----
-
-/** 视口事件（ts 窗口内，按 ts 升序） */
-export async function fetchEventsInWindow(
-  start: number,
-  end: number,
-): Promise<DbHitEntry[]> {
-  const r = await invoke<DbHitEntry[]>('db_events_in_window', { start, end });
-  return Array.isArray(r) ? r : [];
-}
 
 /** 文件清单（firstLine 升序；详情无限上下文的行号→文件定位 + 右键打开用） */
 export async function fetchDbFiles(): Promise<DbFileInfo[]> {

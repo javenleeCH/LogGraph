@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { useLogStore, dbTsByLine } from '../store/logStore';
+import { useLogStore, hitTsByLine } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
 import { copyWithFallback } from '../utils/copyFlow';
 import { getRawLine } from '../utils/rawLine';
@@ -19,13 +19,12 @@ type DetailTab = string;
 
 export function DetailPanel() {
   const selectedEventId = useLogStore((s) => s.selectedEventId);
-  const dbIndex = useLogStore((s) => s.dbIndex);
+  const matches = useLogStore((s) => s.matches);
   const events = useLogStore((s) => s.events);
   const rawLines = useLogStore((s) => s.rawLines);
   const dbMode = useLogStore((s) => s.dbMode);
   /** dbMode：文件清单（无限上下文流的行号→文件定位 + 右键打开 + 头部来源 tag） */
   const [dbFiles, setDbFiles] = useState<DbFileInfo[]>([]);
-  const matches = useLogStore((s) => s.matches);
   const filters = useLogStore((s) => s.filters);
   const groups = useLogStore((s) => s.groups);
   const sequenceResults = useLogStore((s) => s.sequenceResults);
@@ -69,21 +68,21 @@ export function DetailPanel() {
     }
   }, [seqGroups, activeTab]);
 
-  // dbMode：事件不物化（events=[]），用 dbIndex O(1) 查 ts 构造轻量对象；
-  // raw/message 留空，上下文/详情由 dbCtx 拉取
+  // dbMode：事件不物化（events=[]），用命中骨架查 ts 构造轻量对象
+  // （selected 为命中行；raw/message 留空，上下文/详情由 dbCtx 拉取）
   const selected = useMemo(
     () =>
       selectedEventId !== null
         ? dbMode
           ? {
               id: selectedEventId,
-              ts: dbTsByLine({ dbIndex }, selectedEventId) ?? 0,
+              ts: hitTsByLine({ matches }, selectedEventId) ?? 0,
               raw: '',
               message: '',
             }
           : events.find((e) => e.id === selectedEventId)
         : undefined,
-    [selectedEventId, dbMode, dbIndex, events],
+    [selectedEventId, dbMode, matches, events],
   );
 
   // 选中行时滚动到视图（非 dbMode；dbMode 由 ContextStream 的虚拟滚动定位）
@@ -93,7 +92,7 @@ export function DetailPanel() {
     }
   }, [selected, dbMode]);
 
-  // dbMode：拉文件清单一次（目录切换 = dbIndex 变化时重拉；ContextStream 定位/右键用）
+  // dbMode：拉文件清单一次（目录切换 = dbMode 翻转时重拉；ContextStream 定位/右键用）
   useEffect(() => {
     if (!dbMode) {
       setDbFiles([]);
@@ -112,7 +111,7 @@ export function DetailPanel() {
     return () => {
       cancelled = true;
     };
-  }, [dbMode, dbIndex]);
+  }, [dbMode]);
 
   const owningFilters = useMemo(() => {
     if (!selected) return [];

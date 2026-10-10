@@ -27,7 +27,6 @@ import {
   runDbFiltersBatch,
   runDbSequences,
   fetchCorrIds,
-  type DbEventIndex,
   type DbRunSeqGroup,
   type DbFilterHits,
 } from '../io/dbStore';
@@ -35,30 +34,27 @@ import {
 let corrRaf = 0;
 let corrSeq = 0; // dbMode 关联下推的响应序号（过期丢弃）
 
-// ---- dbMode SoA 索引（v3）----
+// ---- dbMode 命中查询（v4：无事件索引，matches 骨架自带 ts） ----
 
-/** 行号 → 事件下标直查表；posByLine[line] = 事件在 lines/ts 中的下标 */
-export interface DbIndex extends DbEventIndex {
-  /** 大小 = maxLine+1；0xFFFFFFFF = 该行无事件 */
-  posByLine: Uint32Array;
+/** dbMode 下按行号查命中 ts（选中/悬停都是低频点击级操作，线性足够）；
+ *  非命中行（如上下文行）返回 null。 */
+export function hitTsByLine(
+  state: { matches: FilterMatch[] },
+  line: number,
+): number | null {
+  for (const m of state.matches) {
+    const ev = m.events.find((e) => e.id === line);
+    if (ev) return ev.ts;
+  }
+  return null;
 }
 
-const NO_EVENT = 0xffffffff;
-
-/** dbMode 下按行号查事件 ts（O(1)，替代 events.find O(N)）；无事件行返回 null */
-export function dbTsByLine(state: { dbIndex: DbIndex | null }, line: number): number | null {
-  const idx = state.dbIndex;
-  if (!idx || line < 0 || line >= idx.posByLine.length) return null;
-  const p = idx.posByLine[line];
-  return p === NO_EVENT ? null : idx.ts[p];
-}
-
-/** 事件总数（dbMode 走 SoA 索引 count——事件不物化后 events.length 恒为 0） */
+/** 事件总数（dbMode 走行数——事件不物化，matches 只含命中） */
 export const selectEventCount = (s: {
   dbMode: boolean;
-  dbIndex: DbIndex | null;
+  meta: LogMeta | null;
   events: LogEvent[];
-}): number => (s.dbMode ? s.dbIndex?.count ?? 0 : s.events.length);
+}): number => (s.dbMode ? s.meta?.totalLines ?? 0 : s.events.length);
 
 /** 二进制命中 → 骨架事件数组（raw/message 按需拉行；ts 升序由 Rust 保证） */
 function skelEvents(hits: DbFilterHits | undefined): LogEvent[] {
@@ -151,11 +147,9 @@ interface LogState {
   rawLines: string[]; // 原始行，用于上下文显示
   meta: LogMeta | null;
 
-  // --- SQLite 数据驻留模式（dbMode）---
-  /** true=数据驻留 cache.db（rawLines 空、raw/message 惰性）；过滤走 Rust 下推 */
+  // --- 数据驻留模式（dbMode）---
+  /** true=数据驻留（rawLines 空、raw/message 惰性）；过滤走 Rust 下推 */
   dbMode: boolean;
-  /** dbMode：SoA 事件索引（事件不物化成对象，行号 O(1) 查 ts） */
-  dbIndex: DbIndex | null;
 
   // --- 过滤器 ---
   filters: Filter[];
@@ -244,8 +238,8 @@ interface LogState {
 
   // --- actions ---
   setLog: (events: LogEvent[], rawLines: string[], meta: LogMeta) => void;
-  /** dbMode 装载：SoA 事件索引 + 元数据；事件不物化，行文本惰性按需取 */
-  setLogDb: (index: DbEventIndex, meta: LogMeta) => void;
+  /** dbMode 装载：时间轴范围 + 元数据；事件不物化，命中/行文本惰性按需取 */
+  setLogDb: (range: { start: number | null; end: number | null }, meta: LogMeta) => void;
   /** 离开 dbMode（切回普通模式/关闭目录） */
   exitDbMode: () => void;
   addFilter: (partial?: Partial<Filter>) => string;
@@ -308,7 +302,6 @@ export const useLogStore = create<LogState>((set, get) => ({
   rawLines: [],
   meta: null,
   dbMode: false,
-  dbIndex: null,
 
   filters: [],
   matches: [],
@@ -444,31 +437,21 @@ export const useLogStore = create<LogState>((set, get) => ({
     get().recomputeMatches();
   },
 
-  setLogDb: (index, meta) => {
-    if (index.count === 0) {
+  setLogDb: (range, meta) => {
+    // 无行或无任何 ts → 与旧版（事件索引为空）同语义：退回非 dbMode
+    if (meta.totalLines === 0 || range.start == null || range.end == null) {
       get().exitDbMode();
       set({ meta });
       return;
     }
-    // v3：不物化事件对象（旧版 500 万骨架 LogEvent 是主要 JS 开销）——
-    // 索引即 SoA 数组，行号经 posByLine O(1) 查 ts
-    let maxLine = 0;
-    for (let i = 0; i < index.count; i++) {
-      if (index.lines[i] > maxLine) maxLine = index.lines[i];
-    }
-    const posByLine = new Uint32Array(maxLine + 1).fill(NO_EVENT);
-    for (let i = 0; i < index.count; i++) posByLine[index.lines[i]] = i;
-    const dbIndex: DbIndex = { ...index, posByLine };
-    const fullRange = {
-      start: index.ts[0],
-      end: index.ts[index.count - 1],
-    };
+    // v4：无事件索引/无 JS 侧物化（旧版 10M 行 posByLine 双循环 ~4s）——
+    // 时间轴范围来自建库首/末行 ts，命中 ts 在 matches 骨架里
+    const fullRange = { start: range.start, end: range.end };
     set({
       events: [], // dbMode：事件不物化，视口/详情按需拉
       rawLines: [],
       meta,
       dbMode: true,
-      dbIndex,
       fullRange,
       viewRange: { ...fullRange },
       matches: [],
@@ -487,7 +470,6 @@ export const useLogStore = create<LogState>((set, get) => ({
       rawLines: [],
       meta: null,
       dbMode: false,
-      dbIndex: null,
       fullRange: null,
       viewRange: null,
       matches: [],
@@ -531,7 +513,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   recomputeFilterMatch: (id) => {
     const { events, filters, matches, dbMode } = get();
     const filter = filters.find((f) => f.id === id);
-    if (!filter || (dbMode ? (get().dbIndex?.count ?? 0) === 0 : events.length === 0)) {
+    if (!filter || (dbMode ? get().meta?.totalLines === 0 : events.length === 0)) {
       get().recomputeMatches();
       return;
     }
@@ -871,7 +853,7 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   recomputeMatches: () => {
     const { events, filters, dbMode } = get();
-    if ((dbMode ? (get().dbIndex?.count ?? 0) : events.length) === 0 || filters.length === 0) {
+    if ((dbMode ? get().meta?.totalLines : events.length) === 0 || filters.length === 0) {
       set({ matches: [], correlatedEventIds: new Set(), sequenceResults: {} });
       return;
     }
@@ -1013,7 +995,7 @@ export const useLogStore = create<LogState>((set, get) => ({
     set({ selectedEventId: id });
     if (id !== null) {
       const s = get();
-      const ts = s.dbMode ? dbTsByLine(s, id) : (s.events.find((e) => e.id === id)?.ts ?? null);
+      const ts = s.dbMode ? hitTsByLine(s, id) : (s.events.find((e) => e.id === id)?.ts ?? null);
       if (ts !== null) set({ scrubberTs: ts });
     }
     get().recomputeCorrelations();
@@ -1023,7 +1005,7 @@ export const useLogStore = create<LogState>((set, get) => ({
     get().selectEvent(id);
     const s = get();
     const { viewRange, fullRange } = s;
-    const evTs = s.dbMode ? dbTsByLine(s, id) : (s.events.find((e) => e.id === id)?.ts ?? null);
+    const evTs = s.dbMode ? hitTsByLine(s, id) : (s.events.find((e) => e.id === id)?.ts ?? null);
     if (evTs === null || !viewRange || !fullRange) return;
     // 已在可视范围内则不平移
     if (evTs >= viewRange.start && evTs <= viewRange.end) return;
@@ -1061,7 +1043,7 @@ export const useLogStore = create<LogState>((set, get) => ({
     let centerTs: number | null = null;
     if (selectedEventId !== null) {
       centerTs = s.dbMode
-        ? dbTsByLine(s, selectedEventId)
+        ? hitTsByLine(s, selectedEventId)
         : (events.find((e) => e.id === selectedEventId)?.ts ?? null);
     } else if (scrubberTs !== null) {
       centerTs = scrubberTs;

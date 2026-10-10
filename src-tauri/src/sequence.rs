@@ -1,7 +1,7 @@
 //! v2 / PR-4：序列匹配 SQL 加速路径（CEP 下推，plans/v2-rg-sql-architecture.md §2.4）。
 //!
-//! 设计：dbMode 下 filter 命中已写入 `filter_hits`，本模块直接从 SQL 取
-//! `filter_hits JOIN line_ts` 的事件流，在 Rust 侧跑贪心链匹配，避免把全量
+//! 设计：dbMode 下 filter 命中缓存自带 (line, ts)（扫描时内联解析），
+//! 本模块直接取 `filter_hits` 的事件流，在 Rust 侧跑贪心链匹配，避免把全量
 //! 命中事件回传前端再用 TS 引擎匹配（大数据加速路径）。
 //!
 //! 安全覆盖范围（与前端 SequenceMatcher 语义一致，仅移植核心子集）：
@@ -431,7 +431,7 @@ fn resolve_chains(edges: &[EdgeSpec]) -> Vec<Vec<EdgeSpec>> {
 
 fn fetch_filter_events(db: &MemDb, filter_id: &str) -> Result<Vec<SeqEvent>, String> {
     let hits = filter_hits(db, filter_id).unwrap_or_default();
-    Ok(hits_with_ts(db, &hits)
+    Ok(hits_with_ts(&hits)
         .into_iter()
         .map(|h| SeqEvent::new(h.line, h.ts))
         .collect())
@@ -693,9 +693,9 @@ mod tests {
     #[test]
     fn seq_edge_within_window_matches() {
         // A: ts 100, 200 ; B: ts 150 (in window of A@100), 5000 (out of window)
-        let db = test_db(&[(1, 100), (2, 200), (3, 150), (4, 5000)]);
-        set_filter_hits(&db, "A", vec![1, 2]);
-        set_filter_hits(&db, "B", vec![3, 4]);
+        let db = test_db();
+        set_filter_hits(&db, "A", &[(1, 100), (2, 200)]);
+        set_filter_hits(&db, "B", &[(3, 150), (4, 5000)]);
         let spec = GroupSpec {
             group_id: "g1".into(),
             filter_ids: vec!["A".into(), "B".into()],
@@ -731,9 +731,9 @@ mod tests {
     #[test]
     fn not_edge_violation_detected() {
         // A@100，B@120（落在 A@100 窗口内）→ 违规
-        let db = test_db(&[(1, 100), (2, 120)]);
-        set_filter_hits(&db, "A", vec![1]);
-        set_filter_hits(&db, "B", vec![2]);
+        let db = test_db();
+        set_filter_hits(&db, "A", &[(1, 100)]);
+        set_filter_hits(&db, "B", &[(2, 120)]);
         let spec = GroupSpec {
             group_id: "g2".into(),
             filter_ids: vec!["A".into(), "B".into()],
