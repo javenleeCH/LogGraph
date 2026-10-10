@@ -310,66 +310,150 @@ fn merge_line_segments(sorted: &[u32], max_gap: u32) -> Vec<(u32, u32)> {
 
 // ---- 建库（全量扫描 → 内存索引） ----
 
+/// 读文件头部（最多 max 字节，UTF-8 lossy）；时间戳格式探测用，避免为探测整读首文件。
+fn read_head_lossy(path: &Path, max: usize) -> Result<String, String> {
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; max];
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        match f.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(k) => filled += k,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    buf.truncate(filled);
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// 扫描目录建内存库。emit(loaded, total, current) 报告逐文件进度（UI 进度条）。
+///
+/// 文件级并行（worker 池抢文件：读 + 行偏移 + ts 抽取各自独立），事件先记
+/// 文件内局部行号；汇合后按文件序做 first_line 前缀映射再全局排序——
+/// 产物与串行版完全一致（行号/偏移/事件序/跳过数逐字节相同）。
 fn build_mem_db(
     root: &Path,
     names: &[String],
-    mut emit: impl FnMut(usize, usize, &str),
+    mut emit: impl FnMut(usize, usize, &str) + Send,
 ) -> Result<MemDb, String> {
-    let mut files: Vec<FileEntry> = Vec::with_capacity(names.len());
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 单文件扫描产物（local_ev 的行号 = 文件内局部行号）
+    struct FileOut {
+        name: String,
+        offsets: Vec<u64>,
+        local_ev: Vec<(u32, i64)>,
+        skipped: u32,
+    }
+
+    // 格式探测：仅首个文件头 1MB 的前 100 个非空行（串行版读整个首文件探测；
+    // 1MB 头在行均长 >10KB 前等价，读失败 → None，与串行版语义一致）
+    let fmt: Option<&'static TsFormat> = names.first().and_then(|rel| {
+        let head = read_head_lossy(&root.join(rel), 1024 * 1024).ok()?;
+        let sample: Vec<&str> = head
+            .split('\n')
+            .take(100)
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .filter(|l| !js_trim(l).is_empty())
+            .collect();
+        detect_timestamp_format(&sample)
+    });
+
+    let n = names.len();
+    let threads = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(4)
+        .min(n.max(1))
+        .max(1);
+    let cursor = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let emit_m = Mutex::new(&mut emit);
+    let mut slots: Vec<Option<FileOut>> = (0..n).map(|_| None).collect();
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    // 成果攒本地、汇合后按索引回填（免每槽加锁）
+                    let mut mine: Vec<(usize, FileOut)> = Vec::new();
+                    loop {
+                        let i = cursor.fetch_add(1, Ordering::Relaxed);
+                        if i >= n {
+                            break;
+                        }
+                        let rel = &names[i];
+                        let text = match read_file_lossy(&root.join(rel)) {
+                            Ok(t) => t,
+                            Err(_) => continue, // 读取失败跳过（与串行版语义一致）
+                        };
+                        // 单趟行扫描：抽时间戳 + 记录每行起始字节偏移（与 split('\n')
+                        // 分段语义一致，尾部换行会产生一个末尾空行段）
+                        let mut offsets: Vec<u64> =
+                            Vec::with_capacity(64 + text.len() / 16 * 8);
+                        let mut local_ev: Vec<(u32, i64)> = Vec::new();
+                        let mut skipped: u32 = 0;
+                        let bytes = text.as_bytes();
+                        let mut pos = 0usize;
+                        loop {
+                            let start = pos;
+                            let end = match bytes[pos..].iter().position(|&b| b == b'\n') {
+                                Some(k) => pos + k,
+                                None => bytes.len(),
+                            };
+                            offsets.push(start as u64);
+                            let local_no = offsets.len() as u32 - 1;
+                            let line =
+                                text[start..end].strip_suffix('\r').unwrap_or(&text[start..end]);
+                            if js_trim(line).is_empty() {
+                                skipped += 1;
+                            } else if let Some(ext) = extract_timestamp(line, fmt) {
+                                local_ev.push((local_no, ext.ts));
+                            }
+                            if end == bytes.len() {
+                                break;
+                            }
+                            pos = end + 1;
+                        }
+                        mine.push((
+                            i,
+                            FileOut {
+                                name: rel.clone(),
+                                offsets,
+                                local_ev,
+                                skipped,
+                            },
+                        ));
+                        let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        (emit_m.lock())(d, n, rel);
+                    }
+                    mine
+                })
+            })
+            .collect();
+        for h in handles {
+            for (i, out) in h.join().map_err(|_| "建库 worker 崩溃".to_string())? {
+                slots[i] = Some(out);
+            }
+        }
+        Ok::<(), String>(())
+    })?;
+
+    // ---- 汇合（串行 O(总行数)）：first_line 前缀 + 局部行号 → 全局行号 ----
+    let mut files: Vec<FileEntry> = Vec::with_capacity(n);
     let mut ev: Vec<(u32, i64)> = Vec::new();
     let mut total_lines: u32 = 0;
     let mut skipped: u32 = 0;
-    let mut fmt: Option<&'static TsFormat> = None;
-
-    for (i, rel) in names.iter().enumerate() {
-        emit(i + 1, names.len(), rel);
-        let text = match read_file_lossy(&root.join(rel)) {
-            Ok(t) => t,
-            Err(_) => continue, // 读取失败跳过（与 v2 建库语义一致）
-        };
+    for out in slots.into_iter().flatten() {
         let first_line = total_lines;
-
-        // 格式探测：仅首个文件（与 v1/v2 一致的简化；探测失败逐行回退全格式）
-        if i == 0 {
-            let sample: Vec<&str> = text
-                .split('\n')
-                .take(100)
-                .map(|l| l.strip_suffix('\r').unwrap_or(l))
-                .filter(|l| !js_trim(l).is_empty())
-                .collect();
-            fmt = detect_timestamp_format(&sample);
+        for (local_no, ts) in out.local_ev {
+            ev.push((first_line + local_no, ts));
         }
-
-        // 单趟行扫描：抽时间戳 + 记录每行起始字节偏移（与 split('\n') 分段语义一致，
-        // 尾部换行会产生一个末尾空行段）
-        let mut offsets: Vec<u64> = Vec::with_capacity(64 + text.len() / 16 * 8);
-        let bytes = text.as_bytes();
-        let mut pos = 0usize;
-        loop {
-            let start = pos;
-            let end = match bytes[pos..].iter().position(|&b| b == b'\n') {
-                Some(k) => pos + k,
-                None => bytes.len(),
-            };
-            offsets.push(start as u64);
-            let line_no = first_line + (offsets.len() as u32 - 1);
-            let line = text[start..end].strip_suffix('\r').unwrap_or(&text[start..end]);
-            if js_trim(line).is_empty() {
-                skipped += 1;
-            } else if let Some(ext) = extract_timestamp(line, fmt) {
-                ev.push((line_no, ext.ts));
-            }
-            if end == bytes.len() {
-                break;
-            }
-            pos = end + 1;
-        }
-        total_lines += offsets.len() as u32;
+        total_lines += out.offsets.len() as u32;
+        skipped += out.skipped;
         files.push(FileEntry {
-            name: rel.clone(),
+            name: out.name,
             first_line,
-            offsets: Arc::new(offsets),
+            offsets: Arc::new(out.offsets),
         });
     }
 
