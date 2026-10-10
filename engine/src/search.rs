@@ -4,9 +4,10 @@
 
 use crate::error::{EngineError, EngineResult};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{BinaryDetection, Searcher, Sink, SinkMatch};
+use grep_searcher::{BinaryDetection, MmapChoice, Searcher, Sink, SinkMatch};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -117,17 +118,25 @@ fn new_searcher() -> Searcher {
     grep_searcher::SearcherBuilder::new()
         .binary_detection(BinaryDetection::quit(b'\x00'))
         .line_number(true)
+        // rg 默认即 mmap 启发式（--no-mmap 才关闭）。SearcherBuilder 默认
+        // Never 会让全部字节走 64KB LineBuffer 读路径（每块多一次拷贝）。
+        // SAFETY: 与 rg 同假设——扫描期间文件不被截断/改写（只读日志目录）
+        .memory_map(unsafe { MmapChoice::auto() })
         .build()
 }
 
 /// 直扫单个文件
 pub fn search_file(path: impl AsRef<Path>, pattern: &Pattern) -> EngineResult<FileHits> {
     let matcher = pattern.compile()?;
-    search_file_with(path.as_ref(), &matcher)
+    let mut searcher = new_searcher();
+    search_file_with(&mut searcher, path.as_ref(), &matcher)
 }
 
-fn search_file_with(path: &Path, matcher: &RegexMatcher) -> EngineResult<FileHits> {
-    let mut searcher = new_searcher();
+fn search_file_with(
+    searcher: &mut Searcher,
+    path: &Path,
+    matcher: &RegexMatcher,
+) -> EngineResult<FileHits> {
     let mut sink = CollectSink { hits: Vec::new() };
     searcher.search_path(matcher, path, &mut sink).map_err(|source| {
         EngineError::Io {
@@ -215,7 +224,8 @@ pub fn walk_files(root: &Path, exts: &[&str]) -> Vec<PathBuf> {
     walk(root, &opts).unwrap_or_default()
 }
 
-/// 多文件并行直扫（按文件并行，文件内有序；输出顺序与输入一致）
+/// 多文件并行直扫（有界 worker 池 = CPU 数，rg 同款并行度；文件内有序；
+/// 输出顺序与输入一致）
 pub fn search_all(
     paths: &[PathBuf],
     pattern: &Pattern,
@@ -223,13 +233,41 @@ pub fn search_all(
     let start = Instant::now();
     let matcher = Arc::new(pattern.compile()?);
 
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(paths.len())
+        .max(1);
+
     let results: Vec<EngineResult<FileHits>> = std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(paths.len());
-        for path in paths {
+        // 原子游标抢文件 + worker 复用 Searcher（64KB 缓冲不逐文件重分配）；
+        // 旧的"每文件一线程"在大目录下线程数会失控（10 万文件 = 10 万线程）
+        let next = AtomicUsize::new(0);
+        let next = &next;
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
             let matcher = Arc::clone(&matcher);
-            handles.push(scope.spawn(move || search_file_with(path, &matcher)));
+            handles.push(scope.spawn(move || {
+                let mut searcher = new_searcher();
+                let mut local: Vec<(usize, EngineResult<FileHits>)> = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= paths.len() {
+                        break;
+                    }
+                    local.push((i, search_file_with(&mut searcher, &paths[i], &matcher)));
+                }
+                local
+            }));
         }
-        handles.into_iter().map(|h| h.join().expect("扫描线程 panic")).collect()
+        let mut slots: Vec<Option<EngineResult<FileHits>>> =
+            (0..paths.len()).map(|_| None).collect();
+        for h in handles {
+            for (i, r) in h.join().expect("扫描线程 panic") {
+                slots[i] = Some(r);
+            }
+        }
+        slots.into_iter().map(|s| s.expect("游标保证每个下标恰好处理一次")).collect()
     });
 
     let mut out = Vec::with_capacity(paths.len());

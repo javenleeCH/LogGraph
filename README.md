@@ -79,6 +79,8 @@ cargo run -p loggraph-cli -- search sample -i "ERROR|FATAL"
 cargo run -p loggraph-cli -- cep sample -R sample/cep-rules.example.json
 cargo install --path cli   # 安装 loggraph 命令到 PATH
 
+cargo build --release -p loggraph-cli  # 性能基准请用 release（debug 慢一个数量级）
+
 cargo test -p loggraph-engine   # 引擎单测（42 项：search/parser/cep/rules）
 cd src-tauri && cargo test      # 桌面侧单测
 ```

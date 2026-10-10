@@ -17,6 +17,7 @@ use loggraph_engine::rules::{self, RuleIssue};
 use loggraph_engine::search::{self, Pattern, WalkOptions};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -189,15 +190,25 @@ fn do_search(args: SearchArgs) -> ExitCode {
         Err(e) => return fail(e),
     };
     if args.json {
-        // 直接结构体序列化：保持声明序（json! 宏会走 Value/BTreeMap 变字母序）
-        let out = SearchEnvelope { files: &files, stats: &stats };
-        println!("{}", serde_json::to_string(&out).unwrap());
+        // 直接结构体序列化：保持声明序（json! 宏会走 Value/BTreeMap 变字母序）；
+        // to_writer 流式写出，不再先拼出整个 JSON 大字符串
+        let env = SearchEnvelope { files: &files, stats: &stats };
+        let stdout = std::io::stdout();
+        let mut out = BufWriter::new(stdout.lock());
+        let _ = serde_json::to_writer(&mut out, &env);
+        let _ = writeln!(out);
+        let _ = out.flush();
     } else {
+        // BufWriter 缓冲输出（rg 同款）：逐行 println! 每行一次锁 + 一次写，
+        // 海量命中时在 Windows 控制台是数量级级的开销
+        let stdout = std::io::stdout();
+        let mut out = BufWriter::new(stdout.lock());
         for f in &files {
             for h in &f.hits {
-                println!("{}:{}:{}", f.path.display(), h.line_number, h.text);
+                let _ = writeln!(out, "{}:{}:{}", f.path.display(), h.line_number, h.text);
             }
         }
+        let _ = out.flush();
         eprintln!(
             "命中文件 {}/{}，命中行 {}，耗时 {} ms",
             stats.files_with_matches, stats.files_searched, stats.matched_lines, stats.elapsed_ms
