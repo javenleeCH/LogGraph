@@ -1,9 +1,12 @@
 .wrap {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  width: 100%;
+  /* flex 填充（而非 height:100%——后者不给兄弟 FilterChips 留空间，
+     会整体下溢 paneTop 32px，把末行日志文本压到下方详情面板顶上） */
+  flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
+  width: 100%;
   background: var(--bg);
 }
 
