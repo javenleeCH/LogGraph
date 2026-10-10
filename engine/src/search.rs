@@ -239,13 +239,16 @@ pub fn search_all(
         .min(paths.len())
         .max(1);
 
+    // 游标用 Arc 共享给各 worker：spawn 的闭包要求满足 'scope 生命周期，
+    // 而 scope 闭包体内声明的局部变量，其借用活不了那么久（E0597）
+    let next = Arc::new(AtomicUsize::new(0));
+
     let results: Vec<EngineResult<FileHits>> = std::thread::scope(|scope| {
         // 原子游标抢文件 + worker 复用 Searcher（64KB 缓冲不逐文件重分配）；
         // 旧的"每文件一线程"在大目录下线程数会失控（10 万文件 = 10 万线程）
-        let next = AtomicUsize::new(0);
-        let next = &next;
         let mut handles = Vec::with_capacity(workers);
         for _ in 0..workers {
+            let next = Arc::clone(&next);
             let matcher = Arc::clone(&matcher);
             handles.push(scope.spawn(move || {
                 let mut searcher = new_searcher();
