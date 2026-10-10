@@ -487,7 +487,7 @@ mod tests {
         assert!(extract_syslog("Xyz 02 03:04:05 x").is_none());
         assert!(extract_syslog("jan 02 03:04:05 x").is_none());
         // 一位日
-        let expect = date_utc_like(current_year_utc(), 2, 9, 10, 11, 12, 0);
+        let expect = date_utc_like(current_year_utc(), 3, 9, 10, 11, 12, 0);
         let r = extract_syslog("Apr 9 10:11:12 x").unwrap();
         assert_eq!(r.ts, expect);
     }
@@ -517,21 +517,21 @@ mod tests {
         assert_eq!(r.ts, 1710000000000);
 
         // 14/15/11/12 位段：前后 lookaround 必然失败 → 跳过（JS 同）
-        assert!(extract_epoch("9171000000000 x").is_none());
+        assert!(extract_epoch("91710000000000 x").is_none());
         assert!(extract_epoch("abc 123456789012345 x").is_none());
         assert!(extract_epoch("13812345678 x").is_none());
         assert!(extract_epoch("123456789012 x").is_none());
 
         // 最左优先：先出现的合格段获胜（与 JS .match 最左语义一致）
         let r = extract_epoch("1234567890 1234567890123").unwrap();
-        assert_eq!(r.ts, 1234567890123);
+        assert_eq!(r.ts, 1234567890000); // 10 位段最左先胜（位置 0 命中，JS 同）
         assert_eq!(r.start, 0);
         let r = extract_epoch("1234567890123 1234567890").unwrap();
         assert_eq!(r.ts, 1234567890123);
         assert_eq!(r.start, 0);
 
         // 前紧邻数字的 13 位段（如 9+13 位）不命中（(?<!\d) 等价）
-        assert!(extract_epoch("9171000000000 x").is_none());
+        assert!(extract_epoch("81710000000000 x").is_none());
         // 无数字
         assert!(extract_epoch("no digits").is_none());
     }

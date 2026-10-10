@@ -170,7 +170,9 @@ export async function listLogFiles(
       }
       for (const entry of entries) {
         if (entry.isDirectory) {
-          if (recursive) await walk(`${dirPath}/${entry.name}`, [...pathPrefix, entry.name], depth + 1);
+          if (recursive && entry.name !== '.logGraph') {
+            await walk(`${dirPath}/${entry.name}`, [...pathPrefix, entry.name], depth + 1);
+          }
         } else if (entry.isFile) {
           if (isLogFileName(entry.name)) {
             let size = 0;
@@ -210,7 +212,7 @@ export async function listLogFiles(
             path: [...pathPrefix, entry.name],
           });
         }
-      } else if (entry.kind === 'directory' && recursive) {
+      } else if (entry.kind === 'directory' && recursive && entry.name !== '.logGraph') {
         await walk(entry, [...pathPrefix, entry.name], depth + 1);
       }
     }

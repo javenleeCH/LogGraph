@@ -1,67 +1,33 @@
-//! v2 数据层：原文件直扫 + 瘦 SQL（plans/v2-rg-sql-architecture.md）。
+//! v3 数据层：纯内存驻留（SQLite 移除后的基准实现）。
 //!
-//! 核心思想：**原始文件就是数据库**——过滤用 RegexSet 单遍批量直扫原文件
-//!（文件级并行，全部 pattern 一次匹配），零预处理零冗余；SQL 只存衍生数据：
+//! 原始文件仍是唯一事实源；打开目录时全量扫描，内存中只驻留派生索引：
 //! - `files`：文件清单 + 每文件首行全局行号 + 每行字节偏移（seek 直读用）
-//! - `line_ts`：瘦 ts 索引（打开时一次性扫描，只抽时间戳，~16B/事件行）
-//! - `filter_hits`：filter 命中结果（扫描后写入，供 CEP/渲染 SQL 查询）
+//! - 事件 SoA：`ev_ts`/`ev_lines` 按 (ts, line) 升序 + `pos_by_line` 行号 O(1) 直查
+//! - `filter_hits`：filter_id → 升序全局行号（`Mutex<HashMap>`，扫描后写入）
 //!
-//! 上下文/详情：按行偏移 seek 直读原文件片段（不进 SQL，不整文件重读）。
+//! 上下文/详情：按行偏移 seek 直读原文件片段（不整文件重读）。
 //! 索引/视口行文本走 `tauri::ipc::Response` 二进制通道（SoA，前端零对象解析）。
-//! 缓存指纹：目录内日志文件 (rel, size, mtime) 的 FNV；schemaVersion=3 不符自动重建。
+//!
+//! 与 v2（SQLite cache.db）的差异：无磁盘缓存——每次打开目录全量重建索引。
+//! 打开耗时 = 建库耗时（v2 首次建库同款），换来零 IO 的查询路径与更简单的并发
+//! 模型（`RwLock<Option<Arc<MemDb>>>` 快照读，filter 缓存内层 `Mutex`）。
+//! 是否值得重新引入磁盘缓存：以 `bench_db_filters_scale` 与 perf.log 基准数据决策。
 
-use crate::parser::timestamp::{extract_timestamp, find_format, detect_timestamp_format, TsFormat};
-use rusqlite::{params, Connection};
+use crate::parser::timestamp::{detect_timestamp_format, extract_timestamp, TsFormat};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use parking_lot::{Mutex, RwLock};
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
-
-/// cache.db 路径（打开目录后设置）。每命令独立开连接：WAL 支持并发读，
-/// 慢查询（如 db_corr_ids 的窗口扫描）不再持全局锁阻塞其它命令——
-/// v3 之前全局单连接 Mutex，corr 查询持锁期间 db_lines_by_ids /
-/// db_context_lines / db_line 全部排队，表现为视口/详情/原始行「没反应」。
-static DB_CACHE_PATH: LazyLock<Mutex<Option<PathBuf>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-/// 当前打开的目录（扫描根）
-static DB_ROOT: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
-
-pub(crate) fn db_cache_path() -> &'static Mutex<Option<PathBuf>> {
-    &DB_CACHE_PATH
-}
-
-fn db_root() -> &'static Mutex<Option<PathBuf>> {
-    &DB_ROOT
-}
-
-/// 打开一个独立 cache.db 连接。
-/// journal_mode=WAL 是库级持久属性（建库时设置），新连接自动继承；
-/// 写命令之间靠 busy_timeout 串行等待，读写互不阻塞（WAL snapshot）。
-pub(crate) fn open_cache() -> Result<Connection, String> {
-    let Some(path) = db_cache_path().lock().map_err(|e| e.to_string())?.clone() else {
-        return Err("cache.db 未打开".into());
-    };
-    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
-    conn.execute_batch("PRAGMA cache_size=-262144; PRAGMA busy_timeout=5000;")
-        .map_err(|e| e.to_string())?;
-    Ok(conn)
-}
-
-fn cache_root() -> Result<PathBuf, String> {
-    db_root()
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone()
-        .ok_or_else(|| "cache.db 未打开".into())
-}
 
 // ---- DTO ----
 
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DbOpenResult {
+    /// 兼容字段：纯内存无缓存，恒 false
     pub cache_hit: bool,
     pub total_lines: u32,
     pub total_events: u32,
@@ -70,12 +36,170 @@ pub struct DbOpenResult {
     pub timestamp_format_id: Option<String>,
 }
 
-/// 命中条目（line + ts）：filter_hits JOIN 与 db_events_in_window 共用
+/// 命中条目（line + ts）：filter_hits 关联与 db_events_in_window 共用
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct HitEntry {
     pub line: u32,
     pub ts: i64,
+}
+
+/// 过滤参数（对齐前端 Filter 匹配字段）
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterQuery {
+    pub filter_id: String,
+    pub pattern: String,
+    pub is_regex: bool,
+    pub case_sensitive: bool,
+    /// raw=整行；message=时间戳后正文
+    pub scope: String,
+}
+
+// ---- 内存库 ----
+
+/// 行号 → 事件下标的「无事件」哨兵
+const NO_EVENT: u32 = u32::MAX;
+
+pub(crate) struct FileEntry {
+    /// 相对路径
+    pub name: String,
+    /// 该文件首行的全局行号
+    pub first_line: u32,
+    /// 每行起始字节偏移；行 i 字节区间 = [off[i], off[i+1] 或文件尾)
+    pub offsets: Arc<Vec<u64>>,
+}
+
+/// filter 命中缓存：filter_id → 升序全局行号 + 定义指纹（命中则免重扫）
+#[derive(Default)]
+struct FilterCache {
+    hits: HashMap<String, Arc<Vec<u32>>>,
+    fps: HashMap<String, String>,
+}
+
+/// 打开目录后的内存库。骨架（files/事件索引）建库后不可变；
+/// filter 命中缓存在内层 Mutex 中增删。
+pub(crate) struct MemDb {
+    root: PathBuf,
+    /// first_line 升序
+    pub(crate) files: Vec<FileEntry>,
+    pub(crate) total_lines: u32,
+    /// 事件 SoA，(ts, line) 升序
+    pub(crate) ev_ts: Vec<i64>,
+    pub(crate) ev_lines: Vec<u32>,
+    /// 全局行号 → 事件下标（NO_EVENT = 无时间戳）
+    pub(crate) pos_by_line: Vec<u32>,
+    pub(crate) skipped: u32,
+    pub(crate) fmt: Option<&'static TsFormat>,
+    filters: Mutex<FilterCache>,
+}
+
+static MEM_DB: LazyLock<RwLock<Option<Arc<MemDb>>>> = LazyLock::new(|| RwLock::new(None));
+
+/// 取当前库的 Arc 快照：读锁瞬时持有，命令执行期间不阻塞其它命令
+pub(crate) fn current_db() -> Result<Arc<MemDb>, String> {
+    MEM_DB
+        .read()
+        .clone()
+        .ok_or_else(|| "目录未打开".into())
+}
+
+/// 全局行号 → (文件下标, 绝对路径, 文件内行号)。files 按 first_line 升序，二分定位。
+fn locate(db: &MemDb, global_line: u32) -> Result<(usize, PathBuf, u32), String> {
+    let files = &db.files;
+    if files.is_empty() {
+        return Err("文件清单为空".into());
+    }
+    let mut lo = 0usize;
+    let mut hi = files.len();
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if files[mid].first_line <= global_line {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let f = &files[lo];
+    if global_line < f.first_line {
+        return Err(format!(
+            "行号 {global_line} 越界（首个文件起始 {}）",
+            f.first_line
+        ));
+    }
+    if let Some(next) = files.get(lo + 1) {
+        if global_line >= next.first_line {
+            return Err(format!("行号 {global_line} 落在文件间隙"));
+        }
+    }
+    Ok((lo, db.root.join(&f.name), global_line - f.first_line))
+}
+
+/// 事件 ts 窗口 → 下标区间 [lo, hi)（ev_ts 升序，二分）
+fn ts_range(db: &MemDb, start: i64, end: i64) -> (usize, usize) {
+    let lo = db.ev_ts.partition_point(|&t| t < start);
+    let hi = db.ev_ts.partition_point(|&t| t <= end);
+    (lo, hi)
+}
+
+/// 命中行号 → (line, ts)[]，按 (ts, line) 升序。无时间戳的命中行被丢弃
+/// （时间线上无位置，与 v2 SQL JOIN line_ts 语义一致）。
+pub(crate) fn hits_with_ts(db: &MemDb, hits: &[u32]) -> Vec<HitEntry> {
+    let mut out: Vec<HitEntry> = hits
+        .iter()
+        .filter_map(|&l| {
+            let p = *db.pos_by_line.get(l as usize)?;
+            (p != NO_EVENT).then(|| HitEntry {
+                line: l,
+                ts: db.ev_ts[p as usize],
+            })
+        })
+        .collect();
+    out.sort_unstable_by_key(|h| (h.ts, h.line));
+    out
+}
+
+/// 取某 filter 的命中快照（Arc clone，锁瞬时持有）
+pub(crate) fn filter_hits(db: &MemDb, filter_id: &str) -> Option<Arc<Vec<u32>>> {
+    db.filters
+        .lock()
+        .hits
+        .get(filter_id)
+        .cloned()
+}
+
+/// 测试 fixture：由 (line, ts) 事件集合构造最小内存库（无文件骨架）
+#[cfg(test)]
+pub(crate) fn test_db(events: &[(u32, i64)]) -> MemDb {
+    let mut ev = events.to_vec();
+    ev.sort_unstable_by_key(|&(l, ts)| (ts, l));
+    let ev_ts: Vec<i64> = ev.iter().map(|&(_, ts)| ts).collect();
+    let ev_lines: Vec<u32> = ev.iter().map(|&(l, _)| l).collect();
+    let total = events.iter().map(|&(l, _)| l + 1).max().unwrap_or(0);
+    let mut pos_by_line = vec![NO_EVENT; total as usize];
+    for (idx, &l) in ev_lines.iter().enumerate() {
+        pos_by_line[l as usize] = idx as u32;
+    }
+    MemDb {
+        root: PathBuf::from("."),
+        files: Vec::new(),
+        total_lines: total,
+        ev_ts,
+        ev_lines,
+        pos_by_line,
+        skipped: 0,
+        fmt: None,
+        filters: Mutex::new(FilterCache::default()),
+    }
+}
+
+/// 测试 fixture：写入 filter 命中（升序行号集合）
+#[cfg(test)]
+pub(crate) fn set_filter_hits(db: &MemDb, filter_id: &str, lines: Vec<u32>) {
+    db.filters
+        .lock()
+        .hits
+        .insert(filter_id.to_string(), Arc::new(lines));
 }
 
 // ---- 工具 ----
@@ -103,35 +227,17 @@ fn walk_log_files(dir: &Path, prefix: &str, depth: u32, out: &mut Vec<String>) {
             format!("{prefix}/{name}")
         };
         if path.is_dir() {
+            // .logGraph 是本应用的工作区目录（filters.json / perf 日志），
+            // 绝不当作日志源索引：其中的残留文件会参与格式探测（首个文件），
+            // 一旦格式不符会让整个目录的时间戳解析失效（事件全丢）
+            if name == ".logGraph" {
+                continue;
+            }
             walk_log_files(&path, &rel, depth + 1, out);
         } else if is_log_file_name(&name) {
             out.push(rel);
         }
     }
-}
-
-fn file_meta(path: &Path) -> Option<(u64, u64)> {
-    let st = std::fs::metadata(path).ok()?;
-    let mtime = st
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_millis() as u64;
-    Some((st.len(), mtime))
-}
-
-fn dir_fingerprint(root: &Path, names: &[String]) -> String {
-    let mut h: u64 = 1469598103934665603;
-    for rel in names {
-        let (size, mtime) = file_meta(&root.join(rel)).unwrap_or((0, 0));
-        let part = format!("{rel}::{size}::{mtime}\n");
-        for b in part.as_bytes() {
-            h ^= *b as u64;
-            h = h.wrapping_mul(1099511628211);
-        }
-    }
-    format!("{h:016x}")
 }
 
 fn read_file_lossy(path: &Path) -> Result<String, std::io::Error> {
@@ -142,7 +248,6 @@ fn read_file_lossy(path: &Path) -> Result<String, std::io::Error> {
 fn js_trim(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
-
 
 /// 性能诊断日志（追加写 <root>/.logGraph/perf.log，ms 时间戳；失败静默）
 fn perf_log(root: &Path, msg: &str) {
@@ -160,18 +265,7 @@ fn perf_log(root: &Path, msg: &str) {
     }
 }
 
-// ---- 行偏移 seek 读取（schema v3）----
-
-/// files.line_offsets BLOB → u64 数组
-fn decode_line_offsets(blob: &[u8]) -> Result<Vec<u64>, String> {
-    if blob.len() % 8 != 0 {
-        return Err("line_offsets 长度非法（非 8 字节对齐）".into());
-    }
-    Ok(blob
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-        .collect())
-}
+// ---- 行偏移 seek 读取 ----
 
 /// 按行偏移 seek 读取一个文件 [lo, hi] 闭区间的行（不整文件重读）。
 /// 返回行文本列表（已去 \r\n），下标 0 = 第 lo 行。
@@ -214,44 +308,100 @@ fn merge_line_segments(sorted: &[u32], max_gap: u32) -> Vec<(u32, u32)> {
     segs
 }
 
-// ---- schema（v3 瘦表：files 增加 line_offsets 行偏移 BLOB）----
+// ---- 建库（全量扫描 → 内存索引） ----
 
-const SCHEMA_VERSION: &str = "3";
+/// 扫描目录建内存库。emit(loaded, total, current) 报告逐文件进度（UI 进度条）。
+fn build_mem_db(
+    root: &Path,
+    names: &[String],
+    mut emit: impl FnMut(usize, usize, &str),
+) -> Result<MemDb, String> {
+    let mut files: Vec<FileEntry> = Vec::with_capacity(names.len());
+    let mut ev: Vec<(u32, i64)> = Vec::new();
+    let mut total_lines: u32 = 0;
+    let mut skipped: u32 = 0;
+    let mut fmt: Option<&'static TsFormat> = None;
 
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS files (
-  fid          INTEGER PRIMARY KEY,
-  name         TEXT NOT NULL UNIQUE,   -- 相对路径
-  first_line   INTEGER NOT NULL,       -- 该文件首行的全局行号
-  line_offsets BLOB                    -- 每行起始字节偏移（u64 LE 数组）；行 i 字节区间 = [off[i], off[i+1] 或文件尾)
-);
-CREATE TABLE IF NOT EXISTS line_ts ( -- 瘦 ts 索引（~16B/事件行）
-  line INTEGER PRIMARY KEY,          -- 全局行号
-  ts   INTEGER NOT NULL              -- epoch ms
-);
-CREATE INDEX IF NOT EXISTS idx_line_ts_ts ON line_ts(ts, line);
-CREATE TABLE IF NOT EXISTS filter_hits (  -- filter 命中结果（rg 扫描后写入）
-  filter_id TEXT NOT NULL,
-  line      INTEGER NOT NULL,
-  PRIMARY KEY (filter_id, line)
-) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS filter_meta ( -- filter 定义指纹（命中则跳过 rg 重扫，直接复用 filter_hits）
-  filter_id TEXT PRIMARY KEY,
-  fp        TEXT NOT NULL
-);
-"#;
+    for (i, rel) in names.iter().enumerate() {
+        emit(i + 1, names.len(), rel);
+        let text = match read_file_lossy(&root.join(rel)) {
+            Ok(t) => t,
+            Err(_) => continue, // 读取失败跳过（与 v2 建库语义一致）
+        };
+        let first_line = total_lines;
 
-// ---- db_open：指纹校验 / ts 扫描 ----
+        // 格式探测：仅首个文件（与 v1/v2 一致的简化；探测失败逐行回退全格式）
+        if i == 0 {
+            let sample: Vec<&str> = text
+                .split('\n')
+                .take(100)
+                .map(|l| l.strip_suffix('\r').unwrap_or(l))
+                .filter(|l| !js_trim(l).is_empty())
+                .collect();
+            fmt = detect_timestamp_format(&sample);
+        }
 
+        // 单趟行扫描：抽时间戳 + 记录每行起始字节偏移（与 split('\n') 分段语义一致，
+        // 尾部换行会产生一个末尾空行段）
+        let mut offsets: Vec<u64> = Vec::with_capacity(64 + text.len() / 16 * 8);
+        let bytes = text.as_bytes();
+        let mut pos = 0usize;
+        loop {
+            let start = pos;
+            let end = match bytes[pos..].iter().position(|&b| b == b'\n') {
+                Some(k) => pos + k,
+                None => bytes.len(),
+            };
+            offsets.push(start as u64);
+            let line_no = first_line + (offsets.len() as u32 - 1);
+            let line = text[start..end].strip_suffix('\r').unwrap_or(&text[start..end]);
+            if js_trim(line).is_empty() {
+                skipped += 1;
+            } else if let Some(ext) = extract_timestamp(line, fmt) {
+                ev.push((line_no, ext.ts));
+            }
+            if end == bytes.len() {
+                break;
+            }
+            pos = end + 1;
+        }
+        total_lines += offsets.len() as u32;
+        files.push(FileEntry {
+            name: rel.clone(),
+            first_line,
+            offsets: Arc::new(offsets),
+        });
+    }
+
+    // 事件 SoA：(ts, line) 升序 + 行号直查表
+    ev.sort_unstable_by_key(|&(l, ts)| (ts, l));
+    let ev_ts: Vec<i64> = ev.iter().map(|&(_, ts)| ts).collect();
+    let ev_lines: Vec<u32> = ev.iter().map(|&(l, _)| l).collect();
+    let mut pos_by_line = vec![NO_EVENT; total_lines as usize];
+    for (idx, &l) in ev_lines.iter().enumerate() {
+        pos_by_line[l as usize] = idx as u32;
+    }
+
+    Ok(MemDb {
+        root: root.to_path_buf(),
+        files,
+        total_lines,
+        ev_ts,
+        ev_lines,
+        pos_by_line,
+        skipped,
+        fmt,
+        filters: Mutex::new(FilterCache::default()),
+    })
+}
+
+/// 打开目录（全量扫描建内存索引；无磁盘缓存）。
 #[tauri::command]
 pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult, String> {
     use tauri::Emitter;
 
     tauri::async_runtime::spawn_blocking(move || {
+        let t0 = Instant::now();
         let root = PathBuf::from(&dir);
         if !root.is_dir() {
             return Err(format!("目录不存在: {dir}"));
@@ -262,227 +412,37 @@ pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult,
         if names.is_empty() {
             return Err("该目录下没有可识别的日志文件（.log/.txt/.out/.csv/.tsv）".into());
         }
-        let fp = dir_fingerprint(&root, &names);
+        // .logGraph 工作区目录（filters.json 持久化 + perf 日志）
+        std::fs::create_dir_all(root.join(".logGraph"))
+            .map_err(|e| format!("创建工作区目录失败: {e}"))?;
 
-        let cache_dir = root.join(".logGraph");
-        std::fs::create_dir_all(&cache_dir)
-            .map_err(|e| format!("创建缓存目录失败: {e}"))?;
-        let db_path = cache_dir.join("cache.db");
-
-        // ---- 尝试命中缓存（指纹 + schema 版本双校验）----
-        if db_path.exists() {
-            if let Ok(conn) = Connection::open(&db_path) {
-                let ok: bool = conn
-                    .query_row(
-                        "SELECT value FROM meta WHERE key='fingerprint'",
-                        [],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .map(|v| v == fp)
-                    .unwrap_or(false)
-                    && conn
-                        .query_row(
-                            "SELECT value FROM meta WHERE key='schemaVersion'",
-                            [],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .map(|v| v == SCHEMA_VERSION)
-                        .unwrap_or(false);
-                if ok {
-                // 老库升级：幂等补建 filter_meta + 删除死索引 idx_hits_line
-                //（所有查询走主键 (filter_id, line) 前缀，二级索引零引用，
-                //  只放大百万级命中行的 INSERT/DELETE——实测 324 万行写放大
-                //  让 db_filters_batch 到 63.8s）
-                let _ = conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS filter_meta (
-                       filter_id TEXT PRIMARY KEY,
-                       fp        TEXT NOT NULL
-                     );
-                     DROP INDEX IF EXISTS idx_hits_line;",
-                );
-                    // meta 缓存优先（免 COUNT(*) 全索引扫描）；缺省兜底 COUNT
-                    let total_events: u32 = conn
-                        .query_row(
-                            "SELECT value FROM meta WHERE key='totalEvents'",
-                            [],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or_else(|| {
-                            conn.query_row("SELECT COUNT(*) FROM line_ts", [], |r| r.get(0))
-                                .unwrap_or(0)
-                        });
-                    let total_lines: u32 = (conn
-                        .query_row(
-                            "SELECT first_line FROM files ORDER BY fid DESC LIMIT 1",
-                            [],
-                            |r| r.get::<_, i64>(0),
-                        )
-                        .unwrap_or(0) as u32)
-                        .saturating_add(
-                            // 最后一个文件的行数未知 → 用 line_ts 最大行近似不安全；
-                            // 总行数在扫描时写入 meta
-                            0,
-                        );
-                    let total_lines: u32 = conn
-                        .query_row(
-                            "SELECT value FROM meta WHERE key='totalLines'",
-                            [],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(total_lines);
-                    let skipped: u32 = conn
-                        .query_row(
-                            "SELECT value FROM meta WHERE key='skipped'",
-                            [],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    let file_count: u32 = conn
-                        .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
-                        .unwrap_or(0);
-                    let fmt: Option<String> = conn
-                        .query_row(
-                            "SELECT value FROM meta WHERE key='formatId'",
-                            [],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .ok()
-                        .filter(|s| !s.is_empty());
-                    *db_cache_path().lock().map_err(|e| e.to_string())? = Some(db_path.clone());
-                    *db_root().lock().map_err(|e| e.to_string())? = Some(root);
-                    drop(conn); // 连接不驻留：后续命令各自独立开连接（WAL 并发读）
-                    return Ok(DbOpenResult {
-                        cache_hit: true,
-                        total_lines,
-                        total_events,
-                        skipped,
-                        file_count,
-                        timestamp_format_id: fmt,
-                    });
-                }
-            }
-        }
-
-        // ---- ts 扫描（v3 建库：只抽时间戳 + 记录每行字节偏移，不剥 thread/level）----
-        for suffix in ["", "-wal", "-shm"] {
-            let p = PathBuf::from(format!("{}{}", db_path.display(), suffix));
-            let _ = std::fs::remove_file(&p);
-        }
-        let conn = Connection::open(&db_path)
-            .map_err(|e| format!("打开缓存库失败: {e}"))?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-262144;",
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute_batch(SCHEMA)
-            .map_err(|e| format!("建表失败: {e}"))?;
-
-        let total = names.len();
-        let mut total_lines: u32 = 0;
-        let mut skipped: u32 = 0;
-        let mut fmt_id: Option<String> = None;
-
-        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        {
-            let mut ins_file = tx
-                .prepare("INSERT INTO files(fid, name, first_line, line_offsets) VALUES (?1, ?2, ?3, ?4)")
-                .map_err(|e| e.to_string())?;
-            let mut ins_ts = tx
-                .prepare("INSERT OR IGNORE INTO line_ts(line, ts) VALUES (?1, ?2)")
-                .map_err(|e| e.to_string())?;
-
-            for (i, rel) in names.iter().enumerate() {
-                let text = match read_file_lossy(&root.join(rel)) {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-                let _ = app.emit(
-                    "db_build_progress",
-                    serde_json::json!({ "loaded": i + 1, "total": total, "current": rel }),
-                );
-
-                let fid = (i + 1) as i64;
-                let first_line = total_lines;
-
-                // 格式探测：仅首个文件（与 v1 一致的简化；探测失败逐行回退全格式）
-                if i == 0 {
-                    let sample: Vec<&str> = text
-                        .split('\n')
-                        .take(100)
-                        .map(|l| l.strip_suffix('\r').unwrap_or(l))
-                        .filter(|l| !js_trim(l).is_empty())
-                        .collect();
-                    fmt_id =
-                        detect_timestamp_format(&sample).map(|f| f.id.to_string());
-                }
-                let fmt = fmt_id.as_deref().and_then(find_format);
-
-                // 单趟行扫描：抽时间戳 + 记录每行起始字节偏移（与 split('\n') 分段语义一致，
-                // 尾部换行会产生一个末尾空行段）
-                let mut offsets: Vec<u8> = Vec::with_capacity(64 + text.len() / 16 * 8);
-                let bytes = text.as_bytes();
-                let mut pos = 0usize;
-                loop {
-                    let start = pos;
-                    let end = match bytes[pos..].iter().position(|&b| b == b'\n') {
-                        Some(k) => pos + k,
-                        None => bytes.len(),
-                    };
-                    offsets.extend_from_slice(&(start as u64).to_le_bytes());
-                    let line_no = first_line + (offsets.len() as u32 / 8 - 1);
-                    let line = text[start..end].strip_suffix('\r').unwrap_or(&text[start..end]);
-                    if js_trim(line).is_empty() {
-                        skipped += 1;
-                    } else if let Some(ext) = extract_timestamp(line, fmt) {
-                        ins_ts
-                            .execute(params![line_no as i64, ext.ts])
-                            .map_err(|e| e.to_string())?;
-                    }
-                    if end == bytes.len() {
-                        break;
-                    }
-                    pos = end + 1;
-                }
-                ins_file
-                    .execute(params![fid, rel, first_line as i64, offsets])
-                    .map_err(|e| e.to_string())?;
-                total_lines += (offsets.len() / 8) as u32;
-            }
-        }
-        tx.commit().map_err(|e| e.to_string())?;
-
-        let total_events: u32 = conn
-            .query_row("SELECT COUNT(*) FROM line_ts", [], |r| r.get(0))
-            .map_err(|e| e.to_string())?;
         let file_count = names.len() as u32;
-        // 元数据（指纹 + 版本 + 统计）
-        for (k, v) in [
-            ("fingerprint", fp.clone()),
-            ("schemaVersion", SCHEMA_VERSION.to_string()),
-            ("skipped", skipped.to_string()),
-            ("totalLines", total_lines.to_string()),
-            ("totalEvents", total_events.to_string()),
-            ("formatId", fmt_id.clone().unwrap_or_default()),
-        ] {
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
-                params![k, v],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        // WAL checkpoint（一次性批量写，归并清零 wal）
-        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let db = build_mem_db(&root, &names, |loaded, total, current| {
+            let _ = app.emit(
+                "db_build_progress",
+                serde_json::json!({ "loaded": loaded, "total": total, "current": current }),
+            );
+        })?;
+        let total_lines = db.total_lines;
+        let total_events = db.ev_ts.len() as u32;
+        let skipped = db.skipped;
+        let fmt_id = db.fmt.map(|f| f.id.to_string());
 
-        *db_cache_path().lock().map_err(|e| e.to_string())? = Some(db_path.clone());
-        *db_root().lock().map_err(|e| e.to_string())? = Some(root);
-        drop(conn); // 已 WAL checkpoint；连接不驻留，后续命令独立开连接
+        // 骨架字节数（内存基准：offsets + SoA + 直查表）
+        let mem_bytes = db.files.iter().map(|f| f.offsets.len() * 8).sum::<usize>()
+            + db.ev_ts.len() * 8
+            + db.ev_lines.len() * 4
+            + db.pos_by_line.len() * 4;
+        perf_log(
+            &root,
+            &format!(
+                "open: {file_count} files, {total_lines} lines, {total_events} events, skipped {skipped}, skeleton {} MB, {:?}",
+                mem_bytes / 1048576,
+                t0.elapsed()
+            ),
+        );
 
+        *MEM_DB.write() = Some(Arc::new(db));
         Ok(DbOpenResult {
             cache_hit: false,
             total_lines,
@@ -496,74 +456,68 @@ pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult,
     .map_err(|e| format!("db_open 任务失败: {e}"))?
 }
 
-// ---- 文件布局查询（行号映射，rg 扫描与上下文读取共用）----
+// ---- 事件索引 / 视口 ----
 
-/// files 表快照：(fid, name, first_line)，first_line 升序
-fn files_snapshot(conn: &Connection) -> Result<Vec<(i64, String, u32)>, String> {
-    let mut stmt = conn
-        .prepare("SELECT fid, name, first_line FROM files ORDER BY first_line")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u32))
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows.flatten() {
-        out.push(r);
-    }
-    Ok(out)
-}
-
-/// 全局行号 → (fid, 文件路径, 文件内行号)。files_snapshot 已按 first_line 升序，二分定位。
-pub(crate) fn locate_line(
-    conn: &Connection,
-    root: &Path,
-    global_line: u32,
-) -> Result<(i64, PathBuf, u32), String> {
-    let files = files_snapshot(conn)?;
-    if files.is_empty() {
-        return Err("files 表为空".into());
-    }
-    // 二分：找最后一个 first_line <= global_line 的文件
-    let mut lo = 0usize;
-    let mut hi = files.len();
-    while lo + 1 < hi {
-        let mid = (lo + hi) / 2;
-        if files[mid].2 <= global_line {
-            lo = mid;
-        } else {
-            hi = mid;
+/// 事件索引分块（键集分页），按 (ts, line) 升序。
+/// 返回**原始字节**（SoA 布局，前端 typed array 直读、零对象解析）：
+/// `[count: u32][pad: u32][ts: count × f64 LE][line: count × u32 LE]`
+/// ts 以 f64 编码（epoch ms < 2^53，无损）；ts/line 数组平行同序。
+/// after_ts 为 None 表示「无下界」（首块）；非首块传上一块最后一条的 (ts, line)。
+#[tauri::command]
+pub async fn db_event_index_chunk(
+    after_ts: Option<i64>,
+    after_line: u32,
+    max: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let db = current_db()?;
+        // (ts, line) > (after_ts, after_line) 的首个下标：
+        // ev_ts 升序 → 先定位 ts > after_ts 的起点 end_ts；
+        // [base, end_ts) 内 ts == after_ts 且行号升序 → 再排除 line <= after_line。
+        let start = match after_ts {
+            None => 0usize,
+            Some(ts) => {
+                let base = db.ev_ts.partition_point(|&t| t < ts);
+                let end_ts = db.ev_ts.partition_point(|&t| t <= ts);
+                base + db.ev_lines[base..end_ts].partition_point(|&l| l <= after_line)
+            }
+        };
+        let end = (start + max as usize).min(db.ev_ts.len());
+        let count = (end - start) as u32;
+        let mut out = Vec::with_capacity(8 + count as usize * 12);
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        for &t in &db.ev_ts[start..end] {
+            out.extend_from_slice(&(t as f64).to_le_bytes());
         }
-    }
-    let (fid, name, first_line) = &files[lo];
-    if global_line < *first_line {
-        return Err(format!(
-            "行号 {global_line} 越界（首个文件起始 {first_line}）"
-        ));
-    }
-    // 该文件行数上限 = 下一文件 first_line（或无界）
-    if let Some((_, _, next_first)) = files.get(lo + 1) {
-        if global_line >= *next_first {
-            return Err(format!("行号 {global_line} 落在文件间隙"));
+        for &l in &db.ev_lines[start..end] {
+            out.extend_from_slice(&l.to_le_bytes());
         }
-    }
-    Ok((*fid, root.join(name), global_line - first_line))
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("db_event_index_chunk 任务失败: {e}"))??;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
-// ---- 过滤：rg 直扫 + filter_hits 写入 ----
-
-/// 过滤参数（对齐前端 Filter 匹配字段）
-#[derive(serde::Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FilterQuery {
-    pub filter_id: String,
-    pub pattern: String,
-    pub is_regex: bool,
-    pub case_sensitive: bool,
-    /// raw=整行；message=时间戳后正文（首版：命中后按行首时间戳偏移二次校验）
-    pub scope: String,
+/// 视口事件（ts 窗口内全部事件行）：时间线骨架渲染用——直接查事件 SoA（不需要 filter）。
+#[tauri::command]
+pub async fn db_events_in_window(start: i64, end: i64) -> Result<Vec<HitEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = current_db()?;
+        let (lo, hi) = ts_range(&db, start, end);
+        Ok((lo..hi)
+            .map(|i| HitEntry {
+                line: db.ev_lines[i],
+                ts: db.ev_ts[i],
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("db_events_in_window 任务失败: {e}"))?
 }
+
+// ---- 过滤：批量直扫 + 内存命中缓存 ----
 
 /// 字节级 JS trim（White_Space + U+FEFF 的 UTF-8 序列全集）。
 /// msg 域精筛用——域匹配走 bytes regex，免整行 utf8 str 化。
@@ -627,9 +581,9 @@ fn js_trim_bytes(b: &[u8]) -> &[u8] {
 /// - **每 expr 独立正则**对文件全文 find_iter：match 直接归属该 expr 的
 ///   filter 集（无二次确认）；regex 引擎 prefilter（memchr/Aho-Corasick
 ///   SIMD）跳过 miss 字节，与 rg 同款。expr 去重后 K 趟全文扫描（K =
-/// 不同 pattern 数，prefilter 后每趟 ~0.3s/GB）。
-/// - 命中 match → line_offsets 二分行号（库内偏移，免手扫）；同行多
-///   match 由「上一个行号」去重（match 按位置升序）。
+///   不同 pattern 数，prefilter 后每趟 ~0.3s/GB）。
+/// - 命中 match → line_offsets 二分行号；同行多 match 由「上一个行号」去重
+///   （match 按位置升序）。
 /// - message scope：expr 粗筛（msg ⊆ line，整行命中是必要条件）收集候选
 ///   行去重后精筛——ts 只在前 64B 前缀提取（**指定格式**单次调用，探测
 ///   失败/格式突变回退全格式），msg 域字节级匹配（免整行 utf8 转换）。
@@ -641,12 +595,10 @@ fn js_trim_bytes(b: &[u8]) -> &[u8] {
 #[allow(clippy::type_complexity)]
 fn scan_filters_once(
     root: &Path,
-    files: &[(i64, String, u32, Vec<u64>)],
+    files: &[FileEntry],
     queries: &[FilterQuery],
     ts_fmt: Option<&'static TsFormat>,
 ) -> Result<Vec<Vec<u32>>, String> {
-    use std::collections::HashMap;
-
     // ---- pattern 编译（同 expr 多 filter 共享）----
     let mut raw_pats: Vec<String> = Vec::new();
     let mut raw_idx: HashMap<String, usize> = HashMap::new();
@@ -715,7 +667,7 @@ fn scan_filters_once(
     let msg_regexes = build(&msg_pats)?;
 
     // 每文件计时(读/迭代/精筛)聚合,函数尾部一次写入 perf.log
-    let perf: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let perf: Arc<Mutex<Vec<String>>> = Default::default();
 
     // ---- 文件级并行（stride 交错，first_line 升序 → 大文件分散） ----
     let threads = std::thread::available_parallelism()
@@ -723,23 +675,24 @@ fn scan_filters_once(
         .unwrap_or(4)
         .min(files.len())
         .max(1);
-    let files_ref: &[(i64, String, u32, Vec<u64>)] = files;
     let n_q = queries.len();
-    let scan = |part: &[(i64, String, u32, Vec<u64>)]| -> Vec<Vec<u32>> {
+    let scan = |part: &[FileEntry]| -> Vec<Vec<u32>> {
         let mut buckets: Vec<Vec<u32>> = (0..n_q).map(|_| Vec::new()).collect();
-        for (_fid, name, first_line, offsets) in part {
+        for fe in part {
             let t_read = Instant::now();
-            let Ok(bytes) = std::fs::read(root.join(name)) else {
+            let Ok(bytes) = std::fs::read(root.join(&fe.name)) else {
                 continue; // 读取失败跳过（与建库语义一致）
             };
             let ms_read = t_read.elapsed().as_millis();
-            // 行起始偏移：优先库内 line_offsets（schema v3 必有）；
+            // 行起始偏移：直接借用建库时的 Arc 偏移（零拷贝）；
             // 空/越界（异常）→ 手扫 \n 兜底
-            let starts: Vec<u64> = if !offsets.is_empty()
+            let offsets = &fe.offsets;
+            let fallback: Vec<u64>;
+            let starts: &[u64] = if !offsets.is_empty()
                 && offsets[0] == 0
                 && *offsets.last().unwrap() <= bytes.len() as u64
             {
-                offsets.clone()
+                offsets
             } else {
                 let mut v = vec![0u64];
                 let mut i = 0usize;
@@ -752,7 +705,8 @@ fn scan_filters_once(
                         None => break,
                     }
                 }
-                v
+                fallback = v;
+                &fallback
             };
             // 每 expr 独立 find_iter（prefilter SIMD 跳过 miss 字节）；
             // match 直接归属该 expr 的 filter 集；同行多 match 用 last_li 去重。
@@ -768,7 +722,7 @@ fn scan_filters_once(
                     }
                     last_li = li;
                     raw_hits += 1;
-                    let global = first_line + li as u32;
+                    let global = fe.first_line + li as u32;
                     let mut need_msg = false;
                     for &(qi, is_msg) in &raw_slots[ei] {
                         if is_msg {
@@ -827,10 +781,14 @@ fn scan_filters_once(
                     }
                 }
             }
-            if let Ok(mut v) = perf.lock() {
+            {
+                let mut v = perf.lock();
                 v.push(format!(
-                    "scan {name} {:.1}MB read={ms_read}ms iter={ms_iter}ms msg={:?} hits={raw_hits} cand={n_cand}",
+                    "scan {} {:.1}MB read={}ms iter={}ms msg={:?} hits={raw_hits} cand={n_cand}",
+                    fe.name,
                     bytes.len() as f64 / 1048576.0,
+                    ms_read,
+                    ms_iter,
                     t_msg.elapsed()
                 ));
             }
@@ -838,16 +796,21 @@ fn scan_filters_once(
         buckets
     };
     let results: Vec<Vec<Vec<u32>>> = if threads <= 1 {
-        vec![scan(files_ref)]
+        vec![scan(files)]
     } else {
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..threads)
                 .map(|t| {
-                    let part: Vec<(i64, String, u32, Vec<u64>)> = files_ref
+                    // Arc clone（offsets 不复制），stride 均摊大文件
+                    let part: Vec<FileEntry> = files
                         .iter()
                         .skip(t)
                         .step_by(threads)
-                        .cloned()
+                        .map(|fe| FileEntry {
+                            name: fe.name.clone(),
+                            first_line: fe.first_line,
+                            offsets: Arc::clone(&fe.offsets),
+                        })
                         .collect();
                     scope.spawn(move || scan(&part))
                 })
@@ -864,13 +827,13 @@ fn scan_filters_once(
             per_filter[qi].extend(v);
         }
     }
-    // 行号升序:多线程 stride 合并后乱序,B-tree (filter_id, line)
-    // 随机页插入是百万级命中行 INSERT 变慢的主因之一(实测 324 万行 63.8s)
+    // 行号升序:多线程 stride 合并后乱序
     for v in per_filter.iter_mut() {
         v.sort_unstable();
     }
     // 每文件计时落地(一次写;目录无 .logGraph 时静默跳过——测试用例)
-    if let Ok(logs) = perf.lock() {
+    {
+        let logs = perf.lock();
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -886,7 +849,7 @@ fn scan_filters_once(
 }
 
 /// filter 定义指纹：pattern/正则/大小写/scope 任一变化 → 缓存失效重扫。
-/// （目录变化由 cache.db 整库重建保证，无需纳入。）
+/// （目录变化由重新打开目录全量重建保证，无需纳入。）
 fn filter_def_fp(q: &FilterQuery) -> String {
     let mut h: u64 = 1469598103934665603;
     let part = format!(
@@ -898,31 +861,6 @@ fn filter_def_fp(q: &FilterQuery) -> String {
         h = h.wrapping_mul(1099511628211);
     }
     format!("{h:016x}")
-}
-
-/// filter_hits ⋈ line_ts → (line, ts)[]（ts 升序）。rg 扫描后与缓存命中共用。
-fn filter_hits_join(conn: &Connection, filter_id: &str) -> Result<Vec<HitEntry>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT h.line, t.ts FROM filter_hits h
-             JOIN line_ts t ON t.line = h.line
-             WHERE h.filter_id = ?1
-             ORDER BY t.ts, h.line",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![filter_id], |r| {
-            Ok(HitEntry {
-                line: r.get(0)?,
-                ts: r.get(1)?,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows.flatten() {
-        out.push(r);
-    }
-    Ok(out)
 }
 
 /// 批量过滤器查询结果（命令内聚合，最终编码为二进制 IPC 响应）：
@@ -959,18 +897,17 @@ fn encode_filter_batch(results: &FilterBatchOut) -> Vec<u8> {
 }
 
 /// 批量运行过滤器（recomputeMatches / 单 filter 编辑共用）：
-/// 1. 逐个比对定义指纹——命中的直接 JOIN filter_hits（不扫描）；
-/// 2. 未命中的**单遍扫描**全部文件（scan_filters_once：文件级并行 +
-///    RegexSet 一次匹配所有 pattern），逐个事务覆盖写 filter_hits + 指纹；
-/// 3. 全部 filter 的 JOIN 结果编码为二进制返回（含缓存命中）。
+/// 1. 逐个比对定义指纹——命中的直接取内存命中（不扫描）；
+/// 2. miss 的单遍批量直扫原文件，结果写入内存命中缓存；
+/// 3. 命中行关联事件 ts 编码为二进制返回。
 #[tauri::command]
 pub async fn db_filters_batch(
     queries: Vec<FilterQuery>,
 ) -> Result<tauri::ipc::Response, String> {
     let bytes = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let t0 = Instant::now();
-        let conn = open_cache()?;
-        let root = cache_root()?;
+        let db = current_db()?;
+        let root = db.root.clone();
         perf_log(
             &root,
             &format!("---- db_filters_batch: {} queries ----", queries.len()),
@@ -978,19 +915,20 @@ pub async fn db_filters_batch(
 
         let mut out: FilterBatchOut = Vec::new();
         let mut miss: Vec<FilterQuery> = Vec::new();
-        for q in &queries {
-            let def_fp = filter_def_fp(q);
-            let cached: Option<String> = conn
-                .query_row(
-                    "SELECT fp FROM filter_meta WHERE filter_id = ?1",
-                    params![q.filter_id],
-                    |r| r.get(0),
-                )
-                .ok();
-            if cached.as_deref() == Some(def_fp.as_str()) {
-                out.push((q.filter_id.clone(), filter_hits_join(&conn, &q.filter_id)?));
-            } else {
-                miss.push(q.clone());
+        {
+            let fc = db.filters.lock();
+            for q in &queries {
+                let hit = fc
+                    .fps
+                    .get(&q.filter_id)
+                    .map(|s| s == &filter_def_fp(q))
+                    .unwrap_or(false)
+                    .then(|| fc.hits.get(&q.filter_id).cloned())
+                    .flatten();
+                match hit {
+                    Some(h) => out.push((q.filter_id.clone(), hits_with_ts(&db, &h))),
+                    None => miss.push(q.clone()),
+                }
             }
         }
         perf_log(
@@ -1003,118 +941,31 @@ pub async fn db_filters_batch(
             ),
         );
         if !miss.is_empty() {
-            // 行偏移从库内 line_offsets 取（scan 反查行号用，免手扫全文）
             let t = Instant::now();
-            let files: Vec<(i64, String, u32, Vec<u64>)> = files_snapshot(&conn)?
-                .into_iter()
-                .map(|(fid, name, first_line)| {
-                    let off = load_line_offsets(&conn, fid).unwrap_or_default();
-                    (fid, name, first_line, off)
-                })
-                .collect();
-            // 时间戳格式探测（首个文件前 10 行）：msg 精筛免每行全格式尝试
-            let ts_fmt = files.first().and_then(|(_fid, name, ..)| {
-                std::fs::read(root.join(name)).ok().and_then(|b| {
-                    let s = String::from_utf8_lossy(&b[..b.len().min(64 * 1024)]);
-                    let lines: Vec<&str> = s.split('\n').take(10).collect();
-                    detect_timestamp_format(&lines)
-                })
-            });
+            // 建库时已探测格式（v2 每次重读首文件 10 行，此处直接复用）
+            let ts_fmt = db.fmt;
+            let mut per_filter = scan_filters_once(&root, &db.files, &miss, ts_fmt)?;
+            let scan_ms = t.elapsed();
+            let t = Instant::now();
+            let mut fc = db.filters.lock();
+            for (qi, q) in miss.iter().enumerate() {
+                let lines = Arc::new(std::mem::take(&mut per_filter[qi]));
+                fc.fps.insert(q.filter_id.clone(), filter_def_fp(q));
+                fc.hits.insert(q.filter_id.clone(), Arc::clone(&lines));
+                out.push((q.filter_id.clone(), hits_with_ts(&db, &lines)));
+            }
+            drop(fc);
             perf_log(
                 &root,
                 &format!(
-                    "prep: {} files, fmt={:?} {:?}",
-                    files.len(),
-                    ts_fmt.map(|f| f.id),
-                    t.elapsed()
+                    "store+join: {} miss filters, hits {:?}, {:?} (scan {:?})",
+                    miss.len(),
+                    out.iter().map(|(_, h)| h.len()).collect::<Vec<_>>(),
+                    t.elapsed(),
+                    scan_ms
                 ),
             );
-            let t = Instant::now();
-            let per_filter = scan_filters_once(&root, &files, &miss, ts_fmt)?;
-            let hits: Vec<usize> = per_filter.iter().map(|v| v.len()).collect();
-            perf_log(
-                &root,
-                &format!("scan: hits={hits:?} {:?}", t.elapsed()),
-            );
-            for (qi, q) in miss.iter().enumerate() {
-                let lines = &per_filter[qi];
-                let t = Instant::now();
-                // 事务覆盖写（同 filter_id 重定义 = 覆盖旧命中）
-                conn.execute_batch("BEGIN")
-                    .map_err(|e| e.to_string())?;
-                let _ = conn.execute(
-                    "DELETE FROM filter_hits WHERE filter_id = ?1",
-                    params![q.filter_id],
-                );
-                // 批量 INSERT：500 行/句（1000 参数 < SQLite 32766 上限），
-                // 350 万行从 ~5s 降到 ~1.5s；尾巴（<500）走单行 prepared
-                let ins_sql = format!(
-                    "INSERT OR IGNORE INTO filter_hits(filter_id, line) VALUES {}",
-                    (0..500)
-                        .map(|i| format!("(?{},?{})", i * 2 + 1, i * 2 + 2))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-                {
-                    let mut ins_full = conn.prepare(&ins_sql).map_err(|e| e.to_string())?;
-                    let mut ins_one = conn
-                        .prepare("INSERT OR IGNORE INTO filter_hits(filter_id, line) VALUES (?1, ?2)")
-                        .map_err(|e| e.to_string())?;
-                    let fid: &str = &q.filter_id;
-                    let mut lv: Vec<i64> = Vec::with_capacity(500);
-                    for chunk in lines.chunks(500) {
-                        if chunk.len() == 500 {
-                            lv.clear();
-                            lv.extend(chunk.iter().map(|&l| l as i64));
-                            let mut bind: Vec<&dyn rusqlite::ToSql> =
-                                Vec::with_capacity(1000);
-                            for k in 0..500 {
-                                bind.push(&fid);
-                                bind.push(&lv[k]);
-                            }
-                            ins_full
-                                .execute(bind.as_slice())
-                                .map_err(|e| e.to_string())?;
-                        } else {
-                            for &l in chunk {
-                                ins_one
-                                    .execute(params![q.filter_id, l as i64])
-                                    .map_err(|e| e.to_string())?;
-                            }
-                        }
-                    }
-                }
-                conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
-                perf_log(
-                    &root,
-                    &format!(
-                        "insert {}: {} rows {:?}",
-                        q.filter_id,
-                        lines.len(),
-                        t.elapsed()
-                    ),
-                );
-                // 定义指纹随结果写入（失败仅失去缓存）
-                let _ = conn.execute(
-                    "INSERT OR REPLACE INTO filter_meta(filter_id, fp) VALUES (?1, ?2)",
-                    params![q.filter_id, filter_def_fp(q)],
-                );
-                let t = Instant::now();
-                out.push((q.filter_id.clone(), filter_hits_join(&conn, &q.filter_id)?));
-                perf_log(
-                    &root,
-                    &format!(
-                        "join {}: {} rows {:?}",
-                        q.filter_id,
-                        out.last().map(|(_, h)| h.len()).unwrap_or(0),
-                        t.elapsed()
-                    ),
-                );
-            }
         }
-        // 写入归并:百万级命中行的 DELETE+INSERT 会把 wal 推到数百 MB,
-        // 提交后截断归位(与 db_open 建库尾部同款)
-        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         let t = Instant::now();
         let enc = encode_filter_batch(&out);
         let total_rows: usize = out.iter().map(|(_, h)| h.len()).sum();
@@ -1135,57 +986,30 @@ pub async fn db_filters_batch(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-/// 删除一个 filter 的命中（filter 被删时调用；命中可达百万行 → 阻塞线程池）
+/// 删除一个 filter 的命中（filter 被删时调用）
 #[tauri::command]
 pub async fn db_filter_drop(filter_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(path) = db_cache_path().lock().map_err(|e| e.to_string())?.clone() else {
-            return Ok(()); // 未打开视为无操作
-        };
-        // 写命令也要 busy_timeout：与 db_filters_batch 的 filter_hits 写事务并发时
-        // 等待而非立即 SQLITE_BUSY
-        let conn = Connection::open(&path).map_err(|e| e.to_string())?;
-        conn.execute_batch("PRAGMA busy_timeout=5000;")
-            .map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM filter_hits WHERE filter_id = ?1",
-            params![filter_id],
-        )
-        .map_err(|e| e.to_string())?;
-        let _ = conn.execute(
-            "DELETE FROM filter_meta WHERE filter_id = ?1",
-            params![filter_id],
-        );
+        let db = current_db()?;
+        let mut fc = db.filters.lock();
+        fc.hits.remove(&filter_id);
+        fc.fps.remove(&filter_id);
         Ok(())
     })
     .await
     .map_err(|e| format!("db_filter_drop 任务失败: {e}"))?
 }
 
-/// 读取一个文件的行偏移数组（schema v3 必有；缺失/损坏返回 Err）
-fn load_line_offsets(conn: &Connection, fid: i64) -> Result<Vec<u64>, String> {
-    let blob: Vec<u8> = conn
-        .query_row(
-            "SELECT line_offsets FROM files WHERE fid = ?1",
-            params![fid],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    decode_line_offsets(&blob)
-}
-
-// ---- 按需取数（行偏移 seek 直读原文件）----
-
+// ---- 按需取数（行偏移 seek 直读原文件） ----
 
 /// 单行文本（tooltip/复制用）：行偏移 seek 直读，不整文件重读
 #[tauri::command]
 pub async fn db_line(no: u32) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_cache()?;
-        let root = cache_root()?;
-        let (fid, path, local) = locate_line(&conn, &root, no)?;
-        let offsets = load_line_offsets(&conn, fid)?;
-        read_line_range(&path, &offsets, local, local)?
+        let db = current_db()?;
+        let (fi, path, local) = locate(&db, no)?;
+        let offsets = &db.files[fi].offsets;
+        read_line_range(&path, offsets, local, local)?
             .into_iter()
             .next()
             .ok_or_else(|| format!("行号越界: {no}"))
@@ -1194,98 +1018,7 @@ pub async fn db_line(no: u32) -> Result<String, String> {
     .map_err(|e| format!("db_line 任务失败: {e}"))?
 }
 
-/// 视口事件（ts 窗口内全部事件行）：时间线骨架渲染用——直接查 line_ts（不需要 filter）。
-#[tauri::command]
-pub async fn db_events_in_window(start: i64, end: i64) -> Result<Vec<HitEntry>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_cache()?;
-        let mut stmt = conn
-            .prepare("SELECT line, ts FROM line_ts WHERE ts BETWEEN ?1 AND ?2 ORDER BY ts, line")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![start, end], |r| {
-                Ok(HitEntry {
-                    line: r.get(0)?,
-                    ts: r.get(1)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for r in rows.flatten() {
-            out.push(r);
-        }
-        Ok(out)
-    })
-    .await
-    .map_err(|e| format!("db_events_in_window 任务失败: {e}"))?
-}
-
-/// 事件索引分块（键集分页，复合索引免排序），按 (ts, line) 升序。
-/// 返回**原始字节**（SoA 布局，前端 typed array 直读、零对象解析）：
-/// `[count: u32][pad: u32][ts: count × f64 LE][line: count × u32 LE]`
-/// ts 以 f64 编码（epoch ms < 2^53，无损）；ts/line 数组平行同序。
-/// after_ts 为 None 表示「无下界」（首块）；非首块传上一块最后一条的 (ts, line)。
-///
-/// 性能要点：**不能**把首块哨兵写成 `WHERE (?1 IS NULL OR ts > ?1 ...)` ——
-/// `?1 IS NULL` 谓词让 SQLite 无法在编译期确定 `ts > ?1` 可作索引下界，
-/// 查询计划退化为整表 SCAN（EXPLAIN QUERY PLAN 实测：OR 谓词 = SCAN vs
-/// 纯范围谓词 = SEARCH），第 k 块都要扫过前 k-1 块的行 → O(N²/chunk)，
-/// 表现为「载入索引越到后面越慢」。首块/续块拆成两条 SQL：
-/// - 首块：无 WHERE，纯 `ORDER BY ts, line LIMIT ?`（顺索引扫，天然最优）
-/// - 续块：行值比较 `(ts, line) > (?1, ?2)`（复合索引两列下界定位，SEEK 一次）
-#[tauri::command]
-pub async fn db_event_index_chunk(
-    after_ts: Option<i64>,
-    after_line: u32,
-    max: u32,
-) -> Result<tauri::ipc::Response, String> {
-    let bytes = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let conn = open_cache()?;
-        let sql = if after_ts.is_none() {
-            // 首块：无下界
-            "SELECT line, ts FROM line_ts ORDER BY ts, line LIMIT ?1"
-        } else {
-            // 续块：行值比较（复合索引 (ts, line) 下界定位；
-            // 与 ts > ?1 OR (ts = ?1 AND line > ?2) 语义等价）
-            "SELECT line, ts FROM line_ts WHERE (ts, line) > (?1, ?2) ORDER BY ts, line LIMIT ?3"
-        };
-        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-        // 绑定值先落地为局部变量：`&(expr)` 临时值会在语句结束被释放，
-        // Vec<&dyn ToSql> 悬垂（borrow checker 报 temporary value freed）
-        let max_v = max as i64;
-        let line_v = after_line as i64;
-        let bind: Vec<&dyn rusqlite::ToSql> = match &after_ts {
-            None => vec![&max_v],
-            Some(ts) => vec![ts, &line_v, &max_v],
-        };
-        let rows = stmt
-            .query_map(bind.as_slice(), |r| {
-                Ok((r.get::<_, u32>(0)?, r.get::<_, i64>(1)?))
-            })
-            .map_err(|e| e.to_string())?;
-        let mut ts_bytes: Vec<u8> = Vec::new();
-        let mut line_bytes: Vec<u8> = Vec::new();
-        let mut count: u32 = 0;
-        for r in rows.flatten() {
-            ts_bytes.extend_from_slice(&(r.1 as f64).to_le_bytes());
-            line_bytes.extend_from_slice(&r.0.to_le_bytes());
-            count += 1;
-        }
-        let mut out = Vec::with_capacity(8 + ts_bytes.len() + line_bytes.len());
-        out.extend_from_slice(&count.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&ts_bytes);
-        out.extend_from_slice(&line_bytes);
-        Ok(out)
-    })
-    .await
-    .map_err(|e| format!("db_event_index_chunk 任务失败: {e}"))??;
-    Ok(tauri::ipc::Response::new(bytes))
-}
-
 /// 视口行文本：按全局行号集合取行（任意顺序；内部排序去重）。
-/// 替代旧版「min/max 行号区间」契约——多文件时间交叠时区间会横跨数百万行，
-/// 一次回传全区间行；id 契约只回视口实际需要的行。
 /// 同文件行号 gap<=64 合并成一整段 seek 读取（段内多余行无害，调用方按需取用）。
 /// 返回原始字节：`[count: u32][pad: u32] + 每行 [line: u32][len: u32][utf-8 bytes]`
 #[tauri::command]
@@ -1294,9 +1027,9 @@ pub async fn db_lines_by_ids(ids: Vec<u32>) -> Result<tauri::ipc::Response, Stri
         if ids.is_empty() {
             return Ok(vec![0u8; 8]);
         }
-        let conn = open_cache()?;
-        let root = cache_root()?;
-        let files = files_snapshot(&conn)?;
+        let db = current_db()?;
+        let root = &db.root;
+        let files = &db.files;
         let mut sorted = ids;
         sorted.sort_unstable();
         sorted.dedup();
@@ -1306,32 +1039,25 @@ pub async fn db_lines_by_ids(ids: Vec<u32>) -> Result<tauri::ipc::Response, Stri
         let mut fi = 0usize; // files 与 sorted 均升序 → 双指针
         while i < sorted.len() {
             let line = sorted[i];
-            while fi + 1 < files.len() && files[fi + 1].2 <= line {
+            while fi + 1 < files.len() && files[fi + 1].first_line <= line {
                 fi += 1;
             }
-            let (fid, name, first_line) = &files[fi];
-            let file_limit = files.get(fi + 1).map(|f| f.2).unwrap_or(u32::MAX);
+            let fe = &files[fi];
+            let file_limit = files.get(fi + 1).map(|f| f.first_line).unwrap_or(u32::MAX);
             let mut j = i;
             while j < sorted.len() && sorted[j] < file_limit {
                 j += 1;
             }
-            if line < *first_line {
+            if line < fe.first_line {
                 i = j;
                 continue;
             }
-            let locals: Vec<u32> = sorted[i..j].iter().map(|&l| l - first_line).collect();
+            let locals: Vec<u32> = sorted[i..j].iter().map(|&l| l - fe.first_line).collect();
             let segs = merge_line_segments(&locals, 64);
-            let offsets = match load_line_offsets(&conn, *fid) {
-                Ok(o) => o,
-                Err(_) => {
-                    i = j;
-                    continue;
-                }
-            };
             for (lo, hi) in segs {
-                if let Ok(texts) = read_line_range(&root.join(name), &offsets, lo, hi) {
+                if let Ok(texts) = read_line_range(&root.join(&fe.name), &fe.offsets, lo, hi) {
                     for (k, text) in texts.into_iter().enumerate() {
-                        rows.push((first_line + lo + k as u32, text));
+                        rows.push((fe.first_line + lo + k as u32, text));
                     }
                 }
             }
@@ -1355,9 +1081,7 @@ pub async fn db_lines_by_ids(ids: Vec<u32>) -> Result<tauri::ipc::Response, Stri
 
 /// 关联窗口下推：filter_ids 任一命中的行中，ts ∈ [start, end] 的全局行号。
 /// 替代旧版 JS 全量扫 matches（每次视图变化 O(总命中数)）。
-/// line_ts (ts,line) 覆盖索引范围扫（窗口行）驱动，每行对 filter_hits
-/// 主键做 EXISTS 点查（命中即短路，免 CROSS JOIN + DISTINCT 的去重开销）；
-/// 窗口外的大 filter 命中完全不触碰。
+/// 窗口事件（ts 升序）驱动，命中行并集二分判定——窗口外的大 filter 命中完全不触碰。
 #[tauri::command]
 pub async fn db_corr_ids(
     filter_ids: Vec<String>,
@@ -1368,32 +1092,24 @@ pub async fn db_corr_ids(
         if filter_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = open_cache()?;
-        let placeholders = (3..filter_ids.len() + 3)
-            .map(|i| format!("?{i}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT t.line FROM line_ts t \
-             WHERE t.ts BETWEEN ?1 AND ?2 \
-               AND EXISTS (SELECT 1 FROM filter_hits h \
-                           WHERE h.filter_id IN ({placeholders}) AND h.line = t.line)"
-        );
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(filter_ids.len() + 2);
-        bind.push(&start);
-        bind.push(&end);
-        for s in &filter_ids {
-            bind.push(s);
+        let db = current_db()?;
+        // 命中行并集（各 filter 升序 → 归并后 sort+dedup）
+        let mut union: Vec<u32> = Vec::new();
+        for fid in &filter_ids {
+            if let Some(h) = filter_hits(&db, fid) {
+                union.extend_from_slice(&h);
+            }
         }
-        let rows = stmt
-            .query_map(bind.as_slice(), |r| r.get::<_, u32>(0))
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for r in rows.flatten() {
-            out.push(r);
+        if union.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(out)
+        union.sort_unstable();
+        union.dedup();
+        let (lo, hi) = ts_range(&db, start, end);
+        Ok((lo..hi)
+            .map(|i| db.ev_lines[i])
+            .filter(|&l| union.binary_search(&l).is_ok())
+            .collect())
     })
     .await
     .map_err(|e| format!("db_corr_ids 任务失败: {e}"))?
@@ -1402,8 +1118,7 @@ pub async fn db_corr_ids(
 /// 关闭（切换目录时）
 #[tauri::command]
 pub fn db_close() -> Result<(), String> {
-    *db_cache_path().lock().map_err(|e| e.to_string())? = None;
-    *db_root().lock().map_err(|e| e.to_string())? = None;
+    *MEM_DB.write() = None;
     Ok(())
 }
 
@@ -1423,14 +1138,14 @@ pub struct DbFileInfo {
 #[tauri::command]
 pub async fn db_files() -> Result<Vec<DbFileInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_cache()?;
-        let root = cache_root()?;
-        Ok(files_snapshot(&conn)?
-            .into_iter()
-            .map(|(_fid, name, first_line)| DbFileInfo {
-                first_line,
-                path: root.join(&name).to_string_lossy().into_owned(),
-                name,
+        let db = current_db()?;
+        Ok(db
+            .files
+            .iter()
+            .map(|fe| DbFileInfo {
+                first_line: fe.first_line,
+                path: db.root.join(&fe.name).to_string_lossy().into_owned(),
+                name: fe.name.clone(),
             })
             .collect())
     })
@@ -1512,6 +1227,14 @@ mod tests {
         out
     }
 
+    fn fe(name: &str, first_line: u32, text: &str) -> FileEntry {
+        FileEntry {
+            name: name.into(),
+            first_line,
+            offsets: Arc::new(scan_offsets(text)),
+        }
+    }
+
     #[test]
     fn offsets_match_split_semantics() {
         assert_eq!(scan_offsets("a"), vec![0]);
@@ -1561,11 +1284,7 @@ mod tests {
         std::fs::write(dir.join("a.log"), a_text).unwrap();
         std::fs::write(dir.join("b.log"), b_text).unwrap();
         // a.log split('\n') 4 段（含尾空段）→ 全局行 0..=3；b.log 从行 4 起。
-        // 2 文件按 stride 分 2 线程，handle 序合并 → 行号升序稳定。
-        let files = vec![
-            (1i64, "a.log".to_string(), 0u32, scan_offsets(a_text)),
-            (2, "b.log".to_string(), 4, scan_offsets(b_text)),
-        ];
+        let files = vec![fe("a.log", 0, a_text), fe("b.log", 4, b_text)];
         let q = |id: &str, pattern: &str, is_regex: bool, cs: bool, scope: &str| FilterQuery {
             filter_id: id.into(),
             pattern: pattern.into(),
@@ -1619,48 +1338,6 @@ mod tests {
     }
 
     #[test]
-    fn corr_ids_sql_and_plan() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        conn.execute(
-            "INSERT INTO line_ts(line, ts) VALUES (10, 100), (11, 200), (12, 300)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO filter_hits(filter_id, line) VALUES ('f1', 10), ('f1', 12), ('f2', 11)",
-            [],
-        )
-        .unwrap();
-        let sql = "SELECT t.line FROM line_ts t \
-                   WHERE t.ts BETWEEN ?1 AND ?2 \
-                     AND EXISTS (SELECT 1 FROM filter_hits h \
-                                 WHERE h.filter_id IN (?3) AND h.line = t.line)";
-        // 结果正确性：ts∈[150,350] 且 f1 命中 → 仅行 12
-        let mut stmt = conn.prepare(sql).unwrap();
-        let rows: Vec<u32> = stmt
-            .query_map(params![150i64, 350i64, "f1"], |r| r.get(0))
-            .unwrap()
-            .flatten()
-            .collect();
-        assert_eq!(rows, vec![12]);
-        // 查询计划：line_ts 必须走 (ts,line) 覆盖索引（SEARCH），不得全表 SCAN
-        let mut plan_stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-        let plans: Vec<String> = plan_stmt
-            .query_map(params![150i64, 350i64, "f1"], |r| {
-                r.get::<_, String>(3)
-            })
-            .unwrap()
-            .flatten()
-            .collect();
-        let all = plans.join(" | ");
-        assert!(
-            all.contains("SEARCH") && all.contains("idx_line_ts_ts"),
-            "query plan 走了全表扫描: {all}"
-        );
-    }
-
-    #[test]
     fn filter_def_fp_stability() {
         let base = FilterQuery {
             filter_id: "f1".into(),
@@ -1685,33 +1362,86 @@ mod tests {
     }
 
     #[test]
-    fn filter_hits_join_orders_by_ts() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        // 行号/时间戳乱序插入 → JOIN 输出必须 ts 升序
-        for (line, ts) in [(30, 300), (10, 200), (20, 100)] {
-            conn.execute(
-                "INSERT INTO line_ts(line, ts) VALUES (?1, ?2)",
-                params![line, ts],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO filter_hits(filter_id, line) VALUES ('f1', ?1)",
-                params![line],
-            )
-            .unwrap();
-        }
-        let out = filter_hits_join(&conn, "f1").unwrap();
+    fn hits_with_ts_orders_by_ts_and_drops_no_event() {
+        // 行 10/20/30 有 ts；行 99 无 ts（命中也被丢弃）
+        let db = test_db(&[(30, 300), (10, 200), (20, 100)]);
+        let hits = vec![30u32, 99, 10, 20];
+        let out = hits_with_ts(&db, &hits);
         assert_eq!(
             out.iter().map(|h| (h.line, h.ts)).collect::<Vec<_>>(),
             vec![(20, 100), (10, 200), (30, 300)]
         );
-        assert!(filter_hits_join(&conn, "nope").unwrap().is_empty());
+        assert!(hits_with_ts(&db, &[]).is_empty());
+    }
+
+    #[test]
+    fn ts_range_and_index_chunk_paging() {
+        // (ts, line) 升序：(100,20) (200,10) (300,30)
+        let db = test_db(&[(30, 300), (10, 200), (20, 100)]);
+        let (lo, hi) = ts_range(&db, 150, 350);
+        assert_eq!((lo, hi), (1, 3));
+        let (lo, hi) = ts_range(&db, 100, 200);
+        assert_eq!((lo, hi), (0, 2));
+        // 续块下界：(ts, line) > (200, 10) → 从 (300,30) 起
+        let base = db.ev_ts.partition_point(|&t| t < 200);
+        let end_ts = db.ev_ts.partition_point(|&t| t <= 200);
+        assert_eq!(base + db.ev_lines[base..end_ts].partition_point(|&l| l <= 10), 2);
+        // 行号并列时（同 ts）：> (100, 25) → 跳过 (100,20)
+        let db2 = test_db(&[(20, 100), (25, 100), (30, 100)]);
+        let base = db2.ev_ts.partition_point(|&t| t < 100);
+        let end_ts = db2.ev_ts.partition_point(|&t| t <= 100);
+        assert_eq!(base + db2.ev_lines[base..end_ts].partition_point(|&l| l <= 25), 2);
+    }
+
+    #[test]
+    fn corr_ids_window_membership() {
+        let db = test_db(&[(10, 100), (11, 200), (12, 300)]);
+        set_filter_hits(&db, "f1", vec![10, 12]);
+        set_filter_hits(&db, "f2", vec![11]);
+        // ts∈[150,350] 且 (f1 ∪ f2) 命中 → 行 11、12
+        let mut union: Vec<u32> = Vec::new();
+        for fid in ["f1", "f2"] {
+            union.extend_from_slice(&filter_hits(&db, fid).unwrap());
+        }
+        union.sort_unstable();
+        union.dedup();
+        let (lo, hi) = ts_range(&db, 150, 350);
+        let rows: Vec<u32> = (lo..hi)
+            .map(|i| db.ev_lines[i])
+            .filter(|&l| union.binary_search(&l).is_ok())
+            .collect();
+        assert_eq!(rows, vec![11, 12]);
+    }
+
+    #[test]
+    fn build_mem_db_excludes_loggraph_and_indexes_ts() {
+        let dir = tmp_dir("build");
+        std::fs::create_dir_all(dir.join(".logGraph")).unwrap();
+        std::fs::write(
+            dir.join("a.log"),
+            "2024-01-01 10:00:00.000 alpha\nplain line\n2024-01-01 10:00:01.000 beta\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join(".logGraph").join("junk.log"), "1791550151000 epoch junk\n").unwrap();
+        let mut names = Vec::new();
+        walk_log_files(&dir, "", 0, &mut names);
+        names.sort();
+        assert_eq!(names, vec!["a.log".to_string()]); // .logGraph 被排除
+
+        let db = build_mem_db(&dir, &names, |_, _, _| {}).unwrap();
+        assert_eq!(db.total_lines, 4); // 3 行 + 尾空段
+        assert_eq!(db.ev_ts.len(), 2); // 2 个事件（plain 无 ts）
+        assert_eq!(db.pos_by_line[1], NO_EVENT);
+        let p0 = db.pos_by_line[0];
+        assert!(p0 != NO_EVENT);
+        assert_eq!(db.ev_lines[p0 as usize], 0);
+        assert_eq!(db.ev_ts[p0 as usize], 1704103200000); // Date.UTC(2024,0,1,10,0,0)——iso-local-ms 无时区修正
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 大规模基准(用户实测复现):`cargo test --release bench_db_filters_scale -- --ignored --nocapture`
-    /// 复刻 db_filters_batch 首次 miss 全链路(建库→snapshot→scan→INSERT→JOIN→encode),
-    /// 分阶段计时——扫描方式已四轮大改而总耗时不变,瓶颈在固定环节,用数据定位。
+    /// 复刻 db_filters_batch 全链路(建库→scan→join→encode)，分阶段计时。
+    /// 纯内存版：另报告驻留字节数（磁盘缓存选型的核心输入）。
     #[test]
     #[ignore]
     fn bench_db_filters_scale() {
@@ -1749,85 +1479,27 @@ mod tests {
         }
         println!("[bench] 生成 640 万行/600MB: {:?}", t0.elapsed());
 
-        // ---- 建库(复刻 db_open)----
-        let db_path = dir.join("bench.db");
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-262144;",
-        )
-        .unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
+        // ---- 建库（复刻 db_open）----
         let t1 = Instant::now();
-        let tx = conn.unchecked_transaction().unwrap();
-        {
-            let mut ins_file = tx
-                .prepare("INSERT INTO files(fid, name, first_line, line_offsets) VALUES (?1, ?2, ?3, ?4)")
-                .unwrap();
-            let mut ins_ts = tx
-                .prepare("INSERT OR IGNORE INTO line_ts(line, ts) VALUES (?1, ?2)")
-                .unwrap();
-            let mut total_lines: u32 = 0;
-            for (i, f) in (0..8u32).enumerate() {
-                let rel = format!("app{f}.log");
-                let text = read_file_lossy(&dir.join(&rel)).unwrap();
-                let fid = (i + 1) as i64;
-                let first_line = total_lines;
-                let mut offsets: Vec<u8> = Vec::with_capacity(64 + text.len() / 16 * 8);
-                let bytes = text.as_bytes();
-                let mut pos = 0usize;
-                let mut line_no = 0u32;
-                loop {
-                    let start = pos;
-                    let end = match bytes[pos..].iter().position(|&b| b == b'\n') {
-                        Some(k) => pos + k,
-                        None => bytes.len(),
-                    };
-                    offsets.extend_from_slice(&(start as u64).to_le_bytes());
-                    let line = text[start..end].strip_suffix('\r').unwrap_or(&text[start..end]);
-                    if let Some(ext) = extract_timestamp(line, None) {
-                        ins_ts
-                            .execute(params![(first_line + line_no) as i64, ext.ts])
-                            .unwrap();
-                    }
-                    if end == bytes.len() {
-                        break;
-                    }
-                    pos = end + 1;
-                    line_no += 1;
-                }
-                ins_file
-                    .execute(params![fid, rel, first_line as i64, offsets])
-                    .unwrap();
-                total_lines += line_no + 1;
-            }
-        }
-        tx.commit().unwrap();
-        println!("[bench] 建库(ts 扫描 640 万行): {:?}", t1.elapsed());
-
-        // ---- db_filters_batch 复刻 ----
-        let root = dir.as_path();
-        let t2 = Instant::now();
-        let files: Vec<(i64, String, u32, Vec<u64>)> = files_snapshot(&conn)
-            .unwrap()
-            .into_iter()
-            .map(|(fid, name, first_line)| {
-                let off = load_line_offsets(&conn, fid).unwrap_or_default();
-                (fid, name, first_line, off)
-            })
-            .collect();
-        let ts_fmt = files.first().and_then(|(_fid, name, ..)| {
-            std::fs::read(root.join(name)).ok().and_then(|b| {
-                let s = String::from_utf8_lossy(&b[..b.len().min(64 * 1024)]);
-                let lines: Vec<&str> = s.split('\n').take(10).collect();
-                detect_timestamp_format(&lines)
-            })
-        });
+        let mut names: Vec<String> = Vec::new();
+        walk_log_files(&dir, "", 0, &mut names);
+        names.sort();
+        let db = build_mem_db(&dir, &names, |_, _, _| {}).unwrap();
         println!(
-            "[bench] snapshot+offsets+格式探测: {:?} (fmt={:?})",
-            t2.elapsed(),
-            ts_fmt.map(|f| f.id)
+            "[bench] 建库(读文件+偏移+ts 扫描 {} 万行): {:?}",
+            db.total_lines / 10000,
+            t1.elapsed()
+        );
+        let offsets_b: usize = db.files.iter().map(|f| f.offsets.len() * 8).sum();
+        println!(
+            "[bench] 驻留: offsets {} MB, events {} ({} MB), pos_by_line {} MB",
+            offsets_b / 1048576,
+            db.ev_ts.len(),
+            (db.ev_ts.len() * 12) / 1048576,
+            db.pos_by_line.len() * 4 / 1048576
         );
 
+        // ---- db_filters_batch 复刻 ----
         let queries = vec![
             FilterQuery {
                 filter_id: "rawA".into(),
@@ -1845,7 +1517,7 @@ mod tests {
             },
         ];
         let t3 = Instant::now();
-        let per_filter = scan_filters_once(root, &files, &queries, ts_fmt).unwrap();
+        let per_filter = scan_filters_once(&dir, &db.files, &queries, db.fmt).unwrap();
         println!(
             "[bench] scan(raw alpha + message payload,命中 {}/{}): {:?}",
             per_filter[0].len(),
@@ -1863,61 +1535,36 @@ mod tests {
             per_filter[1].len()
         );
 
-        let t4 = Instant::now();
-        for (qi, q) in queries.iter().enumerate() {
-            let lines = &per_filter[qi];
-            conn.execute_batch("BEGIN").unwrap();
-            let _ = conn.execute(
-                "DELETE FROM filter_hits WHERE filter_id = ?1",
-                params![q.filter_id],
-            );
-            let ins_sql = format!(
-                "INSERT OR IGNORE INTO filter_hits(filter_id, line) VALUES {}",
-                (0..500)
-                    .map(|i| format!("(?{},?{})", i * 2 + 1, i * 2 + 2))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-            {
-                let mut ins_full = conn.prepare(&ins_sql).unwrap();
-                let mut ins_one = conn
-                    .prepare("INSERT OR IGNORE INTO filter_hits(filter_id, line) VALUES (?1, ?2)")
-                    .unwrap();
-                let fid: &str = &q.filter_id;
-                let mut lv: Vec<i64> = Vec::with_capacity(500);
-                for chunk in lines.chunks(500) {
-                    if chunk.len() == 500 {
-                        lv.clear();
-                        lv.extend(chunk.iter().map(|&l| l as i64));
-                        let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1000);
-                        for k in 0..500 {
-                            bind.push(&fid);
-                            bind.push(&lv[k]);
-                        }
-                        ins_full.execute(bind.as_slice()).unwrap();
-                    } else {
-                        for &l in chunk {
-                            ins_one.execute(params![q.filter_id, l as i64]).unwrap();
-                        }
-                    }
-                }
-            }
-            conn.execute_batch("COMMIT").unwrap();
-        }
-        println!("[bench] INSERT 2×352 万行: {:?}", t4.elapsed());
-
         let t5 = Instant::now();
         let mut out: FilterBatchOut = Vec::new();
-        for q in &queries {
-            out.push((q.filter_id.clone(), filter_hits_join(&conn, &q.filter_id).unwrap()));
+        {
+            let mut fc = db.filters.lock();
+            for (qi, q) in queries.iter().enumerate() {
+                let lines = Arc::new(per_filter[qi].clone());
+                fc.fps.insert(q.filter_id.clone(), filter_def_fp(q));
+                fc.hits.insert(q.filter_id.clone(), Arc::clone(&lines));
+                out.push((q.filter_id.clone(), hits_with_ts(&db, &lines)));
+            }
         }
-        println!("[bench] JOIN(2 filter): {:?}", t5.elapsed());
+        println!("[bench] join(2 filter): {:?}", t5.elapsed());
 
         let t6 = Instant::now();
         let bytes = encode_filter_batch(&out);
         println!("[bench] encode: {:?} ({} MB)", t6.elapsed(), bytes.len() / 1048576);
+        println!("[bench] 命中驻留: {} MB", per_filter.iter().map(|v| v.len() * 4).sum::<usize>() / 1048576);
 
-        println!("[bench] 链路总耗时(scan 起): {:?}", t2.elapsed());
+        // 复查（fp 命中路径）
+        let t7 = Instant::now();
+        let fc = db.filters.lock();
+        let mut warm = 0usize;
+        for q in &queries {
+            if fc.fps.get(&q.filter_id).map(|s| s == &filter_def_fp(q)).unwrap_or(false) {
+                warm += fc.hits.get(&q.filter_id).map(|h| h.len()).unwrap_or(0);
+            }
+        }
+        println!("[bench] 复查(fp 命中 {} 行): {:?}", warm, t7.elapsed());
+
+        println!("[bench] 链路总耗时(scan 起): {:?}", t3.elapsed());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

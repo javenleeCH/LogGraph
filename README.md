@@ -6,7 +6,7 @@
 
 在此之上，logGraph 还支持把过滤器组织成**分组（group）**，用类 EPL/CEP 的**序列模式**（顺序 / 禁止 / 汇聚 / 分支 / 周期 / 可选 / 循环计数…）在时间轴上自动匹配事件链，实现故障规则的图形化编排与自动检测。
 
-架构分三层：**引擎（纯 Rust：rg 直扫 + CEP）+ Tauri 薄壳 + React UI**。引擎同时提供**命令行 CLI**，第一版**零数据库依赖**（不引入 SQLite，扫描/解析/匹配全程流式、内存中只留命中行）；桌面端对超大日志目录（GB 级）另有 **rg 直扫 + 瘦 SQL** 的可选驻留路径。
+架构分三层：**引擎（纯 Rust：rg 直扫 + CEP）+ Tauri 薄壳 + React UI**。引擎同时提供**命令行 CLI**，全程**零数据库依赖**（扫描/解析/匹配全程流式、内存中只留命中行）；桌面端对超大日志目录（GB 级）用**纯内存瘦索引**驻留（行偏移 + 事件 SoA + 命中行号，无磁盘缓存）。
 
 ## ✨ 特性
 
@@ -43,9 +43,9 @@
 
 ### 大规模日志（桌面端 dbMode）
 
-- **原始文件即数据库**：目录「全选 + 加载」进入 dbMode——rg 内核（`grep-searcher`）直扫原文件做过滤，SQLite 只存瘦索引与命中结果，**绝不存文本**。
-- **指纹缓存**：`<目录>/.logGraph/cache.db` 记录文件指纹（路径+大小+mtime），目录未变化时**二次打开 < 0.5s**。
-- **量级参考**（720MB / 141 文件 / 约 500 万事件行）：首次建索引 2~5s（带进度）、过滤 ~1s（与 rg 命令行同速）、选中事件上下文按行号 mmap 直读毫秒级。
+- **原始文件即数据库**：目录「全选 + 加载」进入 dbMode——Rust `regex`（multi_line + prefilter SIMD）单遍批量直扫原文件做过滤，内存中只驻留瘦索引（每行字节偏移 + 事件 (ts,line) SoA + 每过滤器命中行号），**绝不存文本**。
+- **无磁盘缓存**：不写任何索引文件——重开目录即全量重建（读文件 + 抽时间戳 + 排序）。目录未变时二次打开的成本 = 建库成本，是否引入磁盘缓存以实测数据决策中。
+- **量级参考**（600MB / 8 文件 / 640 万行 / 352 万命中 × 2 过滤器）：建库 ~2.8s（带进度）、单遍批量过滤 ~0.67s、命中→时间戳关联 + 编码全链路 ~0.93s（704 万命中行）、内存驻留 ~170MB（骨架 145MB + 命中 26MB）；选中事件上下文按行偏移 seek 直读毫秒级。
 - **纯前端性能**：渲染脏标记 + 视口二分裁剪（静止 0 CPU、交互 O(可见)）、单 filter 增量重算 + 分块异步调度（百万行编辑过滤器不阻塞主线程）、minimap 离屏预渲染。
 
 ### 工作区与交互
@@ -141,10 +141,10 @@ loggraph schema cep
 | 打开日志 | `<input type=file>` | 系统文件对话框（`plugin-dialog`） |
 | 拖拽加载 | HTML5 Drag & Drop | 原生文件拖放（`onDragDropEvent`） |
 | 打开目录 | File System Access API | 系统目录对话框 + `plugin-fs` 递归枚举 |
-| 工作区持久化 | 所选目录内 `.logGraph/filters.json`（FSA readwrite 授权） | 所选目录内 `.logGraph/`（`filters.json` + `cache.db`，plugin-fs） |
+| 工作区持久化 | 所选目录内 `.logGraph/filters.json`（FSA readwrite 授权） | 所选目录内 `.logGraph/`（`filters.json` + perf 日志，plugin-fs） |
 | 日志解析 | JS 引擎（`LogParser`） | **Rust 原生引擎**（单文件 `parse_log` / 目录 `parse_dir`，进程内读文件+解析，大文本不过 IPC） |
-| 正则过滤 | **wasm 版 Rust `regex`**（与桌面同引擎；加载失败回退 JS RegExp） | **Rust `regex`**（dbMode 下 rg 直扫） |
-| 超大目录 | ✗（全量驻留内存，有内存墙） | ✓ **dbMode：rg 直扫 + 瘦 SQL** |
+| 正则过滤 | **wasm 版 Rust `regex`**（与桌面同引擎；加载失败回退 JS RegExp） | **Rust `regex`**（dbMode 下批量直扫） |
+| 超大目录 | ✗（全量驻留内存，有内存墙） | ✓ **dbMode：regex 直扫 + 内存瘦索引** |
 
 前置要求：Rust 工具链（`rustc`/`cargo`）与平台对应的 WebView（Windows 10/11 自带 WebView2）。
 
@@ -217,7 +217,7 @@ thread/level 提取、行分割、稳定排序、skipped 统计）：
 | 核心引擎 | Rust：`ignore` + `grep-searcher` + `grep-regex` + `regex`（第一版无数据库） |
 | 引擎 CLI | clap v4（`loggraph` 命令：search / cep / validate / schema 四个子命令） |
 | 桌面打包 | Tauri v2（Rust + WebView2 / WKWebView） |
-| 桌面数据层 | grep-searcher（rg 内核直扫）+ rusqlite（可选瘦 SQL 驻留） |
+| 桌面数据层 | Rust `regex` 直扫（multi_line + prefilter）+ 内存 SoA 索引（`parking_lot` 锁，无数据库） |
 | Web 正则引擎 | wasm-bindgen 编译的 Rust `regex` crate |
 
 ## 🗂️ 项目结构

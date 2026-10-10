@@ -17,6 +17,12 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5180,
     strictPort: true,
+    // target/（cargo 构建产物）与 .logGraph/（SQLite cache.db）在项目根内：
+    // Windows 上链接器/SQLite 写这些文件时持锁，watcher 报 EBUSY 会直接崩掉
+    // 整个 dev server → Tauri 窗口白屏。必须排除。
+    watch: {
+      ignored: ['**/target/**', '**/.logGraph/**'],
+    },
   },
   envPrefix: ['VITE_', 'TAURI_ENV_'],
   build: {

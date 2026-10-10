@@ -451,11 +451,13 @@ mod tests {
 
     #[test]
     fn skipped_and_totals() {
+        // 尾换行 → split 3 段（末尾空行）；空行与无时间戳行均计入 skipped（JS split 同，
+        // 与 split_lines_matrix / detect_fallback_100_limit 的尾空行语义一致）
         let text = "12:00:00.000 ok\nplain line without timestamp\n";
         let r = parse_text_full(text, None);
         assert_eq!(r.events.len(), 1);
-        assert_eq!(r.skipped, 1);
-        assert_eq!(r.total_lines, 2);
+        assert_eq!(r.skipped, 2);
+        assert_eq!(r.total_lines, 3);
     }
 
     #[test]

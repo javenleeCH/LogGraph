@@ -22,6 +22,8 @@ pub fn run() {
             db::db_filter_drop,
             db::db_events_in_window,
             db::db_lines_by_ids,
+            db::db_line,
+            db::db_corr_ids,
             db::db_files,
             db::db_reveal_path,
             db::db_open_path,

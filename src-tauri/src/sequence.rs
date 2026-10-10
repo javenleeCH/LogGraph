@@ -11,14 +11,14 @@
 //! 任何不满足上述条件的 group 触发**整体回退**，由前端 TS 引擎
 //! (`runSequenceMatching`) 处理，保证行为不变。
 
-use crate::db::open_cache;
-use rusqlite::{params, Connection};
+use crate::db::{current_db, filter_hits, hits_with_ts, MemDb};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 // ---- 请求 DTO ----
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct GroupSpec {
     pub group_id: String,
     pub filter_ids: Vec<String>,
@@ -32,6 +32,7 @@ pub struct GroupSpec {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct EdgeSpec {
     pub id: String,
     pub from_filter_id: String,
@@ -46,6 +47,7 @@ pub struct EdgeSpec {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeCountSpec {
     #[serde(default)]
     pub min: Option<i64>,
@@ -427,24 +429,12 @@ fn resolve_chains(edges: &[EdgeSpec]) -> Vec<Vec<EdgeSpec>> {
     chains
 }
 
-fn fetch_filter_events(conn: &Connection, filter_id: &str) -> Result<Vec<SeqEvent>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT h.line, t.ts FROM filter_hits h
-             JOIN line_ts t ON t.line = h.line
-             WHERE h.filter_id = ?1 ORDER BY t.ts, h.line",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![filter_id], |r| {
-            Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)?))
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows.flatten() {
-        out.push(SeqEvent::new(r.0, r.1));
-    }
-    Ok(out)
+fn fetch_filter_events(db: &MemDb, filter_id: &str) -> Result<Vec<SeqEvent>, String> {
+    let hits = filter_hits(db, filter_id).unwrap_or_default();
+    Ok(hits_with_ts(db, &hits)
+        .into_iter()
+        .map(|h| SeqEvent::new(h.line, h.ts))
+        .collect())
 }
 
 /// 在 edge_stats 中按 id 查找可变引用（规避闭包返回内部引用逃逸问题）
@@ -481,11 +471,11 @@ fn is_supported(spec: &GroupSpec) -> bool {
     true
 }
 
-fn match_group(conn: &Connection, spec: &GroupSpec) -> Result<SeqResult, String> {
+fn match_group(db: &MemDb, spec: &GroupSpec) -> Result<SeqResult, String> {
     let mut events_by_filter: HashMap<String, Vec<SeqEvent>> = HashMap::new();
     for fid in &spec.filter_ids {
         if !events_by_filter.contains_key(fid) {
-            events_by_filter.insert(fid.clone(), fetch_filter_events(conn, fid)?);
+            events_by_filter.insert(fid.clone(), fetch_filter_events(db, fid)?);
         }
     }
     let get_events = |fid: &str| -> &[SeqEvent] {
@@ -672,7 +662,7 @@ fn match_group(conn: &Connection, spec: &GroupSpec) -> Result<SeqResult, String>
 #[tauri::command]
 pub async fn db_run_sequences(groups: Vec<GroupSpec>) -> Result<RunSeqResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_cache()?;
+        let db = current_db()?;
         let mut results: HashMap<String, SeqResult> = HashMap::new();
         let mut fallback = false;
         for spec in &groups {
@@ -680,7 +670,7 @@ pub async fn db_run_sequences(groups: Vec<GroupSpec>) -> Result<RunSeqResponse, 
                 fallback = true;
                 continue;
             }
-            match match_group(&conn, spec) {
+            match match_group(&db, spec) {
                 Ok(r) => {
                     results.insert(spec.group_id.clone(), r);
                 }
@@ -698,40 +688,14 @@ pub async fn db_run_sequences(groups: Vec<GroupSpec>) -> Result<RunSeqResponse, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
-
-    fn setup() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE line_ts (line INTEGER PRIMARY KEY, ts INTEGER NOT NULL);
-             CREATE TABLE filter_hits (filter_id TEXT NOT NULL, line INTEGER NOT NULL);",
-        )
-        .unwrap();
-        conn
-    }
-
-    fn insert_hit(conn: &Connection, fid: &str, line: u32, ts: i64) {
-        conn.execute(
-            "INSERT INTO line_ts(line, ts) VALUES (?1, ?2)",
-            params![line as i64, ts],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO filter_hits(filter_id, line) VALUES (?1, ?2)",
-            params![fid, line as i64],
-        )
-        .unwrap();
-    }
+    use crate::db::{set_filter_hits, test_db};
 
     #[test]
     fn seq_edge_within_window_matches() {
-        let conn = setup();
         // A: ts 100, 200 ; B: ts 150 (in window of A@100), 5000 (out of window)
-        insert_hit(&conn, "A", 1, 100);
-        insert_hit(&conn, "A", 2, 200);
-        insert_hit(&conn, "B", 3, 150);
-        insert_hit(&conn, "B", 4, 5000);
-
+        let db = test_db(&[(1, 100), (2, 200), (3, 150), (4, 5000)]);
+        set_filter_hits(&db, "A", vec![1, 2]);
+        set_filter_hits(&db, "B", vec![3, 4]);
         let spec = GroupSpec {
             group_id: "g1".into(),
             filter_ids: vec!["A".into(), "B".into()],
@@ -749,7 +713,7 @@ mod tests {
             node_counts: None,
         };
 
-        let r = match_group(&conn, &spec).unwrap();
+        let r = match_group(&db, &spec).unwrap();
         // A@100 -> B@150 成链；A@200 窗口内无 B（5000 太远）→ 断裂
         assert_eq!(r.chains.len(), 1, "应只有 1 条链");
         let chain = &r.chains[0];
@@ -766,10 +730,10 @@ mod tests {
 
     #[test]
     fn not_edge_violation_detected() {
-        let conn = setup();
         // A@100，B@120（落在 A@100 窗口内）→ 违规
-        insert_hit(&conn, "A", 1, 100);
-        insert_hit(&conn, "B", 2, 120);
+        let db = test_db(&[(1, 100), (2, 120)]);
+        set_filter_hits(&db, "A", vec![1]);
+        set_filter_hits(&db, "B", vec![2]);
         let spec = GroupSpec {
             group_id: "g2".into(),
             filter_ids: vec!["A".into(), "B".into()],
@@ -786,7 +750,7 @@ mod tests {
             node_conditions: None,
             node_counts: None,
         };
-        let r = match_group(&conn, &spec).unwrap();
+        let r = match_group(&db, &spec).unwrap();
         assert_eq!(r.not_violations.len(), 1);
         assert_eq!(r.not_violations[0].from_event.id, 1);
         assert_eq!(r.not_violations[0].to_event.id, 2);
