@@ -21,7 +21,7 @@ export default defineConfig({
     // Windows 上链接器/SQLite 写这些文件时持锁，watcher 报 EBUSY 会直接崩掉
     // 整个 dev server → Tauri 窗口白屏。必须排除。
     watch: {
-      ignored: ['**/target/**', '**/.logGraph/**'],
+      ignored: ['**/target/**', '**/.logGraph/**', 'perf-data/**'],
     },
   },
   envPrefix: ['VITE_', 'TAURI_ENV_'],

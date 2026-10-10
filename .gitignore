@@ -28,3 +28,6 @@ package-lock.json
 
 # wasm 过滤引擎 crate 的构建产物（源码在 filter-wasm/，生成物进 src/filters/wasm-filter/pkg）
 filter-wasm/target/
+
+# 性能测试大数据集（scripts/gen-perf-data.mjs 生成，勿入库）
+perf-data/
