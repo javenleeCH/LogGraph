@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(
@@ -176,19 +177,24 @@ struct CepEnvelope<'a> {
 }
 
 fn do_search(args: SearchArgs) -> ExitCode {
+    // 阶段计时：walk / search / print 拆分（只进 stderr 诊断行，stdout 契约不变）
+    let t0 = Instant::now();
     let paths = match walk_or_fail(&args.path, &args.walk.options()) {
         Ok(v) => v,
         Err(e) => return fail(e),
     };
+    let walk_ms = t0.elapsed().as_millis();
     let pattern = Pattern {
         pattern: args.pattern,
         case_sensitive: !args.ignore_case,
         is_regex: !args.fixed_strings,
     };
+    let t_search = Instant::now();
     let (files, stats) = match search::search_all(&paths, &pattern) {
         Ok(v) => v,
         Err(e) => return fail(e),
     };
+    let search_ms = t_search.elapsed().as_millis();
     if args.json {
         // 直接结构体序列化：保持声明序（json! 宏会走 Value/BTreeMap 变字母序）；
         // to_writer 流式写出，不再先拼出整个 JSON 大字符串
@@ -199,19 +205,35 @@ fn do_search(args: SearchArgs) -> ExitCode {
         let _ = writeln!(out);
         let _ = out.flush();
     } else {
-        // BufWriter 缓冲输出（rg 同款）：逐行 println! 每行一次锁 + 一次写，
-        // 海量命中时在 Windows 控制台是数量级级的开销
+        // 快速打印：路径前缀每文件拼一次；行内容手工组字节 + write_all 批量
+        // 落缓冲，绕开 writeln! 的 format 机器（百万级命中时 fmt 每行 1~3µs
+        // 是输出阶段大头；rg 的 printer 正是手工组字节的）
+        let t_print = Instant::now();
         let stdout = std::io::stdout();
-        let mut out = BufWriter::new(stdout.lock());
+        let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
+        let mut line = String::with_capacity(256);
         for f in &files {
+            let prefix = f.path.display().to_string();
             for h in &f.hits {
-                let _ = writeln!(out, "{}:{}:{}", f.path.display(), h.line_number, h.text);
+                line.clear();
+                line.push_str(&prefix);
+                line.push(':');
+                push_u64(&mut line, h.line_number);
+                line.push(':');
+                line.push_str(&h.text);
+                line.push('\n');
+                let _ = out.write_all(line.as_bytes());
             }
         }
         let _ = out.flush();
+        let print_ms = t_print.elapsed().as_millis();
         eprintln!(
             "命中文件 {}/{}，命中行 {}，耗时 {} ms",
             stats.files_with_matches, stats.files_searched, stats.matched_lines, stats.elapsed_ms
+        );
+        eprintln!(
+            "阶段耗时 walk={}ms search={}ms print={}ms 总计={}ms",
+            walk_ms, search_ms, print_ms, t0.elapsed().as_millis()
         );
     }
     // 对齐 rg：无命中 = 1（不是错误，D3）
@@ -220,6 +242,22 @@ fn do_search(args: SearchArgs) -> ExitCode {
     } else {
         ExitCode::from(1)
     }
+}
+
+/// u64 → 十进制 ASCII 追加（快速打印路径专用，绕开 format 机器）
+fn push_u64(buf: &mut String, mut n: u64) {
+    if n == 0 {
+        buf.push('0');
+        return;
+    }
+    let mut digits = [b'0'; 20];
+    let mut i = digits.len();
+    while n > 0 {
+        i -= 1;
+        digits[i] += (n % 10) as u8;
+        n /= 10;
+    }
+    buf.push_str(std::str::from_utf8(&digits[i..]).expect("纯数字 ASCII"));
 }
 
 fn do_cep(args: CepArgs) -> ExitCode {
