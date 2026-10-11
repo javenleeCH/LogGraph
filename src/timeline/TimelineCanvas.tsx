@@ -19,11 +19,12 @@ import {
   readVar,
   refreshPalette,
   type RenderContext,
+  type MinimapCache,
 } from './renderers';
 import { bisectLeft, nearestEvent } from './correlation';
 import { ZoomPanAnimator } from './zoomPanAnimator';
 import { formatDateTime } from '../utils/timeFormat';
-import type { Filter, LogEvent, TimeRange } from '../types';
+import type { Filter, FilterMatch, LogEvent, TimeRange } from '../types';
 import tipStyles from './Tooltip.module.css';
 
 interface DragState {
@@ -300,7 +301,7 @@ export function TimelineCanvas() {
 
     drawScrubber(rc, scrubberTs);
 
-    drawMinimap(rc, fullRange, viewRange, matches, filters, minimapCacheRef.current);
+    drawMinimap(rc, fullRange, viewRange, matches, filters, ensureMinimapCache(matches, filters, fullRange));
   };
 
   // 尺寸变化 → 失效 minimap 缓存（下一帧由 useMemo key 重建）
@@ -405,51 +406,52 @@ export function TimelineCanvas() {
     chainDataMapRef.current = m;
   }, [seqGroupsForChain, seqResultsForChain]);
 
-  // ---- minimap 离屏预渲染（直方图只依赖 matches/filters/fullRange/宽度，重算时才重建） ----
+  // ---- minimap 离屏缓存：每帧渲染前校验 key（matches/filters/fullRange/宽度），miss 则同步重建一次 ----
+  // 不能放在 useMemo：组件后挂载（切视图 / HMR remount 时数据已就绪而 sizeRef.w
+  // 尚为 0）或 resize 后，依赖引用不变 → useMemo 永不重跑 → 缓存永远缺失 →
+  // drawMinimap 每帧 33 万事件直绘（~120ms/帧，大数据集 WASD 卡顿根因）
   const minimapCacheRef = useRef<{
     canvas: HTMLCanvasElement;
     key: string;
   } | null>(null);
-  const minimapMatches = useLogStore((s) => s.matches);
-  const minimapFilters = useLogStore((s) => s.filters);
-  const minimapFullRange = useLogStore((s) => s.fullRange);
-  useMemo(() => {
-    const { w, dpr } = sizeRef.current;
-    if (!minimapFullRange || w === 0) return;
-    const key = [
-      minimapMatches.map((m) => `${m.filterId}:${m.events.length}`).join('|'),
-      minimapFilters.map((f) => `${f.id}:${f.color}`).join('|'),
-      minimapFullRange.start,
-      minimapFullRange.end,
-      w,
-    ].join('#');
-    if (minimapCacheRef.current?.key === key) return;
-    const left = LAYOUT.LEFT_LABEL_WIDTH;
-    const cw = w - left;
-    if (cw <= 0) return;
-    // 预渲染到物理像素位图（画时直接 drawImage，静止时零重算）
-    const off = document.createElement('canvas');
-    off.width = Math.max(1, Math.floor(cw * dpr));
-    off.height = Math.floor(LAYOUT.MINIMAP_HEIGHT * dpr);
-    const octx = off.getContext('2d');
-    if (!octx) return;
-    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const span = minimapFullRange.end - minimapFullRange.start || 1;
-    for (let i = 0; i < minimapMatches.length; i++) {
-      const fm = minimapMatches[i];
-      const color = minimapFilters.find((f) => f.id === fm.filterId)?.color ?? '#888';
-      const bandTop = 6 + (i % 4) * 8;
-      octx.fillStyle = color;
-      for (const ev of fm.events) {
-        const x = Math.floor(((ev.ts - minimapFullRange.start) / span) * cw);
-        octx.fillRect(x, bandTop, 1, 7);
+  const ensureMinimapCache = useCallback(
+    (matches: FilterMatch[], filters: Filter[], fullRange: TimeRange): MinimapCache | null => {
+      const { w, dpr } = sizeRef.current;
+      if (w === 0) return null;
+      const key = [
+        matches.map((m) => `${m.filterId}:${m.events.length}`).join('|'),
+        filters.map((f) => `${f.id}:${f.color}`).join('|'),
+        fullRange.start,
+        fullRange.end,
+        w,
+      ].join('#');
+      if (minimapCacheRef.current?.key === key) return minimapCacheRef.current;
+      const left = LAYOUT.LEFT_LABEL_WIDTH;
+      const cw = w - left;
+      if (cw <= 0) return null;
+      // 预渲染到物理像素位图（画时直接 drawImage，静止时零重算）
+      const off = document.createElement('canvas');
+      off.width = Math.max(1, Math.floor(cw * dpr));
+      off.height = Math.floor(LAYOUT.MINIMAP_HEIGHT * dpr);
+      const octx = off.getContext('2d');
+      if (!octx) return null;
+      octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const span = fullRange.end - fullRange.start || 1;
+      for (let i = 0; i < matches.length; i++) {
+        const fm = matches[i];
+        const color = filters.find((f) => f.id === fm.filterId)?.color ?? '#888';
+        const bandTop = 6 + (i % 4) * 8;
+        octx.fillStyle = color;
+        for (const ev of fm.events) {
+          const x = Math.floor(((ev.ts - fullRange.start) / span) * cw);
+          octx.fillRect(x, bandTop, 1, 7);
+        }
       }
-    }
-    minimapCacheRef.current = { canvas: off, key };
-    // 重建后需要重绘一帧（useMemo 无渲染副作用）
-    dirtyRef.current = true;
-    scheduleRender();
-  }, [minimapMatches, minimapFilters, minimapFullRange, scheduleRender]);
+      minimapCacheRef.current = { canvas: off, key };
+      return minimapCacheRef.current;
+    },
+    [],
+  );
 
   // ---- 命中测试：根据鼠标位置找到 visibleRow 内最近事件 ----
   const rowsMemo = useMemo(
