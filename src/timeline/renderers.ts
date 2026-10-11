@@ -485,6 +485,24 @@ export function drawLaneEventsAt(
   ctx.restore();
 }
 
+/** Shift 框选拖拽中的高亮带：accent 半透明填充 + 边线 + 两端把手 */
+export function drawBrushOverlay(rc: RenderContext, x1: number, x2: number) {
+  const { ctx, height } = rc;
+  const top = LAYOUT.AXIS_HEIGHT;
+  const bottom = height - LAYOUT.MINIMAP_HEIGHT - LAYOUT.MINIMAP_GAP;
+  if (x2 <= x1 || bottom <= top) return;
+  const accent = readVar('--accent', '#1a73e8');
+  ctx.save();
+  ctx.fillStyle = withAlpha(accent, 0.15);
+  ctx.fillRect(x1, top, x2 - x1, bottom - top);
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x1 + 0.5, top + 0.5, x2 - x1 - 1, bottom - top - 1);
+  ctx.fillStyle = accent;
+  ctx.fillRect(x1 - 1.5, top, 3, bottom - top);
+  ctx.fillRect(x2 - 1.5, top, 3, bottom - top);
+  ctx.restore();
+}
 /** 绘制关联连线：选中/游标事件竖线贯穿所有 lane */
 export function drawCorrelationLinks(
   rc: RenderContext,

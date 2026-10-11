@@ -4,7 +4,7 @@
  */
 
 import { create } from 'zustand';
-import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, SequenceConfig, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
+import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, SavedRange, SequenceConfig, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
 import { FilterEngine } from '../filters/FilterEngine';
 import { runSequenceMatching } from '../sequence/SequenceMatcher';
 import {
@@ -33,6 +33,34 @@ import {
 
 let corrRaf = 0;
 let corrSeq = 0; // dbMode 关联下推的响应序号（过期丢弃）
+
+// ---- 已保存时间范围（localStorage 持久化，跨会话/跨目录共享） ----
+
+const SAVED_RANGES_KEY = 'loggraph.saved-ranges';
+
+function loadSavedRanges(): SavedRange[] {
+  try {
+    const raw = localStorage.getItem(SAVED_RANGES_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(
+      (r): r is SavedRange =>
+        r && typeof r.id === 'string' && typeof r.name === 'string' &&
+        typeof r.start === 'number' && typeof r.end === 'number' && r.start < r.end,
+    );
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedRanges(ranges: SavedRange[]): void {
+  try {
+    localStorage.setItem(SAVED_RANGES_KEY, JSON.stringify(ranges));
+  } catch {
+    /* 隐私模式等场景写入失败：仅当前会话可用 */
+  }
+}
 
 // ---- dbMode 命中查询（v4：无事件索引，matches 骨架自带 ts） ----
 
@@ -224,6 +252,14 @@ interface LogState {
   // --- 视图 ---
   viewRange: TimeRange | null; // 当前可见时间窗
   fullRange: TimeRange | null; // 全量时间范围
+  /** 已保存的时间范围书签（时间线 Shift 框选 / 工具栏保存） */
+  savedRanges: SavedRange[];
+  /** 保存当前视口（或指定范围）为命名书签；返回新建项（视口无效时 null） */
+  saveRange: (name: string, range?: TimeRange) => SavedRange | null;
+  /** 应用已存范围：clamp 到 fullRange 后设为当前视口（表格流/时间线共用） */
+  applySavedRange: (id: string) => void;
+  /** 删除已存范围 */
+  removeSavedRange: (id: string) => void;
 
   // --- 交互 ---
   selectedEventId: number | null;
@@ -312,6 +348,7 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   viewRange: null,
   fullRange: null,
+  savedRanges: loadSavedRanges(),
 
   selectedEventId: null,
   hoveredEventId: null,
@@ -989,6 +1026,44 @@ export const useLogStore = create<LogState>((set, get) => ({
   resetView: () => {
     const { fullRange } = get();
     if (fullRange) set({ viewRange: { ...fullRange } });
+  },
+
+  saveRange: (name, range) => {
+    const r = range ?? get().viewRange;
+    const trimmed = name.trim();
+    if (!r || !trimmed || r.end <= r.start) return null;
+    const item: SavedRange = {
+      id: `rng_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`,
+      name: trimmed,
+      start: r.start,
+      end: r.end,
+    };
+    const next = [...get().savedRanges, item];
+    set({ savedRanges: next });
+    persistSavedRanges(next);
+    return item;
+  },
+
+  applySavedRange: (id) => {
+    const { savedRanges, fullRange } = get();
+    const item = savedRanges.find((r) => r.id === id);
+    if (!item) return;
+    // clamp 到当前数据范围；完全不相交（换了数据集）则不动作
+    if (fullRange) {
+      const start = Math.max(item.start, fullRange.start);
+      const end = Math.min(item.end, fullRange.end);
+      if (start >= end) return;
+      set({ viewRange: { start, end } });
+    } else {
+      set({ viewRange: { start: item.start, end: item.end } });
+    }
+    scheduleCorrRecompute(() => get().recomputeCorrelations());
+  },
+
+  removeSavedRange: (id) => {
+    const next = get().savedRanges.filter((r) => r.id !== id);
+    set({ savedRanges: next });
+    persistSavedRanges(next);
   },
 
   selectEvent: (id) => {

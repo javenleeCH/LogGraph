@@ -186,6 +186,14 @@ export interface TimeRange {
   end: number;
 }
 
+/** 已保存的时间范围书签（时间线框选 / 手动保存，跨会话持久化） */
+export interface SavedRange {
+  id: string;
+  name: string;
+  start: number;
+  end: number;
+}
+
 /** 时间线上的光标 / 游标位置 */
 export interface ScrubberState {
   /** 当前游标时间戳，null 表示未激活 */

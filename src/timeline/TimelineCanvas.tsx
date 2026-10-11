@@ -17,6 +17,7 @@ import {
   drawSequenceLinks,
   drawSequenceDecorations,
   readVar,
+  drawBrushOverlay,
   refreshPalette,
   type RenderContext,
   type MinimapCache,
@@ -301,6 +302,16 @@ export function TimelineCanvas() {
 
     drawScrubber(rc, scrubberTs);
 
+    // Shift 框选拖拽中的高亮带（覆盖 lanes 区域，位于所有内容之上）
+    const dragNow = dragRef.current;
+    if (dragNow.mode === 'brush' && mousePosRef.current) {
+      drawBrushOverlay(
+        rc,
+        Math.min(dragNow.startX, mousePosRef.current.x),
+        Math.max(dragNow.startX, mousePosRef.current.x),
+      );
+    }
+
     drawMinimap(rc, fullRange, viewRange, matches, filters, ensureMinimapCache(matches, filters, fullRange));
   };
 
@@ -567,6 +578,17 @@ export function TimelineCanvas() {
         };
         return;
       }
+      // Shift+拖拽：时间范围框选（brush）——松手后视口跳到该范围（表格流跟随）
+      if (e.shiftKey) {
+        dragRef.current = {
+          mode: 'brush',
+          startX: mx,
+          startY: my,
+          startView: null,
+          startMinimapView: null,
+        };
+        return;
+      }
 
       // group-header 行点击：折叠/展开
       const row = rowAt(my);
@@ -621,6 +643,11 @@ export function TimelineCanvas() {
         return;
       }
 
+      if (drag.mode === 'brush') {
+        mousePosRef.current = { x: mx, y: my };
+        markDirty();
+        return;
+      }
       if (drag.mode === 'pan' && drag.startView && fullRange) {
         const span = drag.startView.end - drag.startView.start;
         const chartW = w - LAYOUT.LEFT_LABEL_WIDTH;
@@ -661,13 +688,15 @@ export function TimelineCanvas() {
       setMousePos(hit ? { x: mx, y: my } : null);
       const canvas = canvasRef.current;
       if (canvas) {
-        canvas.style.cursor = hit
-          ? 'pointer'
-          : my < LAYOUT.AXIS_HEIGHT
-            ? 'ew-resize'
-            : inMinimap(my)
-              ? 'move'
-              : 'grab';
+        canvas.style.cursor = e.shiftKey
+          ? 'crosshair'
+          : hit
+            ? 'pointer'
+            : my < LAYOUT.AXIS_HEIGHT
+              ? 'ew-resize'
+              : inMinimap(my)
+                ? 'move'
+                : 'grab';
       }
     },
     [animator, viewRange, fullRange, makeTimeFns, inMinimap, panBy, setViewRange, setScrubber, setHovered, hitTest, markDirty],
@@ -678,6 +707,24 @@ export function TimelineCanvas() {
     if (drag.mode === 'scrubber') {
       setScrubber(useLogStore.getState().scrubberTs, false);
     }
+    if (drag.mode === 'brush') {
+      // 拖拽距离足够 → 视口跳到框选范围（表格流随之过滤该范围）
+      const cur = mousePosRef.current;
+      if (cur && viewRange) {
+        const x1 = Math.max(Math.min(drag.startX, cur.x), LAYOUT.LEFT_LABEL_WIDTH);
+        const x2 = Math.min(Math.max(drag.startX, cur.x), sizeRef.current.w);
+        if (x2 - x1 >= 4) {
+          const { xToTime } = makeTimeFns(viewRange, sizeRef.current.w);
+          let t1 = xToTime(x1);
+          let t2 = xToTime(x2);
+          if (fullRange) {
+            t1 = Math.max(t1, fullRange.start);
+            t2 = Math.min(t2, fullRange.end);
+          }
+          if (t2 > t1) setViewRange({ start: t1, end: t2 });
+        }
+      }
+    }
     dragRef.current = {
       mode: 'none',
       startX: 0,
@@ -685,7 +732,7 @@ export function TimelineCanvas() {
       startView: null,
       startMinimapView: null,
     };
-  }, [setScrubber]);
+  }, [setScrubber, viewRange, fullRange, makeTimeFns, setViewRange]);
 
   const onWheel = useCallback(
     (e: React.WheelEvent) => {

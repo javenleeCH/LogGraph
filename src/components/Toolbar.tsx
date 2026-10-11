@@ -4,6 +4,7 @@ import { useTheme } from '../hooks/useTheme';
 import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
 import { FolderOpen, Folder, Table, BarChart, Maximize, Sun, Moon, Search, Keyboard } from './Icon';
+import { RangesMenu } from './RangesMenu';
 import { useCommandPalette } from './CommandPalette';
 import styles from './Toolbar.module.css';
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -105,6 +106,8 @@ export function Toolbar() {
           <span>时间线</span>
         </button>
       </div>
+
+      <RangesMenu />
 
       <div className={styles.spacer} />
 

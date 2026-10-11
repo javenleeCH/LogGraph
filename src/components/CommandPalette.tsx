@@ -87,7 +87,7 @@ const SHORTCUT_GROUPS: { name: string; items: [string, string][] }[] = [
     items: [
       ['W / S', '向上 / 向下滚动（Shift 加速）'],
       ['A / D', '向左 / 向右滚动（Shift 加速）'],
-      ['鼠标滚轮', '以光标为中心缩放时间轴'],
+      ['Shift + 拖拽', '时间线框选范围：视口跳到框选区（表格流随之过滤）'],
       ['← / →', '在选中轨道内前后跳转事件'],
     ],
   },
