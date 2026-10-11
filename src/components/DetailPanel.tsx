@@ -10,6 +10,10 @@ import { ContextStream } from './ContextStream';
 import { fetchDbFiles, type DbFileInfo } from '../io/dbStore';
 import styles from './DetailPanel.module.css';
 
+/** dbMode 下关联集仅用于 web 模式 ctxLines 高亮；恒定空集避免缩放期间
+ * 每次 correlatedEventIds 更新都触发本组件（连带 GroupMatchesTab）重渲 */
+const EMPTY_CORRELATED = new Set<number>();
+
 /** 上下文行数可选档位（非 dbMode；dbMode 详情为无限上下文流） */
 const CONTEXT_PRESETS = [4, 8, 16, 32, 64];
 const DEFAULT_CONTEXT = 8;
@@ -28,7 +32,9 @@ export function DetailPanel() {
   const filters = useLogStore((s) => s.filters);
   const groups = useLogStore((s) => s.groups);
   const sequenceResults = useLogStore((s) => s.sequenceResults);
-  const correlatedEventIds = useLogStore((s) => s.correlatedEventIds);
+  const correlatedEventIds = useLogStore((s) =>
+    s.dbMode ? EMPTY_CORRELATED : s.correlatedEventIds,
+  );
   const selectEvent = useLogStore((s) => s.selectEvent);
   const selectedRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<DetailTab>('detail');

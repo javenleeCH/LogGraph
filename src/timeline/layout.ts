@@ -23,6 +23,12 @@ export const LAYOUT = {
   GROUP_HEADER_HEIGHT: 28,
   /** group 折叠态密度热力条行高 */
   GROUP_DENSITY_HEIGHT: 40,
+  /** filter lane 密度模式阈值：可见事件超过此数改画桶聚合密度柱
+   *  （逐标记 fillRect 在十万级事件下每帧数百 ms，WASD 卡顿的根因） */
+  DENSITY_EVENT_THRESHOLD: 4000,
+  /** 序列链连线绘制上限：链数超过后连线已是色块噪声，跳过绘制
+   *  （group 头部仍显示链数；放大到阈值内恢复连线） */
+  SEQ_LINK_MAX_CHAINS: 1000,
 };
 
 /** 判断 Y 坐标是否落在轴区域 */
