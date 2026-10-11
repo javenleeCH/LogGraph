@@ -254,6 +254,8 @@ interface LogState {
   fullRange: TimeRange | null; // 全量时间范围
   /** 已保存的时间范围书签（时间线 Shift 框选 / 工具栏保存） */
   savedRanges: SavedRange[];
+  /** 当前视口来自哪个书签（应用时设置；任何视口操作后清除，chips 高亮用） */
+  activeSavedRangeId: string | null;
   /** 保存当前视口（或指定范围）为命名书签；返回新建项（视口无效时 null） */
   saveRange: (name: string, range?: TimeRange) => SavedRange | null;
   /** 应用已存范围：clamp 到 fullRange 后设为当前视口（表格流/时间线共用） */
@@ -349,6 +351,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   viewRange: null,
   fullRange: null,
   savedRanges: loadSavedRanges(),
+  activeSavedRangeId: null,
 
   selectedEventId: null,
   hoveredEventId: null,
@@ -934,7 +937,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   },
 
   setViewRange: (r) => {
-    set({ viewRange: r });
+    set({ viewRange: r, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
@@ -954,7 +957,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       end = fullRange.end;
       start = end - next;
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
@@ -978,7 +981,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       end = fullRange.end;
       start = end - next;
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
@@ -1000,7 +1003,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       start -= d;
       end -= d;
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
@@ -1019,13 +1022,13 @@ export const useLogStore = create<LogState>((set, get) => ({
       start -= d;
       end -= d;
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
   resetView: () => {
     const { fullRange } = get();
-    if (fullRange) set({ viewRange: { ...fullRange } });
+    if (fullRange) set({ viewRange: { ...fullRange }, activeSavedRangeId: null });
   },
 
   saveRange: (name, range) => {
@@ -1053,9 +1056,9 @@ export const useLogStore = create<LogState>((set, get) => ({
       const start = Math.max(item.start, fullRange.start);
       const end = Math.min(item.end, fullRange.end);
       if (start >= end) return;
-      set({ viewRange: { start, end } });
+      set({ viewRange: { start, end }, activeSavedRangeId: id });
     } else {
-      set({ viewRange: { start: item.start, end: item.end } });
+      set({ viewRange: { start: item.start, end: item.end }, activeSavedRangeId: id });
     }
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
@@ -1096,7 +1099,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       end = fullRange.end;
       start = Math.max(fullRange.start, end - span);
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 

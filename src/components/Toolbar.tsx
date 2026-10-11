@@ -4,7 +4,7 @@ import { useTheme } from '../hooks/useTheme';
 import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
 import { FolderOpen, Folder, Table, BarChart, Maximize, Sun, Moon, Search, Keyboard } from './Icon';
-import { RangesMenu } from './RangesMenu';
+import { RangeChips } from './RangeChips';
 import { useCommandPalette } from './CommandPalette';
 import styles from './Toolbar.module.css';
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -107,7 +107,7 @@ export function Toolbar() {
         </button>
       </div>
 
-      <RangesMenu />
+
 
       <div className={styles.spacer} />
 
@@ -172,6 +172,7 @@ export function Toolbar() {
             </span>
             <span className={styles['status-pill']}>窗宽 {formatDuration(viewRange.end - viewRange.start)}</span>
             <span className={styles['status-pill']}>总跨度 {formatDuration(fullRange.end - fullRange.start)}</span>
+            <RangeChips />
             <button className={styles['status-btn']} onClick={resetView} title="重置视图为全量">
               <Maximize size={12} />
               全量
