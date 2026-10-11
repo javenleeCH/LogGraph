@@ -284,22 +284,17 @@ fn merge_line_segments(sorted: &[u32], max_gap: u32) -> Vec<(u32, u32)> {
 
 // ---- 建库（便宜通道：读 + 行偏移 + 计数 + 首/末行 ts） ----
 
-/// 行 ts 提取：bytes[s..e) 为一行（不含 \n，可能含 \r）。
-/// 只在前 64B 前缀找（截断回退到 UTF-8 字符边界，避免 lossy 改变字节布局）。
-/// 与旧版事件索引同语义：按探测格式（None = 全格式）单次提取，无逐行回退；
-/// 无 ts → NO_TS。
+/// 行 ts 提取：bytes[s..e) 为一行（不含 \n，可能含 \r），整行 lossy 后提取。
+/// 与旧版事件索引逐字节同语义（整行搜索，时间戳可在行内任意位置——
+/// 长前缀行如 `LEVEL [very.long.module.path] 2024-01-01 ...` 的 ts 远超 64B）；
+/// 合法 UTF-8 下 from_utf8_lossy 为零拷贝，仅命中行付费。无 ts → NO_TS。
 fn line_ts_of(bytes: &[u8], s: usize, e: usize, fmt: Option<&TsFormat>) -> i64 {
     let mut end = e;
     if end > s && bytes[end - 1] == b'\r' {
         end -= 1;
     }
-    let len = (end - s).min(64);
-    let mut plen = len;
-    while plen > 0 && plen < end - s && (bytes[s + plen] & 0xc0) == 0x80 {
-        plen -= 1;
-    }
-    let prefix = String::from_utf8_lossy(&bytes[s..s + plen]);
-    extract_timestamp(&prefix, fmt).map(|x| x.ts).unwrap_or(NO_TS)
+    let line = String::from_utf8_lossy(&bytes[s..end]);
+    extract_timestamp(&line, fmt).map(|x| x.ts).unwrap_or(NO_TS)
 }
 
 /// 读文件头部（最多 max 字节，UTF-8 lossy）；时间戳格式探测用，避免为探测整读首文件。
@@ -1294,6 +1289,32 @@ mod tests {
         assert_eq!(scan_offsets("a\n\n"), vec![0, 2, 3]);
         assert_eq!(scan_offsets(""), vec![0]);
         assert_eq!(scan_offsets("中文\nb"), vec![0, 7]); // 多字节 UTF-8 边界
+    }
+
+    #[test]
+    fn line_ts_of_whole_line_semantics() {
+        // 回归：时间戳不在行首的行（前缀 > 64B）——旧版事件索引对整行提取能命中，
+        // v4 曾误用 64B 前缀窗口 → NO_TS → 命中从时间轴/序列匹配中消失
+        let fmt = detect_timestamp_format(&["2024-01-01 09:00:00.000 x"]).unwrap();
+        // 70B 前缀：ts 起点在 64B 窗口之外
+        let line = format!("{}2024-01-01 09:00:05.123 tail", "L".repeat(70));
+        let b = line.as_bytes();
+        assert_ne!(line_ts_of(b, 0, b.len(), Some(fmt)), NO_TS);
+        // ts 在行首（常规日志）不受影响
+        let head = "2024-01-01 09:00:05.123 hello";
+        assert_ne!(
+            line_ts_of(head.as_bytes(), 0, head.len(), Some(fmt)),
+            NO_TS
+        );
+        // 无 ts 行 → NO_TS
+        let none = "no timestamp in this line at all";
+        assert_eq!(line_ts_of(none.as_bytes(), 0, none.len(), Some(fmt)), NO_TS);
+        // CRLF：\r 不影响提取
+        let crlf = "2024-01-01 09:00:05.123 x\r\n";
+        assert_ne!(
+            line_ts_of(crlf.as_bytes(), 0, crlf.len() - 1, Some(fmt)),
+            NO_TS
+        );
     }
 
     #[test]
