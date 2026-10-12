@@ -7,6 +7,7 @@
  */
 
 import { isTauri } from '../lib/tauri';
+import { toast } from '../store/uiStore';
 
 // ---- DTO（Rust serde camelCase）----
 
@@ -106,8 +107,17 @@ export async function runDbFiltersBatch(
 ): Promise<Map<string, DbFilterHits>> {
   const out = new Map<string, DbFilterHits>();
   if (queries.length === 0) return out;
-  const buf = await invoke<ArrayBuffer>('db_filters_batch', { queries });
-  if (!(buf instanceof ArrayBuffer) || buf.byteLength < 4) return out;
+  // 多行子条件（换行 AND / ! 排除）暂只在前端 JS 引擎实现：
+  // dbMode 下 Rust 端尚不支持，先跳过这些 filter（结果为空）并提示。
+  const usable = queries.filter((q) => !q.pattern.includes('\n'));
+  if (usable.length < queries.length) {
+    toast.warn(
+      '多行条件暂不支持目录工作区',
+      '含换行/! 排除的过滤器在目录模式（数据驻留）暂不生效，已置空；Rust 端支持后开放',
+    );
+  }
+  if (usable.length === 0) return out;
+  const buf = await invoke<ArrayBuffer>('db_filters_batch', { queries: usable });
   const v = new DataView(buf);
   const dec = new TextDecoder();
   const fc = v.getUint32(0, true);

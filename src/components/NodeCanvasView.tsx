@@ -376,14 +376,21 @@ export function FilterDetailModal() {
             />
           </div>
 
-          <input
-            className={`${styles.patternInput} mono`}
-            type="text"
+          <textarea
+            className={`${styles.patternInput} ${styles.patternArea} mono`}
             value={filter.pattern}
             onChange={(e) => updateFilter(filter.id, { pattern: e.target.value })}
-            placeholder={filter.isRegex ? '正则表达式…' : '关键词…'}
+            placeholder={
+              filter.isRegex
+                ? '正则表达式…（每行一个，全部命中；! 开头排除）'
+                : '关键词…（每行一个，全部命中；! 开头排除）'
+            }
+            rows={Math.min(6, Math.max(1, filter.pattern.split('\n').length))}
             autoFocus
           />
+          <div className={styles.syntaxHint}>
+            多行 = 同时满足（AND）；<code>!</code> 开头 = 排除该行；行内 <code>|</code> = 或
+          </div>
           {regexError && <div className={styles.error}>{regexError}</div>}
 
           <div className={styles.toggles}>

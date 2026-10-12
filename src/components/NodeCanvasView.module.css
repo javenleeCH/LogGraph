@@ -599,6 +599,23 @@
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.patternArea {
+  resize: none;
+  min-height: 32px;
+  line-height: 1.5;
+}
+
+.syntaxHint {
+  font-size: 10px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
+.syntaxHint code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--accent);
+}
+
 .error {
   font-size: 11px;
   color: var(--danger);

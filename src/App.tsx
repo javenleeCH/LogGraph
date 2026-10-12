@@ -80,7 +80,7 @@ export default function App() {
   }, [initLogsDir]);
 
   // 预热 wasm 正则引擎：Web 端过滤改用与桌面端同一 Rust regex crate（§1.1 引擎统一）。
-  // 异步加载，失败自动回退 JS RegExp（FilterBar 会显示回退提示）。
+  // 异步加载，失败自动回退 JS RegExp（结果可能与桌面端不一致，静默降级）。
   // 仅 Web 预热：桌面 dbMode 过滤全在 Rust 侧，无需加载 wasm（桌面非 dbMode
   // 会在首次过滤时由 FilterEngine 惰性触发加载）。
   useEffect(() => {
