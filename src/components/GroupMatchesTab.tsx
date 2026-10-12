@@ -1,9 +1,34 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
 import { Link, AlertTriangle } from './Icon';
 import type { FilterGroup, MatchedChain, LogEvent } from '../types';
 import styles from './DetailPanel.module.css';
+
+/** 区块内循环导航：cur<0 时按方向从第一条/最后一条开始 */
+function navIdx(cur: number, dir: 1 | -1, count: number): number {
+  if (count <= 0) return -1;
+  if (cur < 0) return dir > 0 ? 0 : count - 1;
+  return (cur + dir + count) % count;
+}
+
+/** 区块标题右侧导航：‹ › 循环跳转 + 当前位置计数 */
+function SeqNav({ count, cur, onNav }: { count: number; cur: number; onNav: (dir: 1 | -1) => void }) {
+  if (count === 0) return null;
+  return (
+    <span className={styles['gm-nav']}>
+      <span className={styles['gm-nav-pos']}>
+        {cur < 0 ? `—` : cur + 1}/{count}
+      </span>
+      <button className={styles['gm-nav-btn']} onClick={() => onNav(-1)} title="上一条">
+        ‹
+      </button>
+      <button className={styles['gm-nav-btn']} onClick={() => onNav(1)} title="下一条">
+        ›
+      </button>
+    </span>
+  );
+}
 
 /** group 匹配结果 tab：链列表 + 异常列表 + 筛选按钮 + 关键字检索 */
 /** memo：group 引用稳定；缩放期间（correlatedEventIds 更新等父级重渲）跳过
@@ -55,6 +80,47 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
     return result.notViolations;
   }, [result, mode]);
 
+  /** 三区块导航指针（-1=未开始；关键字过滤/mode 切换后数据变短时自动钳制） */
+  const [chainIdx, setChainIdx] = useState(-1);
+  const [violIdx, setViolIdx] = useState(-1);
+  const [uncovIdx, setUncovIdx] = useState(-1);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  /** 指针越界（过滤后列表变短）时钳回范围 */
+  if (chainIdx >= chains.length) setChainIdx(-1);
+  if (violIdx >= violations.length) setViolIdx(-1);
+  if (uncovIdx >= uncovered.length) setUncovIdx(-1);
+
+  /** 跳转落地：时间线定位（选中+居中）+ 列表滚动到可视区 */
+  useEffect(() => {
+    if (chainIdx < 0) return;
+    const ch = chains[chainIdx];
+    if (!ch) return;
+    focusEvent(ch.steps[0].event.id);
+    listRef.current
+      ?.querySelector(`[data-ci="${ch.chainIndex}"]`)
+      ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [chainIdx]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (violIdx < 0) return;
+    const v = violations[violIdx];
+    if (!v) return;
+    focusEvent(v.fromEvent.id);
+    listRef.current
+      ?.querySelector(`[data-vi="${violIdx}"]`)
+      ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [violIdx]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (uncovIdx < 0) return;
+    const e = uncovered[uncovIdx];
+    if (!e) return;
+    focusEvent(e.id);
+    listRef.current
+      ?.querySelector(`[data-ui="${e.id}"]`)
+      ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [uncovIdx]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!result) {
     return (
       <div className={styles['detail-empty']}>
@@ -116,18 +182,23 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
         )}
       </div>
 
-      <div className={styles['gm-list']}>
+      <div className={styles['gm-list']} ref={listRef}>
         {/* 匹配链 */}
         {showChains && (
           <>
             <div className={styles['gm-section-title']}>
-              匹配链（{chains.length}/{result.chains.length}）
+              <span>匹配链（{chains.length}/{result.chains.length}）</span>
+              <SeqNav count={chains.length} cur={chainIdx} onNav={(d) => setChainIdx(navIdx(chainIdx, d, chains.length))} />
             </div>
             {chains.length === 0 && (
               <div className={styles['gm-empty']}>无匹配链</div>
             )}
-            {chains.map((ch) => (
-              <div key={ch.chainIndex} className={styles['gm-chain']}>
+            {chains.map((ch, ci) => (
+              <div
+                key={ch.chainIndex}
+                data-ci={ch.chainIndex}
+                className={`${styles['gm-chain']} ${ci === chainIdx ? styles['gm-chain-current'] : ''}`}
+              >
                 <div className={styles['gm-chain-head']}>
                   <span className={styles['gm-chain-idx']} style={{ color: group.color }}>
                     ⛓ #{ch.chainIndex}
@@ -165,14 +236,16 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
         {showAnomaly && violations.length > 0 && (
           <>
             <div className={styles['gm-section-title']}>
-              NOT 违规（{violations.length}）
+              <span>NOT 违规（{violations.length}）</span>
+              <SeqNav count={violations.length} cur={violIdx} onNav={(d) => setViolIdx(navIdx(violIdx, d, violations.length))} />
             </div>
             {violations.map((v, i) => {
               const edge = group.sequence?.edges.find((e) => e.id === v.edgeId);
               return (
                 <div
                   key={i}
-                  className={`${styles['gm-step']} ${styles['gm-anomaly']}`}
+                  data-vi={i}
+                  className={`${styles['gm-step']} ${styles['gm-anomaly']} ${i === violIdx ? styles['gm-current'] : ''}`}
                   onClick={() => focusEvent(v.fromEvent.id)}
                   title={`在 ${filterLabel(edge?.fromFilterId ?? '')} 窗口内出现禁止的 ${filterLabel(edge?.toFilterId ?? '')}（点击定位源事件）`}
                 >
@@ -194,15 +267,17 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
         {showAnomaly && (
           <>
             <div className={styles['gm-section-title']}>
-              未覆盖事件（{result.uncoveredEvents.length}）
+              <span>未覆盖事件（{result.uncoveredEvents.length}）</span>
+              <SeqNav count={uncovered.length} cur={uncovIdx} onNav={(d) => setUncovIdx(navIdx(uncovIdx, d, uncovered.length))} />
             </div>
             {result.uncoveredEvents.length === 0 && (
               <div className={styles['gm-empty']}>全部事件均已匹配</div>
             )}
-            {uncovered.map((e) => (
+            {uncovered.map((e, ui) => (
               <div
                 key={e.id}
-                className={`${styles['gm-step']} ${styles['gm-anomaly']}`}
+                data-ui={e.id}
+                className={`${styles['gm-step']} ${styles['gm-anomaly']} ${ui === uncovIdx ? styles['gm-current'] : ''}`}
                 onClick={() => focusEvent(e.id)}
                 title={`点击定位到行 #${e.id + 1}`}
               >
