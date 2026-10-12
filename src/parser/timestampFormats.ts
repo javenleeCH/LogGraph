@@ -11,6 +11,13 @@ export interface TimestampFormat {
   id: string;
   /** 显示名 */
   label: string;
+  /**
+   * 展示用 pattern（%Y %m %d… 语法）。仅供 UI 显示 / 用户抄去自定义参考，
+   * 解析仍走下方 regex/parse（内置正则比 pattern 更宽容）。
+   */
+  pattern?: string;
+  /** 展示用示例行 */
+  sample?: string;
   /** 匹配时间戳的正则（必须为无锚点，从行首搜索） */
   regex: RegExp;
   /**
@@ -32,6 +39,8 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'iso-local-ms',
     label: 'YYYY-MM-DD HH:mm:ss.SSS',
+    pattern: '%Y-%m-%d %H:%M:%S.%f',
+    sample: '2024-01-01 12:00:00.123',
     regex: /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?/,
     parse: (m) => {
       const ms = m[7] ? m[7].padEnd(3, '0') : '0';
@@ -45,6 +54,8 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'iso-8601',
     label: 'ISO 8601 (Z/offset)',
+    pattern: '%Y-%m-%dT%H:%M:%S%z',
+    sample: '2024-01-01T12:00:00+08:00',
     regex: /(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:?\d{2})?/,
     parse: (m) => {
       const ms = m[7] ? m[7].padEnd(3, '0') : '0';
@@ -64,6 +75,8 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'syslog',
     label: 'syslog (MMM DD HH:mm:ss)',
+    pattern: '%b %d %H:%M:%S',
+    sample: 'Jan 01 12:00:00',
     regex: /([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})/,
     parse: (m) => {
       const mon = MONTHS[m[1]];
@@ -77,6 +90,8 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'time-only-ms',
     label: 'HH:mm:ss.SSS (当天)',
+    pattern: '%H:%M:%S.%f',
+    sample: '12:00:00.123',
     regex: /(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?/,
     parse: (m) => {
       const ms = m[4] ? m[4].padEnd(3, '0') : '0';
@@ -88,6 +103,7 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'epoch',
     label: 'Unix epoch (ms/s)',
+    sample: '1709596800123',
     regex: /(?<!\d)(\d{13})(?!\d)|(?<!\d)(\d{10})(?!\d)/,
     parse: (m) => {
       if (m[1]) return +m[1];
@@ -147,4 +163,98 @@ export function detectTimestampFormat(sampleLines: string[]): TimestampFormat | 
     }
   }
   return best && bestCount > 0 ? best : null;
+}
+
+// ---- 用户自定义时间格式（%Y %m %d %H %M %S %f %z %b） ----
+
+/** 编译结果捕获组对应的字段 */
+type CustomField = 'Y' | 'm' | 'd' | 'H' | 'M' | 'S' | 'ms' | 'tz' | 'b';
+
+/** pattern token → 正则片段与字段（Record：静态键查表，项目规约） */
+const CUSTOM_TOKENS: Record<string, { re: string; field: CustomField }> = {
+  '%Y': { re: '(\\d{4})', field: 'Y' },
+  '%m': { re: '(\\d{1,2})', field: 'm' },
+  '%d': { re: '(\\d{1,2})', field: 'd' },
+  '%H': { re: '(\\d{1,2})', field: 'H' },
+  '%M': { re: '(\\d{1,2})', field: 'M' },
+  '%S': { re: '(\\d{1,2})', field: 'S' },
+  '%f': { re: '\\.?(\\d{1,9})', field: 'ms' },
+  '%z': { re: '(Z|[+-]\\d{2}:?\\d{2})?', field: 'tz' },
+  '%b': { re: '(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', field: 'b' },
+};
+
+const regexEscape = (ch: string) => /[\\^$.*+?()[\]{}|]/.test(ch) ? `\\${ch}` : ch;
+
+/** %z 文本 → 该时区相对 UTC 快多少分钟（+08:00 → 480）。epoch = 钟面时间 − 偏移 */
+function tzOffsetMin(tz: string | undefined): number {
+  if (!tz || tz === 'Z') return 0;
+  const sign = tz[0] === '-' ? -1 : 1;
+  const h = parseInt(tz.slice(1, 3), 10);
+  const m = parseInt(tz.slice(-2), 10);
+  return sign * (h * 60 + m);
+}
+
+/**
+ * 把用户 pattern 编译成 TimestampFormat。
+ * token：`%Y %m %d %H %M %S`（数字字段）、`%f`（小数秒，点可选，截到毫秒）、
+ * `%z`（可选时区 Z / ±HH:MM / ±HHMM，缺省按 UTC）、`%b`（英文月份缩写）；
+ * 其余字符按字面量匹配（正则转义），`%%` 表示字面 %。
+ * 未识别的 token 或空 pattern 返回 null。
+ * 缺年月日时与内置「仅时分秒」预设同语义（1970-01-01 基准）。
+ */
+export function compileCustomFormat(pattern: string): TimestampFormat | null {
+  if (!pattern.trim()) return null;
+  const parts: string[] = [];
+  const groupOf: Partial<Record<CustomField, number>> = {};
+  let groupIndex = 0;
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch !== '%') {
+      parts.push(regexEscape(ch));
+      continue;
+    }
+    const token = pattern.slice(i, i + 2);
+    if (token === '%%') {
+      parts.push('%');
+      i++;
+      continue;
+    }
+    const spec = CUSTOM_TOKENS[token];
+    if (!spec) return null;
+    groupIndex++;
+    groupOf[spec.field] = groupIndex;
+    parts.push(spec.re);
+    i++;
+  }
+  if (!groupOf.H && !groupOf.M && !groupOf.S) return null; // 至少要有时间字段
+  const regex = new RegExp(parts.join(''));
+  const g = (m: RegExpMatchArray, f: CustomField): string | undefined =>
+    groupOf[f] ? m[groupOf[f]!] : undefined;
+  return {
+    id: `custom:${pattern}`,
+    label: `自定义 ${pattern}`,
+    regex,
+    parse: (m) => {
+      const y = g(m, 'Y');
+      const mon = g(m, 'b');
+      const mm = g(m, 'm');
+      const d = g(m, 'd');
+      const frac = g(m, 'ms');
+      const h = g(m, 'H');
+      const min = g(m, 'M');
+      const sec = g(m, 'S');
+      const tz = g(m, 'tz');
+      const ms = frac ? parseInt(frac.slice(0, 3).padEnd(3, '0'), 10) : 0;
+      const ts = Date.UTC(
+        y ? parseInt(y, 10) : 1970,
+        mon ? MONTHS[mon] ?? 0 : mm ? parseInt(mm, 10) - 1 : 0,
+        d ? parseInt(d, 10) : 1,
+        h ? parseInt(h, 10) : 0,
+        min ? parseInt(min, 10) : 0,
+        sec ? parseInt(sec, 10) : 0,
+        ms,
+      );
+      return ts - tzOffsetMin(tz) * 60_000;
+    },
+  };
 }

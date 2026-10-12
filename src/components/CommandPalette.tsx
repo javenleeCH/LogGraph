@@ -25,7 +25,9 @@ import {
   Save,
   Keyboard,
   Search,
+  Type,
 } from './Icon';
+import { OPEN_TS_FORMAT_EVENT } from './TimestampFormatEditor';
 import styles from './CommandPalette.module.css';
 
 /* ============================ 开合状态 ============================ */
@@ -208,6 +210,19 @@ function buildCommands(ctx: { closeAll: () => void }): Command[] {
     run: () => {
       ctx.closeAll();
       void openLogDirectory();
+    },
+  });
+
+  commands.push({
+    id: 'format.timestamp',
+    group: '文件',
+    label: '自定义时间格式…',
+    hint: '时间戳识别不了或识别错时，用 %Y %m %d %H %M %S 自定义并重新解析',
+    keywords: 'timestamp format 时间 格式 解析 自定义 reparse',
+    icon: <Type size={14} />,
+    run: () => {
+      ctx.closeAll();
+      window.dispatchEvent(new CustomEvent(OPEN_TS_FORMAT_EVENT));
     },
   });
   commands.push({

@@ -6,6 +6,7 @@ import { formatDateTime, formatDuration } from '../utils/timeFormat';
 import { FolderOpen, Folder, Table, BarChart, Maximize, Sun, Moon, Search, Keyboard } from './Icon';
 import { RangeChips } from './RangeChips';
 import { RecentProjectsMenu } from './RecentProjectsMenu';
+import { TimestampFormatEditor } from './TimestampFormatEditor';
 import { useCommandPalette } from './CommandPalette';
 import styles from './Toolbar.module.css';
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -91,6 +92,9 @@ export function Toolbar() {
 
       {/* 已载入日志时的最近项目 / 收藏夹入口（欢迎页之外也能切换项目） */}
       <RecentProjectsMenu />
+
+      {/* 时间格式编辑器：内置预设识别不了时自定义（已载入才有意义） */}
+      {meta && <TimestampFormatEditor />}
 
       <div className={styles['seg-control']} title="切换主视图模式">
         <button

@@ -319,3 +319,11 @@ export function Clock({ size, ...p }: IconProps) {
     </Svg>
   );
 }
+
+export function Type({ size, ...p }: IconProps) {
+  return (
+    <Svg size={size} {...p}>
+      <path d="M4 7V5h16v2M12 5v14M9 19h6" />
+    </Svg>
+  );
+}
