@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useLogStore } from '../store/logStore';
 import { formatDateTime, formatDuration, parseDateTime } from '../utils/timeFormat';
 import type { SavedRange } from '../types';
@@ -29,7 +30,9 @@ export function RangeChips() {
 
   const [edit, setEdit] = useState<EditState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editorPos, setEditorPos] = useState<{ left: number; top: number } | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   // 打开编辑器时聚焦并全选名称
   useEffect(() => {
@@ -44,6 +47,23 @@ export function RangeChips() {
       setError(null);
     }
   }, [savedRanges, edit]);
+
+  // 编辑器 fixed 锚在书签条下方：状态栏位于窗口顶部，向上弹会出界；
+  // fixed 同时避开 Toolbar backdrop-filter 的层叠上下文，确保浮于主内容之上
+  useEffect(() => {
+    if (!edit) return;
+    const place = () => {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const W = 330;
+      const left = Math.min(Math.max(8, rect.right - W), window.innerWidth - W - 8);
+      setEditorPos({ left, top: rect.bottom + 8 });
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edit?.id]);
 
   const startEdit = (r: SavedRange) => {
     setError(null);
@@ -99,7 +119,7 @@ export function RangeChips() {
   };
 
   return (
-    <div className={styles.root}>
+    <div ref={rootRef} className={styles.root}>
       <div className={styles.wrap}>
         {savedRanges.map((r) => (
           <span
@@ -145,8 +165,10 @@ export function RangeChips() {
         </button>
       </div>
 
-      {edit && (
-        <div className={styles.editor}>
+      {edit &&
+        editorPos &&
+        createPortal(
+          <div className={styles.editor} style={{ left: editorPos.left, top: editorPos.top }}>
           <div className={styles.field}>
             <label>名称</label>
             <input
@@ -194,8 +216,9 @@ export function RangeChips() {
             </button>
             <button onClick={closeEdit}>取消</button>
           </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
