@@ -599,11 +599,81 @@
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-.patternArea {
-  resize: none;
-  min-height: 32px;
-  line-height: 1.5;
+.condList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
 }
+
+.condRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.condSelect {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.condInput {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  box-sizing: border-box;
+  outline: none;
+}
+
+.condInput:focus {
+  border-color: var(--accent);
+}
+
+.condRemove {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 5px;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.condRemove:hover {
+  color: var(--danger);
+}
+
+.condAdd {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.condAdd:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 
 .syntaxHint {
   font-size: 10px;

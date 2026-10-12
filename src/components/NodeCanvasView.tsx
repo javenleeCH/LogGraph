@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FilterEngine } from '../filters/FilterEngine';
 import type { FilterGroup, SequenceEdge } from '../types';
-import { ChevronLeft, X, AlertTriangle, Trash } from './Icon';
+import { ChevronLeft, X, AlertTriangle, Trash, Plus } from './Icon';
 import { GroupFlowCanvas } from './flow/GroupFlowCanvas';
 import styles from './NodeCanvasView.module.css';
 
@@ -326,6 +326,32 @@ export function EdgeEditModal(props: {
  * Filter 详情弹窗
  * ========================================================== */
 
+/** 子条件行（编辑器本地态；合成回 pattern 换行 + ! 前缀存储，模型零变化） */
+interface CondRow {
+  negate: boolean;
+  text: string;
+}
+
+/** pattern 字符串 → 条件行列表（剥 ! 前缀；空 pattern 给一个空行起步） */
+function patternToRows(pattern: string): CondRow[] {
+  const rows: CondRow[] = [];
+  for (const line of pattern.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    if (t.startsWith('!')) rows.push({ negate: true, text: t.slice(1).trim() });
+    else rows.push({ negate: false, text: t });
+  }
+  return rows.length > 0 ? rows : [{ negate: false, text: '' }];
+}
+
+/** 条件行列表 → pattern 字符串（空文本行跳过；全空 = ''） */
+function rowsToPattern(rows: CondRow[]): string {
+  return rows
+    .filter((r) => r.text.trim())
+    .map((r) => (r.negate ? `!${r.text.trim()}` : r.text.trim()))
+    .join('\n');
+}
+
 export function FilterDetailModal() {
   const editingFilterId = useLogStore((s) => s.editingFilterId);
   const setEditingFilterId = useLogStore((s) => s.setEditingFilterId);
@@ -337,6 +363,29 @@ export function FilterDetailModal() {
   const removeFilterFromGroup = useLogStore((s) => s.removeFilterFromGroup);
 
   const filter = filters.find((f) => f.id === editingFilterId) ?? null;
+  const [rows, setRows] = useState<CondRow[]>(() => patternToRows(filter?.pattern ?? ''));
+
+  // 换一个 filter 编辑时重新初始化行（同 filter 内不重置，避免光标跳动）
+  useEffect(() => {
+    setRows(patternToRows(filter?.pattern ?? ''));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingFilterId]);
+
+  /** 行变更 → 更新本地行并合成提交 pattern */
+  const commitRows = (next: CondRow[]) => {
+    setRows(next);
+    if (filter) updateFilter(filter.id, { pattern: rowsToPattern(next) });
+  };
+  const setRow = (i: number, patch: Partial<CondRow>) => {
+    commitRows(rows.map((r, k) => (k === i ? { ...r, ...patch } : r)));
+  };
+  const removeRow = (i: number) => {
+    const next = rows.filter((_, k) => k !== i);
+    commitRows(next.length > 0 ? next : [{ negate: false, text: '' }]);
+  };
+  const addRow = () => {
+    commitRows([...rows, { negate: false, text: '' }]);
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -376,20 +425,43 @@ export function FilterDetailModal() {
             />
           </div>
 
-          <textarea
-            className={`${styles.patternInput} ${styles.patternArea} mono`}
-            value={filter.pattern}
-            onChange={(e) => updateFilter(filter.id, { pattern: e.target.value })}
-            placeholder={
-              filter.isRegex
-                ? '正则表达式…（每行一个，全部命中；! 开头排除）'
-                : '关键词…（每行一个，全部命中；! 开头排除）'
-            }
-            rows={Math.min(6, Math.max(1, filter.pattern.split('\n').length))}
-            autoFocus
-          />
+          <div className={styles.condList}>
+            {rows.map((row, i) => (
+              <div key={i} className={styles.condRow}>
+                <select
+                  className={styles.condSelect}
+                  value={row.negate ? 'not' : 'and'}
+                  onChange={(e) => setRow(i, { negate: e.target.value === 'not' })}
+                  title={row.negate ? '排除：该条件不出现才命中' : '满足：该条件必须出现'}
+                >
+                  <option value="and">满足</option>
+                  <option value="not">排除</option>
+                </select>
+                <input
+                  className={`${styles.condInput} mono`}
+                  type="text"
+                  value={row.text}
+                  onChange={(e) => setRow(i, { text: e.target.value })}
+                  placeholder={filter.isRegex ? `条件 ${i + 1}（正则）` : `条件 ${i + 1}（关键词）`}
+                  autoFocus={i === 0}
+                />
+                <button
+                  className={styles.condRemove}
+                  onClick={() => removeRow(i)}
+                  title="删除该条件"
+                  aria-label={`删除条件 ${i + 1}`}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+            <button className={styles.condAdd} onClick={addRow}>
+              <Plus size={12} />
+              添加条件
+            </button>
+          </div>
           <div className={styles.syntaxHint}>
-            多行 = 同时满足（AND）；<code>!</code> 开头 = 排除该行；行内 <code>|</code> = 或
+            各条件同时满足（AND）；「排除」= 该条件不出现才命中；输入框内 <code>|</code> = 或
           </div>
           {regexError && <div className={styles.error}>{regexError}</div>}
 
