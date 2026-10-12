@@ -93,9 +93,22 @@ export function DetailPanel() {
 
   // 选中行时滚动到视图（非 dbMode；dbMode 由 ContextStream 的虚拟滚动定位）
   useEffect(() => {
-    if (!dbMode && selected && selectedRef.current) {
-      selectedRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    }
+    if (dbMode || !selected || !selectedRef.current) return;
+    const el = selectedRef.current;
+    // 最近的可滚动祖先（detail-body）
+    let box: HTMLElement | null = el.parentElement;
+    while (box && box.scrollHeight <= box.clientHeight) box = box.parentElement;
+    if (!box) return;
+    const er = el.getBoundingClientRect();
+    const br = box.getBoundingClientRect();
+    // 已完全可见 → 不滚。旧实现 scrollIntoView({block:'center'}) 无条件居中：
+    // 选中行明明可见，详情内容仍会自己上滚一段再停（点靠后的事件时每次复现）。
+    if (er.top >= br.top && er.bottom <= br.bottom) return;
+    // 居中。scrollBy 只滚该容器；scrollIntoView 会连带滚动所有可滚动祖先。
+    box.scrollBy({
+      top: (er.top + er.bottom) / 2 - (br.top + br.bottom) / 2,
+      behavior: 'smooth',
+    });
   }, [selected, dbMode]);
 
   // dbMode：拉文件清单一次（目录切换 = dbMode 翻转时重拉；ContextStream 定位/右键用）

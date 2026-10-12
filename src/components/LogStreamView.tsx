@@ -75,7 +75,10 @@ function buildRows(
   const laneEvents: LogEvent[][] = matches.map((fm) => {
     const evs = fm.events;
     const s = bisectLeft(evs, viewRange.start);
-    const e = bisectLeft(evs, viewRange.end);
+    // end 含端点：bisectLeft 返回首个 >= end 的下标，直接 slice 会把
+    // ts===end 的事件切掉——全局时间戳最大的行在纵轴视图永远不渲染
+    // （ts 为整数毫秒，+1 即闭区间）
+    const e = bisectLeft(evs, viewRange.end + 1);
     return evs.slice(s, e);
   });
   // 收集去重时间戳
