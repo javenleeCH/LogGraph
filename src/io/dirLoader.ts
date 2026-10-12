@@ -42,7 +42,7 @@ function idbOpen(): Promise<IDBDatabase> {
   });
 }
 
-async function idbGet<T>(key: string): Promise<T | undefined> {
+export async function idbGet<T>(key: string): Promise<T | undefined> {
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readonly');
@@ -52,7 +52,7 @@ async function idbGet<T>(key: string): Promise<T | undefined> {
   });
 }
 
-async function idbSet(key: string, val: unknown): Promise<void> {
+export async function idbSet(key: string, val: unknown): Promise<void> {
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');

@@ -126,3 +126,14 @@ export function formatDuration(ms: number): string {
   if (ms < 3600000) return `${(ms / 60000).toFixed(1)}m`;
   return `${(ms / 3600000).toFixed(1)}h`;
 }
+
+/** 相对时间（最近项目列表用）：刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / 日期 */
+export function formatRelativeTime(ms: number, nowMs: number = Date.now()): string {
+  const diff = Math.max(0, nowMs - ms);
+  if (diff < 60_000) return '刚刚';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  if (diff < 172_800_000) return '昨天';
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+  return formatDateTime(ms).slice(0, 10);
+}

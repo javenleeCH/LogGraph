@@ -1,12 +1,21 @@
 /**
  * 空状态引导。
- *
  * 原来这里只有一行「打开日志文件并添加过滤器以开始」，
  * 新用户拿到的是一张白板：不知道能拖什么、也不知道下一步该点哪儿。
- * 这里把「入口」直接摆出来——三个主操作 + 格式说明 + 快捷键线索。
+ * 这里把「入口」直接摆出来——三个主操作 + 最近项目/收藏夹 + 格式说明 + 快捷键线索。
  */
+import { useCallback, useEffect, useState } from 'react';
 import { useLogStore, selectEventCount } from '../store/logStore';
-import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
+import { openRecentProject, openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
+import {
+  listFavoriteProjects,
+  listRecentProjects,
+  removeFavoriteProject,
+  removeRecentProject,
+  toggleFavoriteProject,
+  type ProjectEntry,
+} from '../io/recentProjects';
+import { formatRelativeTime } from '../utils/timeFormat';
 import { FileText, Folder, Plus, Search } from './Icon';
 import styles from './EmptyState.module.css';
 
@@ -16,6 +25,16 @@ export function WelcomeState() {
   const setEditingFilterId = useLogStore((s) => s.setEditingFilterId);
   const persistSupported = useLogStore((s) => s.persistSupported);
 
+  // 最近项目 / 收藏夹（localStorage / IndexedDB 持久化，见 io/recentProjects）
+  const [recents, setRecents] = useState<ProjectEntry[] | null>(null);
+  const [favs, setFavs] = useState<ProjectEntry[]>([]);
+  const refresh = useCallback(() => {
+    void listRecentProjects().then(setRecents);
+    void listFavoriteProjects().then(setFavs);
+  }, []);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
   return (
     <div className={styles.wrap}>
       <div className={styles.card}>
@@ -57,6 +76,33 @@ export function WelcomeState() {
           <code>.tsv</code> 文件或整个文件夹拖到窗口任意位置即可加载
         </p>
 
+        {((recents?.length ?? 0) > 0 || favs.length > 0) && (
+          <div className={styles.projects}>
+            {favs.length > 0 && (
+              <section className={styles.projSection}>
+                <div className={styles.projTitle}>项目收藏夹</div>
+                {favs.map((e) => (
+                  <ProjRow key={e.id} entry={e} fav section="fav" onChange={refresh} />
+                ))}
+              </section>
+            )}
+            {(recents?.length ?? 0) > 0 && (
+              <section className={styles.projSection}>
+                <div className={styles.projTitle}>最近打开</div>
+                {recents!.map((e) => (
+                  <ProjRow
+                    key={e.id}
+                    entry={e}
+                    fav={favs.some((f) => f.id === e.id)}
+                    section="recent"
+                    onChange={refresh}
+                  />
+                ))}
+              </section>
+            )}
+          </div>
+        )}
+
         <div className={styles.tips}>
           <span className={styles.tip}>
             随时按 <kbd className={styles.kbd}>Ctrl</kbd>
@@ -76,6 +122,64 @@ export function WelcomeState() {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** 最近/收藏条目行：整行点击重新打开；☆ 收藏切换；× 从所在列表移除 */
+function ProjRow({
+  entry,
+  fav,
+  section,
+  onChange,
+}: {
+  entry: ProjectEntry;
+  /** 是否已被收藏（决定 ☆/★ 显示与 toggle 语义） */
+  fav: boolean;
+  /** 行所在的列表：× 按区块删除，而非按收藏状态 */
+  section: 'fav' | 'recent';
+  onChange: () => void;
+}) {
+  const open = async () => {
+    await openRecentProject(entry);
+    onChange();
+  };
+  const toggle = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await toggleFavoriteProject(entry.id);
+    onChange();
+  };
+  const remove = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (section === 'fav') await removeFavoriteProject(entry.id);
+    else await removeRecentProject(entry.id);
+    onChange();
+  };
+  return (
+    <div
+      className={styles.projRow}
+      onClick={() => void open()}
+      title={entry.path ?? `${entry.kind === 'dir' ? '目录' : '文件'}（浏览器句柄）`}
+    >
+      {entry.kind === 'dir' ? <Folder size={13} /> : <FileText size={13} />}
+      <span className={styles.projName}>{entry.name}</span>
+      <span className={styles.projMeta}>
+        {entry.path ?? (entry.kind === 'dir' ? '目录' : '文件')} · {formatRelativeTime(entry.openedAt)}
+      </span>
+      <button
+        className={styles.projStar}
+        onClick={(e) => void toggle(e)}
+        title={fav ? '取消收藏' : '收藏到收藏夹'}
+      >
+        {fav ? '★' : '☆'}
+      </button>
+      <button
+        className={styles.projDel}
+        onClick={(e) => void remove(e)}
+        title={section === 'fav' ? '从收藏夹移除' : '从最近打开移除'}
+      >
+        ×
+      </button>
     </div>
   );
 }

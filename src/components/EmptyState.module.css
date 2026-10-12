@@ -149,6 +149,90 @@
   color: var(--accent);
 }
 
+/* ===== 最近项目 / 收藏夹（欢迎页） ===== */
+.projects {
+  align-self: stretch;
+  width: 100%;
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.projSection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+}
+
+.projTitle {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+  padding-left: 2px;
+}
+
+.projRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.projRow:hover {
+  border-color: var(--accent);
+}
+
+.projRow svg {
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+.projName {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.projMeta {
+  margin-left: auto;
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+
+.projStar,
+.projDel {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.projStar:hover {
+  color: var(--warn);
+}
+
+.projDel:hover {
+  color: var(--danger);
+}
+
 /* ===== 次级引导（已载入日志但无过滤器） ===== */
 .compact {
   flex: 1 1 auto;

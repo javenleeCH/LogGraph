@@ -21,6 +21,7 @@ import {
   tauriPathAsDirectory,
   type MultiLoadResult,
 } from './io/dirLoader';
+import { recordOpenProject } from './io/recentProjects';
 import { setupTauriDragDrop, isTauri } from './lib/tauri';
 import { parseLoadedFile } from './parser/parseBridge';
 import { ensureRegexWasm } from './filters/regexWasm';
@@ -164,6 +165,10 @@ export default function App() {
           skipped: result.skipped,
           timestampFormatId: result.timestampFormatId,
         });
+        // Tauri 拖拽的文件有绝对路径，计入最近项目（浏览器拖拽 File 无路径）
+        if (loaded.path) {
+          await recordOpenProject({ name: loaded.name, kind: 'file', path: loaded.path });
+        }
         toast.success(
           `已载入 ${loaded.name}`,
           [
@@ -241,6 +246,7 @@ export default function App() {
             // 目录即工作区：先绑定 .logGraph（恢复存档/继承播种），再加载日志
             await useLogStore.getState().openWorkspace(dirHandle);
             await handleDirectory(dirHandle, dirHandle.name);
+            await recordOpenProject({ name: dirHandle.name, kind: 'dir', path: paths[0] });
             return;
           }
           await handleLoaded(await loadTauriPaths(paths));
@@ -276,6 +282,7 @@ export default function App() {
           const names = list.map((f) => f.name);
           const result = await loadMultiple(dirHandle, names);
           applyDirectoryResult(result, dirHandle.name, names.length);
+          await recordOpenProject({ name: dirHandle.name, kind: 'dir', handle: dirHandle });
         } catch (err) {
           console.error(err);
           toast.error('加载文件夹失败', (err as Error).message);

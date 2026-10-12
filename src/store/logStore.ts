@@ -22,6 +22,7 @@ import {
   ensureReadPermission,
   isFSASupported as isFSASupportedDir,
 } from '../io/dirLoader';
+import { recordOpenProject } from '../io/recentProjects';
 import {
   dbClose,
   runDbFiltersBatch,
@@ -1384,6 +1385,8 @@ export const useLogStore = create<LogState>((set, get) => ({
     set({ logsDirHandle: dir, logsDirName: dir.name });
     // 目录即工作区：绑定 .logGraph（恢复存档或继承当前状态播种）
     await get().openWorkspace(dir);
+    // 用户显式选择的目录计入最近项目（initLogsDir 的自动恢复不记录）
+    await recordOpenProject({ name: dir.name, kind: 'dir', path: dir.path ?? null, handle: dir });
   },
 
   initLogsDir: async () => {
