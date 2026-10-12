@@ -5,6 +5,7 @@ import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
 import { FolderOpen, Folder, Table, BarChart, Maximize, Sun, Moon, Search, Keyboard } from './Icon';
 import { RangeChips } from './RangeChips';
+import { RecentProjectsMenu } from './RecentProjectsMenu';
 import { useCommandPalette } from './CommandPalette';
 import styles from './Toolbar.module.css';
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -87,6 +88,9 @@ export function Toolbar() {
           {logsDirName ?? '打开目录'}
         </button>
       )}
+
+      {/* 已载入日志时的最近项目 / 收藏夹入口（欢迎页之外也能切换项目） */}
+      <RecentProjectsMenu />
 
       <div className={styles['seg-control']} title="切换主视图模式">
         <button

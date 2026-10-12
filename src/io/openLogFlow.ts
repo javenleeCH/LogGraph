@@ -140,54 +140,59 @@ export async function openLogDirectory(): Promise<void> {
 /**
  * 打开一个最近 / 收藏项目。
  * Tauri 按绝对路径直读（目录即工作区）；浏览器按 id 取回 FSA 句柄并重新授权。
+ * 返回是否走到了载入（失败路径以 toast 反馈，调用方据此决定是否收起入口）。
  */
-export async function openRecentProject(entry: ProjectEntry): Promise<void> {
+export async function openRecentProject(entry: ProjectEntry): Promise<boolean> {
   try {
     if (isTauri()) {
-      if (!entry.path) return;
+      if (!entry.path) return false;
       if (entry.kind === 'dir') {
         const handle = await tauriPathAsDirectory(entry.path);
         if (!handle) {
           toast.error('目录不存在或无法访问', entry.path);
-          return;
+          return false;
         }
         useLogStore.getState().setLogsDir(handle, entry.name);
         await useLogStore.getState().openWorkspace(handle);
         await recordOpenProject({ name: entry.name, kind: 'dir', path: entry.path });
         toast.success(`已打开工作区 ${entry.name}`, '左侧文件树可浏览目录内日志');
-      } else {
-        const loaded = await loadTauriPaths([entry.path]);
-        if (!loaded) {
-          toast.error('文件不存在', entry.path);
-          return;
-        }
-        await ingestLoadedFile(loaded); // 路径记录由 ingestLoadedFile 内完成
+        return true;
       }
-      return;
+      const loaded = await loadTauriPaths([entry.path]);
+      if (!loaded) {
+        toast.error('文件不存在', entry.path);
+        return false;
+      }
+      await ingestLoadedFile(loaded); // 路径记录由 ingestLoadedFile 内完成
+      return true;
     }
 
     const handle = await resolveProjectHandle(entry.id);
     if (!handle) {
       toast.warn('项目句柄已失效', '请通过「打开日志文件 / 目录」重新选择');
-      return;
+      return false;
     }
     if (!(await ensureReadPermission(handle))) {
       toast.warn('未获得读取权限', '浏览器需要重新授权才能再次读取该位置');
-      return;
+      return false;
     }
     if (entry.kind === 'dir') {
       useLogStore.getState().setLogsDir(handle, entry.name);
       await useLogStore.getState().openWorkspace(handle);
       await recordOpenProject({ name: entry.name, kind: 'dir', handle });
-    } else if ('getFile' in handle) {
-      const file = await handle.getFile();
-      await ingestLoadedFile(await loadFile(file));
-      await recordOpenProject({ name: file.name, kind: 'file', handle });
-    } else {
-      toast.warn('项目句柄类型不匹配', '该条目记录的不是文件句柄');
+      return true;
     }
+    if (!('getFile' in handle)) {
+      toast.warn('项目句柄类型不匹配', '该条目记录的不是文件句柄');
+      return false;
+    }
+    const file = await handle.getFile();
+    await ingestLoadedFile(await loadFile(file));
+    await recordOpenProject({ name: file.name, kind: 'file', handle });
+    return true;
   } catch (err) {
     console.error('打开最近项目失败', err);
     toast.error('打开项目失败', (err as Error).message);
+    return false;
   }
 }

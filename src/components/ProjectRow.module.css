@@ -1,0 +1,60 @@
+/* ===== 最近/收藏项目条目行（欢迎页 / 工具栏菜单共用） ===== */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.row:hover {
+  border-color: var(--accent);
+}
+
+.row svg {
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+.name {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meta {
+  margin-left: auto;
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+
+.star,
+.del {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.star:hover {
+  color: var(--warn);
+}
+
+.del:hover {
+  color: var(--danger);
+}

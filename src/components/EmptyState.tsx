@@ -6,17 +6,10 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useLogStore, selectEventCount } from '../store/logStore';
-import { openRecentProject, openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
-import {
-  listFavoriteProjects,
-  listRecentProjects,
-  removeFavoriteProject,
-  removeRecentProject,
-  toggleFavoriteProject,
-  type ProjectEntry,
-} from '../io/recentProjects';
-import { formatRelativeTime } from '../utils/timeFormat';
+import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
+import { listFavoriteProjects, listRecentProjects, type ProjectEntry } from '../io/recentProjects';
 import { FileText, Folder, Plus, Search } from './Icon';
+import { ProjectRow } from './ProjectRow';
 import styles from './EmptyState.module.css';
 
 /** 未载入任何日志：主引导页 */
@@ -82,7 +75,7 @@ export function WelcomeState() {
               <section className={styles.projSection}>
                 <div className={styles.projTitle}>项目收藏夹</div>
                 {favs.map((e) => (
-                  <ProjRow key={e.id} entry={e} fav section="fav" onChange={refresh} />
+                  <ProjectRow key={e.id} entry={e} fav section="fav" onChange={refresh} />
                 ))}
               </section>
             )}
@@ -90,7 +83,7 @@ export function WelcomeState() {
               <section className={styles.projSection}>
                 <div className={styles.projTitle}>最近打开</div>
                 {recents!.map((e) => (
-                  <ProjRow
+                  <ProjectRow
                     key={e.id}
                     entry={e}
                     fav={favs.some((f) => f.id === e.id)}
@@ -126,63 +119,6 @@ export function WelcomeState() {
   );
 }
 
-/** 最近/收藏条目行：整行点击重新打开；☆ 收藏切换；× 从所在列表移除 */
-function ProjRow({
-  entry,
-  fav,
-  section,
-  onChange,
-}: {
-  entry: ProjectEntry;
-  /** 是否已被收藏（决定 ☆/★ 显示与 toggle 语义） */
-  fav: boolean;
-  /** 行所在的列表：× 按区块删除，而非按收藏状态 */
-  section: 'fav' | 'recent';
-  onChange: () => void;
-}) {
-  const open = async () => {
-    await openRecentProject(entry);
-    onChange();
-  };
-  const toggle = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    await toggleFavoriteProject(entry.id);
-    onChange();
-  };
-  const remove = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (section === 'fav') await removeFavoriteProject(entry.id);
-    else await removeRecentProject(entry.id);
-    onChange();
-  };
-  return (
-    <div
-      className={styles.projRow}
-      onClick={() => void open()}
-      title={entry.path ?? `${entry.kind === 'dir' ? '目录' : '文件'}（浏览器句柄）`}
-    >
-      {entry.kind === 'dir' ? <Folder size={13} /> : <FileText size={13} />}
-      <span className={styles.projName}>{entry.name}</span>
-      <span className={styles.projMeta}>
-        {entry.path ?? (entry.kind === 'dir' ? '目录' : '文件')} · {formatRelativeTime(entry.openedAt)}
-      </span>
-      <button
-        className={styles.projStar}
-        onClick={(e) => void toggle(e)}
-        title={fav ? '取消收藏' : '收藏到收藏夹'}
-      >
-        {fav ? '★' : '☆'}
-      </button>
-      <button
-        className={styles.projDel}
-        onClick={(e) => void remove(e)}
-        title={section === 'fav' ? '从收藏夹移除' : '从最近打开移除'}
-      >
-        ×
-      </button>
-    </div>
-  );
-}
 
 /** 已载入日志但没有任何可见过滤器：次级引导 */
 export function NoFilterState() {
