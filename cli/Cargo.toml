@@ -1,0 +1,16 @@
+[package]
+name = "loggraph-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "logGraph engine CLI: rg-style search + CEP matching, no database"
+
+[[bin]]
+name = "loggraph"
+path = "src/main.rs"
+
+[dependencies]
+loggraph-engine = { path = "../engine" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

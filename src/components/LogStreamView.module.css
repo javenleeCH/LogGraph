@@ -1,9 +1,12 @@
 .wrap {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  width: 100%;
+  /* flex 填充（而非 height:100%——后者不给兄弟 FilterChips 留空间，
+     会整体下溢 paneTop 32px，把末行日志文本压到下方详情面板顶上） */
+  flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
+  width: 100%;
   background: var(--bg);
 }
 
@@ -46,7 +49,7 @@
 }
 
 .headerInfo {
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   color: var(--text-dim);
 }
 
@@ -75,7 +78,7 @@
 }
 
 .hint {
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-faint);
   border: 1px solid var(--border);
@@ -157,7 +160,7 @@
 }
 
 .lanePattern {
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-faint);
   white-space: nowrap;
@@ -348,7 +351,7 @@
 }
 
 .tickLabel {
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--accent-light);
   font-weight: 500;
@@ -413,7 +416,7 @@
   padding: 0 5px;
   box-sizing: border-box;
   border-radius: 5px;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   white-space: nowrap;
   cursor: pointer;
@@ -559,7 +562,7 @@
   border-radius: 5px;
   height: 18px;
   line-height: 18px;
-  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   white-space: nowrap;
   cursor: pointer;

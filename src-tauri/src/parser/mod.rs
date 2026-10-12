@@ -158,6 +158,206 @@ pub async fn parse_log(
     .map_err(|e| format!("解析任务执行失败: {e}"))?
 }
 
+// ---- 目录批量解析（P2：141 文件 × 5.1MB 场景，分块传输防 OOM）----
+// 教训：一次性返回全量 events+rawLines 会序列化出 ~2GB 的单个 JSON，
+// Rust 堆 + JSON 串 + JS parse 结果三份共存直接打爆 WebView 内存（应用退出）。
+// 协议：parse_dir 只解析+缓存+回元数据（prepare）；前端循环
+// dir_lines_chunk / dir_events_chunk 按 offset 分块拉取；dir_cache_drop 释放。
+// 内存峰值 ≈ Rust 缓存 + 单块 JSON（~15MB），无巨型中间串。
+
+use std::sync::{Mutex, OnceLock};
+
+/// prepare 阶段缓存；events / raw_lines 由 dir_chunk 从头部 drain 取走
+struct DirParseCache {
+    events: Vec<LogEventDto>,
+    raw_lines: Vec<String>,
+}
+
+fn dir_cache() -> &'static Mutex<Option<DirParseCache>> {
+    static CACHE: OnceLock<Mutex<Option<DirParseCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// 目录解析元数据（不含大数据体）
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMetaDto {
+    pub total_events: u32,
+    pub total_lines: u32,
+    pub skipped: u32,
+    pub file_count: u32,
+    pub timestamp_format_id: Option<String>,
+    /// 参与合并的文件相对名
+    pub file_names: Vec<String>,
+}
+
+
+/// 判断文件名是否为可识别的日志文件（对齐前端 isLogFileName 宽松匹配）
+fn is_log_file_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".log", ".txt", ".out", ".csv", ".tsv"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
+/// 递归枚举目录下日志文件（相对路径，'/' 分隔；与前端 listLogFiles 的 name 对齐）
+fn walk_log_files(dir: &std::path::Path, prefix: &str, depth: u32, out: &mut Vec<String>) {
+    if depth > 5 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return; // 无权限/不存在 → 跳过（前端行为一致）
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if path.is_dir() {
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            walk_log_files(&path, &rel, depth + 1, out);
+        } else if is_log_file_name(&name) {
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            out.push(rel);
+        }
+    }
+}
+
+/// 批量解析目录（prepare 阶段）：枚举 + 逐文件解析 + 全局 id 重编 + sourceFile 赋值
+/// + 全局按 ts 排序，结果缓存在进程内，只回元数据（大数据体由 dir_chunk 分块拉取）。
+/// 进度经 Tauri event `parse_dir_progress` 推送 { loaded, total, current }。
+#[tauri::command]
+pub async fn parse_dir(
+    app: tauri::AppHandle,
+    dir: String,
+) -> Result<DirMetaDto, String> {
+    use tauri::Emitter;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::path::PathBuf::from(&dir);
+        if !root.is_dir() {
+            return Err(format!("目录不存在: {dir}"));
+        }
+        // 枚举（排序与前端 localeCompare 近似：按名称字典序）
+        let mut names: Vec<String> = Vec::new();
+        walk_log_files(&root, "", 0, &mut names);
+        names.sort();
+        if names.is_empty() {
+            return Err("该目录下没有可识别的日志文件（.log/.txt/.out/.csv/.tsv）".into());
+        }
+        let total = names.len();
+
+        let mut all_events: Vec<LogEventDto> = Vec::new();
+        let mut all_raw_lines: Vec<String> = Vec::new();
+        let mut total_lines: u32 = 0;
+        let mut skipped: u32 = 0;
+        let mut format_ids: Vec<Option<String>> = Vec::new();
+        let mut file_names: Vec<String> = Vec::new();
+
+        for (i, rel) in names.iter().enumerate() {
+            let full = root.join(rel);
+            let text = match read_file_lossy(full.to_str().unwrap_or_default()) {
+                Ok(t) => t,
+                Err(_) => continue, // 读取失败跳过（前端降级行为一致）
+            };
+            let parsed = parse_text_full(&text, None);
+            let _ = app.emit(
+                "parse_dir_progress",
+                serde_json::json!({ "loaded": i + 1, "total": total, "current": rel }),
+            );
+            file_names.push(rel.clone());
+            format_ids.push(parsed.timestamp_format_id.clone());
+            total_lines = total_lines.saturating_add(parsed.total_lines);
+            skipped = skipped.saturating_add(parsed.skipped);
+
+            // 全局 id 重编（baseId = 已累计行数）+ sourceFile 赋值（Rust 侧完成，
+            // 事件对象只存一份 name 引用，序列化后前端天然共享字符串池）
+            let base_id = all_raw_lines.len() as u32;
+            for l in parsed.raw_lines {
+                all_raw_lines.push(l);
+            }
+            for mut ev in parsed.events {
+                ev.id = base_id.saturating_add(ev.id);
+                ev.source_file = Some(rel.clone());
+                all_events.push(ev);
+            }
+        }
+
+        // 全局按 ts 稳定排序（与 JS mergeParsedInputs 相同语义）
+        all_events.sort_by_key(|e| e.ts);
+
+        // 格式 id：全部相同才透出（前端 meta 逻辑）
+        let timestamp_format_id = if !format_ids.is_empty() && format_ids.windows(2).all(|w| w[0] == w[1]) {
+            format_ids[0].clone()
+        } else {
+            None
+        };
+
+        let total_events = all_events.len() as u32;
+        // 缓存（覆盖旧的；连续加载时旧缓存被丢弃）
+        *dir_cache().lock().map_err(|e| e.to_string())? = Some(DirParseCache {
+            events: all_events,
+            raw_lines: all_raw_lines,
+        });
+
+        Ok(DirMetaDto {
+            total_events,
+            total_lines,
+            skipped,
+            file_count: file_names.len() as u32,
+            timestamp_format_id,
+            file_names,
+        })
+    })
+    .await
+    .map_err(|e| format!("目录解析任务执行失败: {e}"))?
+}
+
+/// 取一块 rawLines（offset 起最多 max 条；不足 max = 已到尾）。
+/// 返回空数组 = 该序列传输完成。
+#[tauri::command]
+pub fn dir_lines_chunk(
+    offset: u32,
+    max: u32,
+) -> Result<Vec<String>, String> {
+    let guard = dir_cache().lock().map_err(|e| e.to_string())?;
+    let Some(cache) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let start = (offset as usize).min(cache.raw_lines.len());
+    let end = (start + max as usize).min(cache.raw_lines.len());
+    Ok(cache.raw_lines[start..end].to_vec())
+}
+
+/// 取一块事件（offset 起最多 max 条；事件已按 ts 升序）。
+/// 返回空数组 = 该序列传输完成。两序列都完成时由前端调 dir_cache_drop 释放。
+#[tauri::command]
+pub fn dir_events_chunk(
+    offset: u32,
+    max: u32,
+) -> Result<Vec<LogEventDto>, String> {
+    let guard = dir_cache().lock().map_err(|e| e.to_string())?;
+    let Some(cache) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let start = (offset as usize).min(cache.events.len());
+    let end = (start + max as usize).min(cache.events.len());
+    Ok(cache.events[start..end].to_vec())
+}
+
+/// 丢弃缓存（前端拉取完成后调用；重新 prepare 也会覆盖）。
+#[tauri::command]
+pub fn dir_cache_drop() -> Result<(), String> {
+    *dir_cache().lock().map_err(|e| e.to_string())? = None;
+    Ok(())
+}
+
 // ---- 单元测试（cargo test；期望值均按 JS 语义人工推演）----
 
 #[cfg(test)]
@@ -251,11 +451,13 @@ mod tests {
 
     #[test]
     fn skipped_and_totals() {
+        // 尾换行 → split 3 段（末尾空行）；空行与无时间戳行均计入 skipped（JS split 同，
+        // 与 split_lines_matrix / detect_fallback_100_limit 的尾空行语义一致）
         let text = "12:00:00.000 ok\nplain line without timestamp\n";
         let r = parse_text_full(text, None);
         assert_eq!(r.events.len(), 1);
-        assert_eq!(r.skipped, 1);
-        assert_eq!(r.total_lines, 2);
+        assert_eq!(r.skipped, 2);
+        assert_eq!(r.total_lines, 3);
     }
 
     #[test]

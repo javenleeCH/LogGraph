@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLogStore } from '../store/logStore';
+import { useLogStore, selectEventCount } from '../store/logStore';
 import { FilterEngine } from '../filters/FilterEngine';
+import { isRegexWasmFallback } from '../filters/regexWasm';
 import type { Filter, FilterGroup } from '../types';
 import {
   ChevronDown,
@@ -53,6 +54,8 @@ function FilterEditor({
   }, [onClose]);
 
   const regexError = filter.isRegex ? FilterEngine.validateRegex(filter.pattern) : null;
+  // 引擎统一后（wasm Rust regex = 桌面引擎），仅在 wasm 加载失败回退 JS 时提示
+  const wasmFallback = filter.isRegex && isRegexWasmFallback();
 
   if (!pos) return null;
 
@@ -92,6 +95,13 @@ function FilterEditor({
         />
 
         {regexError && <div className={styles.error}>{regexError}</div>}
+
+        {wasmFallback && (
+          <div className={styles.warn}>
+            ⚠ WASM 正则引擎未加载，当前使用 JS 正则兜底，结果可能与桌面端不一致。
+            刷新页面或检查网络后重试。
+          </div>
+        )}
 
         <div className={styles.toggles}>
           <label>
@@ -617,7 +627,7 @@ export function FilterBar() {
   const removeGroup = useLogStore((s) => s.removeGroup);
   const toggleGroupCollapsed = useLogStore((s) => s.toggleGroupCollapsed);
   const updateFilter = useLogStore((s) => s.updateFilter);
-  const events = useLogStore((s) => s.events);
+  const eventCount = useLogStore(selectEventCount);
   const matches = useLogStore((s) => s.matches);
   const selectEvent = useLogStore((s) => s.selectEvent);
   const selectedEventId = useLogStore((s) => s.selectedEventId);
@@ -729,7 +739,7 @@ export function FilterBar() {
       <div className={styles.chips}>
         {filters.length === 0 && groups.length === 0 ? (
           <span className={styles.empty}>
-            {events.length === 0 ? '加载日志后添加过滤器' : '点击 + 添加过滤器'}
+            {eventCount === 0 ? '加载日志后添加过滤器' : '点击 + 添加过滤器'}
           </span>
         ) : (
           <>
@@ -760,14 +770,14 @@ export function FilterBar() {
       <button
         className={styles.addBtn}
         onClick={() => addFilter()}
-        disabled={events.length === 0}
+        disabled={eventCount === 0}
       >
         <Plus size={12} /> 过滤
       </button>
       <button
         className={styles.addBtn}
         onClick={openCreateGroup}
-        disabled={events.length === 0}
+        disabled={eventCount === 0}
         title="新建分组（类比 Perfetto 进程）"
       >
         <Plus size={12} /> 组

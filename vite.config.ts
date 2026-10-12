@@ -12,8 +12,17 @@ export default defineConfig({
   },
   clearScreen: false,
   server: {
+    // 绑定 IPv4 127.0.0.1：本机 localhost 在部分环境解析到 IPv6 ::1，
+    // 而 WebView2 用 IPv4 连接时会白屏（connection refused）。固定 IPv4 最稳。
+    host: '127.0.0.1',
     port: 5180,
     strictPort: true,
+    // target/（cargo 构建产物）与 .logGraph/（SQLite cache.db）在项目根内：
+    // Windows 上链接器/SQLite 写这些文件时持锁，watcher 报 EBUSY 会直接崩掉
+    // 整个 dev server → Tauri 窗口白屏。必须排除。
+    watch: {
+      ignored: ['**/target/**', '**/.logGraph/**', 'perf-data/**'],
+    },
   },
   envPrefix: ['VITE_', 'TAURI_ENV_'],
   build: {

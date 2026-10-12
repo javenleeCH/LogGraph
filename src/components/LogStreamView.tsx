@@ -4,8 +4,10 @@ import { bisectLeft } from '../timeline/correlation';
 import { formatTime, formatDuration, chooseTickStep } from '../utils/timeFormat';
 import { levelColor as getLevelColor } from '../constants';
 import { ChevronLeft, ChevronRight, AlignCenter, Columns, Globe } from './Icon';
+import { WelcomeState, NoFilterState } from './EmptyState';
 import type { LogEvent, Filter } from '../types';
 import styles from './LogStreamView.module.css';
+import { fetchLinesByIds } from '../io/dbStore';
 
 const CARD_H = 20; // 单个事件卡片高度
 const ROW_PAD = 4; // 行内上下留白
@@ -15,6 +17,8 @@ const GLOBAL_TICK_H = 80; // 全局模式：每个刻度最小高度
 const GLOBAL_CASCADE = 16; // 全局模式：同时间事件级联偏移（略小于卡片高，形成层叠）
 const DENSITY_BUCKET_H = 3; // 全局模式密度桶高度（px）
 const DENSITY_CARD_THRESHOLD = 3; // 桶内事件数超过此值则只显示密度、不显示卡片
+const LINE_TEXT_BATCH = 500; // dbMode 行文本分批拉取批量
+const LINE_TEXT_LRU_MAX = 20_000; // dbMode 行文本缓存上限（防长滚动内存膨胀）
 
 /** hex 颜色 -> [r, g, b] */
 function hexToRgb(hex: string): [number, number, number] {
@@ -51,15 +55,33 @@ interface TickMark {
 function buildRows(
   matches: { filterId: string; events: LogEvent[] }[],
   viewRange: { start: number; end: number } | null,
-): { rows: RowData[]; laneEvents: LogEvent[][] } {
+): {
+  rows: RowData[];
+  laneEvents: LogEvent[][];
+  /** lane 内事件按 ts 分组（对齐模式渲染按行 O(1) 取事件） */
+  laneByTs: Map<number, LogEvent[]>[];
+  /** 事件 id → 行下标（选中定位 O(1) 查表，替代旧 O(N²) 全量扫描） */
+  rowOfEvent: Map<number, number>;
+  /** 事件 id → 卡片绝对 Y（对齐模式堆叠内精确定位，行级判定会误伤可见卡片） */
+  cardTopOfEvent: Map<number, number>;
+} {
   if (!viewRange || matches.length === 0) {
-    return { rows: [], laneEvents: matches.map(() => []) };
+    return {
+      rows: [],
+      laneEvents: matches.map(() => []),
+      laneByTs: matches.map(() => new Map()),
+      rowOfEvent: new Map(),
+      cardTopOfEvent: new Map(),
+    };
   }
   // 收集每个 lane 在 viewRange 内的事件
   const laneEvents: LogEvent[][] = matches.map((fm) => {
     const evs = fm.events;
     const s = bisectLeft(evs, viewRange.start);
-    const e = bisectLeft(evs, viewRange.end);
+    // end 含端点：bisectLeft 返回首个 >= end 的下标，直接 slice 会把
+    // ts===end 的事件切掉——全局时间戳最大的行在纵轴视图永远不渲染
+    // （ts 为整数毫秒，+1 即闭区间）
+    const e = bisectLeft(evs, viewRange.end + 1);
     return evs.slice(s, e);
   });
   // 收集去重时间戳
@@ -83,15 +105,33 @@ function buildRows(
   });
   // 构建行
   const rows: RowData[] = [];
+  const rowOfTs = new Map<number, number>();
   let top = 0;
   for (const ts of tsList) {
+    rowOfTs.set(ts, rows.length);
     const counts = laneByTs.map((m) => m.get(ts)?.length ?? 0);
     const maxCount = Math.max(1, ...counts);
     const height = maxCount * CARD_H + ROW_PAD * 2;
     rows.push({ ts, counts, height, top });
     top += height;
   }
-  return { rows, laneEvents };
+  // 事件 id → 行下标 / 卡片绝对 Y（同一物理行命中多列时行下标一致，先到先得）。
+  // 卡片 Y 对齐 .eventStack 几何：padding-top 2px + 堆叠序 × (卡片 18 + gap 2)
+  const rowOfEvent = new Map<number, number>();
+  const cardTopOfEvent = new Map<number, number>();
+  for (const m of laneByTs) {
+    for (const [ts, evs] of m) {
+      const ri = rowOfTs.get(ts);
+      if (ri === undefined) continue;
+      const rowTop = rows[ri].top;
+      for (let i = 0; i < evs.length; i++) {
+        const id = evs[i].id;
+        if (!rowOfEvent.has(id)) rowOfEvent.set(id, ri);
+        if (!cardTopOfEvent.has(id)) cardTopOfEvent.set(id, rowTop + 2 + i * CARD_H);
+      }
+    }
+  }
+  return { rows, laneEvents, laneByTs, rowOfEvent, cardTopOfEvent };
 }
 
 /** 可见列分段：group 包裹子 filter 列 + 顶层 filter 列 */
@@ -199,6 +239,8 @@ export function LogStreamView() {
   const selectEvent = useLogStore((s) => s.selectEvent);
   const setHovered = useLogStore((s) => s.setHovered);
   const resetView = useLogStore((s) => s.resetView);
+  // dbMode（SQLite 驻留）：事件只有骨架（raw=''），需要按视口惰性取行文本
+  const dbMode = useLogStore((s) => s.dbMode);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerInnerRef = useRef<HTMLDivElement>(null);
@@ -324,7 +366,7 @@ export function LogStreamView() {
     () => totalSlots * 5,
     [totalSlots],
   );
-  const { rows, laneEvents } = useMemo(
+  const { rows, laneEvents, laneByTs, rowOfEvent, cardTopOfEvent } = useMemo(
     () => buildRows(visibleMatches, viewRange),
     [visibleMatches, viewRange],
   );
@@ -339,6 +381,8 @@ export function LogStreamView() {
   // 同一 filter 在多个 group 出现时各 slot 独立宽度。拖动列 slot 边界仅改 colWidths[slot]，
   // 后续列宽度不变 → 它们整体位置随 flex 排列自然右移（即"整体平移跟随"）
   const [colWidths, setColWidths] = useState<number[]>([]);
+  // dbMode 下列表只持有骨架事件（raw=''），按视口惰性从 cache.db 取行文本（no=全局行号=event.id）
+  const [lineText, setLineText] = useState<Map<number, string>>(new Map());
   // 列实例数量变化时重置为等分填充可用宽
   useEffect(() => {
     setColWidths((prev) => {
@@ -486,43 +530,38 @@ export function LogStreamView() {
     const el = scrollRef.current;
     if (!el) return;
 
-    // 全局模式：按事件真实 ts 定位
-    if (mode === 'global' && viewRange && globalData) {
-      let targetTs: number | null = null;
-      for (const le of laneEvents) {
-        const ev = le.find((e) => e.id === selectedEventId);
-        if (ev) {
-          targetTs = ev.ts;
-          break;
-        }
-      }
-      if (targetTs === null) return;
-      const y = (targetTs - viewRange.start) * globalData.pxPerMs;
-      if (y < el.scrollTop || y > el.scrollTop + el.clientHeight) {
-        el.scrollTo({ top: y - el.clientHeight / 3, behavior: 'smooth' });
-      }
+    // O(1) 查表定位（rowOfEvent/cardTopOfEvent 由 buildRows 一次构建）。
+    // 旧实现对齐模式是逐行 × 逐列 .some() 全量扫描 = O(N²)：百万级事件下
+    // 点一次选中就卡死主线程数分钟——详情不更新、后续点击无响应、光标
+    // 冻结在小手指（滚轮走合成线程仍可动）的根因。
+    const rowIdx = rowOfEvent.get(selectedEventId);
+    if (rowIdx === undefined) return;
+    const targetRow = rows[rowIdx];
+    if (!targetRow) return;
+
+    // 目标卡片（对齐模式用堆叠内精确 Y；全局模式用 ts 映射 Y，忽略级联偏移）
+    const cardY =
+      mode === 'global' && viewRange && globalData
+        ? (targetRow.ts - viewRange.start) * globalData.pxPerMs
+        : (cardTopOfEvent.get(selectedEventId) ?? targetRow.top);
+
+    // 卡片已（完全）可见 → 一动不动。按行 top 判定会误伤：高堆叠行或行顶
+    // 在视口上沿之外的行，卡片明明可见也被拽到固定位置（"点击后自己跳转"
+    // 的根因）；不可见时也只做最小量滚动露出卡片，不再跳到 1/3 视口处。
+    if (cardY >= el.scrollTop && cardY + CARD_H <= el.scrollTop + el.clientHeight) {
       lastScrollTarget.current = selectedEventId;
       return;
     }
-
-    // 对齐模式：按行定位
-    let targetRow: RowData | undefined;
-    for (const r of rows) {
-      for (let li = 0; li < laneEvents.length; li++) {
-        if (laneEvents[li].some((e) => e.id === selectedEventId && e.ts === r.ts)) {
-          targetRow = r;
-          break;
-        }
-      }
-      if (targetRow) break;
-    }
-    if (!targetRow) return;
-    const y = targetRow.top;
-    if (y < el.scrollTop || y > el.scrollTop + el.clientHeight) {
-      el.scrollTo({ top: y - el.clientHeight / 3, behavior: 'smooth' });
+    const MARGIN = 24;
+    if (cardY < el.scrollTop) {
+      // 在视口上方：下滚刚好露出（带上边距）
+      el.scrollTo({ top: Math.max(0, cardY - MARGIN), behavior: 'smooth' });
+    } else {
+      // 在视口下方：上滚刚好露出（带下边距）
+      el.scrollTo({ top: cardY + CARD_H + MARGIN - el.clientHeight, behavior: 'smooth' });
     }
     lastScrollTarget.current = selectedEventId;
-  }, [selectedEventId, rows, laneEvents, mode, viewRange, globalData]);
+  }, [selectedEventId, rows, rowOfEvent, cardTopOfEvent, mode, viewRange, globalData]);
 
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
@@ -533,26 +572,86 @@ export function LogStreamView() {
     }
   }, []);
 
-  // 每个 lane 按 ts 分组（供对齐模式渲染）
-  const laneByTs = useMemo(() => {
-    return laneEvents.map((le) => {
-      const m = new Map<number, LogEvent[]>();
-      for (const ev of le) {
-        let arr = m.get(ev.ts);
-        if (!arr) {
-          arr = [];
-          m.set(ev.ts, arr);
+  // laneByTs / rowOfEvent 由 buildRows 一并构建（旧代码在此重复建 Map，浪费一次 O(N)）
+
+  // 当前视口内真正会渲染的事件 id 集合（按视图模式推断），供 dbMode 惰性取文本
+  const renderedIds = useMemo(() => {
+    if (!dbMode) return [] as number[];
+    const ids: number[] = [];
+    if (mode === 'aligned') {
+      for (const r of visibleRows) {
+        for (const m of laneByTs) {
+          const arr = m.get(r.ts);
+          if (arr) for (const e of arr) ids.push(e.id);
         }
-        arr.push(ev);
       }
-      return m;
-    });
-  }, [laneEvents]);
+    } else if (mode === 'global' && viewRange && globalData) {
+      const yTop = Math.max(0, scrollTop - 60);
+      const yBot = scrollTop + viewportH + 60;
+      const tsTop = viewRange.start + yTop / globalData.pxPerMs;
+      const tsBot = viewRange.start + yBot / globalData.pxPerMs;
+      for (const le of laneEvents) {
+        let s = bisectLeft(le, tsTop);
+        if (s > 0) s -= 1;
+        const e = bisectLeft(le, tsBot) + 1;
+        for (let i = Math.max(0, s); i < Math.min(le.length, e); i++) ids.push(le[i].id);
+      }
+    } else {
+      // independent：各列按虚拟滚动切片
+      const cardH = CARD_H + 2;
+      const overscan = 8;
+      const startIdx = Math.max(0, Math.floor(scrollTop / cardH) - overscan);
+      const count = Math.ceil(viewportH / cardH) + overscan * 2;
+      const endIdx = startIdx + count;
+      for (const le of laneEvents) {
+        for (let i = startIdx; i < Math.min(le.length, endIdx); i++) ids.push(le[i].id);
+      }
+    }
+    return Array.from(new Set(ids));
+  }, [dbMode, mode, visibleRows, laneByTs, laneEvents, viewRange, globalData, scrollTop, viewportH]);
+
+  // dbMode：按视口事件 id 分批取行文本（v3 id 契约，替代旧 min/max 区间——
+  // 多文件时间交叠时区间会横跨数百万行）+ LRU 上限防长时间滚动内存膨胀
+  useEffect(() => {
+    if (!dbMode || renderedIds.length === 0) return;
+    const missing = renderedIds.filter((id) => !lineText.has(id));
+    if (missing.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      for (let i = 0; i < missing.length && !cancelled; i += LINE_TEXT_BATCH) {
+        try {
+          const got = await fetchLinesByIds(missing.slice(i, i + LINE_TEXT_BATCH));
+          if (cancelled) return;
+          setLineText((prev) => {
+            const next = new Map(prev);
+            for (const [k, v] of got) next.set(k, v);
+            // LRU：Map 插入序即新旧序，超限删最旧
+            if (next.size > LINE_TEXT_LRU_MAX) {
+              let over = next.size - LINE_TEXT_LRU_MAX;
+              for (const k of next.keys()) {
+                if (over <= 0) break;
+                if (got.has(k)) continue; // 本批刚取回的不驱逐
+                next.delete(k);
+                over--;
+              }
+            }
+            return next;
+          });
+        } catch (err) {
+          console.warn('[dbMode] 行文本惰性加载失败:', err);
+          return;
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dbMode, renderedIds, lineText]);
 
   if (!viewRange || !fullRange) {
     return (
       <div ref={measureRef} className={styles.empty}>
-        打开日志文件并添加过滤器以开始
+        <WelcomeState />
       </div>
     );
   }
@@ -560,7 +659,7 @@ export function LogStreamView() {
   if (visibleFilters.length === 0) {
     return (
       <div ref={measureRef} className={styles.empty}>
-        请先添加过滤器，每列对应一个过滤器的匹配结果
+        <NoFilterState />
       </div>
     );
   }
@@ -766,6 +865,7 @@ export function LogStreamView() {
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
                   chainInfo={chainInfoByFilter.get(f.id)}
+                  lineText={lineText}
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
@@ -802,6 +902,7 @@ export function LogStreamView() {
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
                   chainInfo={chainInfoByFilter.get(f.id)}
+                  lineText={lineText}
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
@@ -823,6 +924,7 @@ export function LogStreamView() {
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
                   chainInfo={chainInfoByFilter.get(f.id)}
+                  lineText={lineText}
                   onSelect={selectEvent}
                   onHover={setHovered}
                 />
@@ -860,6 +962,7 @@ interface GlobalLaneProps {
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
   chainInfo?: Map<number, ChainMark>;
+  lineText?: Map<number, string>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
 }
@@ -877,6 +980,7 @@ function GlobalLane({
   hoveredEventId,
   correlatedEventIds,
   chainInfo,
+  lineText,
   onSelect,
   onHover,
 }: GlobalLaneProps) {
@@ -1025,8 +1129,8 @@ function GlobalLane({
                 {ev.level}
               </span>
             )}
-            <span className={styles.eventRaw} title={ev.raw}>
-              {ev.raw}
+            <span className={styles.eventRaw} title={lineText?.get(ev.id) ?? ev.raw}>
+              {lineText?.get(ev.id) ?? ev.raw}
             </span>
           </div>
         );
@@ -1050,6 +1154,7 @@ interface LaneStreamProps {
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
   chainInfo?: Map<number, ChainMark>;
+  lineText?: Map<number, string>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
 }
@@ -1064,6 +1169,7 @@ function LaneStream({
   hoveredEventId,
   correlatedEventIds,
   chainInfo,
+  lineText,
   onSelect,
   onHover,
 }: LaneStreamProps) {
@@ -1133,8 +1239,8 @@ function LaneStream({
                 {ev.level}
               </span>
             )}
-            <span className={styles.eventRaw} title={ev.raw}>
-              {ev.raw}
+            <span className={styles.eventRaw} title={lineText?.get(ev.id) ?? ev.raw}>
+              {lineText?.get(ev.id) ?? ev.raw}
             </span>
           </div>
         );
@@ -1154,6 +1260,7 @@ interface LaneColumnProps {
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
   chainInfo?: Map<number, ChainMark>;
+  lineText?: Map<number, string>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
 }
@@ -1167,6 +1274,7 @@ function LaneColumn({
   hoveredEventId,
   correlatedEventIds,
   chainInfo,
+  lineText,
   onSelect,
   onHover,
 }: LaneColumnProps) {
@@ -1238,8 +1346,8 @@ function LaneColumn({
                         {ev.level}
                       </span>
                     )}
-                            <span className={styles.eventRaw} title={ev.raw}>
-                      {ev.raw}
+                            <span className={styles.eventRaw} title={lineText?.get(ev.id) ?? ev.raw}>
+                      {lineText?.get(ev.id) ?? ev.raw}
                     </span>
                   </div>
                 );

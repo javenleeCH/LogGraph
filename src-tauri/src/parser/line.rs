@@ -18,6 +18,11 @@ const LEVELS: &[&str] = &[
     "EMERG", "EMERGENCY", "ALERT", "I", "D", "W", "E", "F",
 ];
 
+/// 词是否属于 LEVELS（db.rs 偏移版 parse_rest 复用）
+pub fn is_level_word(word: &str) -> bool {
+    LEVELS.contains(&word)
+}
+
 // JS: /^\[([^\]]+)\]\s*/ —— 锚定行首的 [Thread] 段
 fn thread_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -47,41 +52,41 @@ pub struct RestParsed {
 /// 1. trim；
 /// 2. `^\[([^\]]+)\]\s*` 命中 → thread，剥除后再 trim（[] 内容不校验，"[INFO]" 会被当 thread）；
 /// 3. 裸写 `^([A-Z]+)\s+` 命中**且**属于 LEVELS（大小写敏感）→ 剥除；
-///    否则（不匹配或不在集合）找括号式最左匹配，upper 后属于 LEVELS → level=upper，剥除。
+///    否则（不匹配或不在集合）找括号式最左匹配，upper 后属于 LEVELS → level=upper，
+///    删除匹配区间本身（保留前缀；JS 旧实现按长度从头切，位置错误，已同步修正）。
 pub fn parse_rest(rest: &str) -> RestParsed {
-    let mut msg: &str = js_trim(rest);
+    let mut msg: String = js_trim(rest).to_string();
     let mut thread: Option<String> = None;
     let mut level: Option<String> = None;
 
     // 1. [Thread1] 开头
-    if let Some(caps) = thread_re().captures(msg) {
+    if let Some(caps) = thread_re().captures(&msg) {
         thread = Some(caps[1].to_string());
         let whole = caps.get(0).unwrap();
-        msg = js_trim(&msg[whole.end()..]);
+        msg = js_trim(&msg[whole.end()..]).to_string();
     }
 
     // 2. 裸写级别（要求 ∈ LEVELS，大小写敏感）
     let mut bare_used = false;
-    if let Some(caps) = bare_level_re().captures(msg) {
+    if let Some(caps) = bare_level_re().captures(&msg) {
         let word = caps.get(1).unwrap().as_str();
         if LEVELS.contains(&word) {
             level = Some(word.to_string());
             let whole = caps.get(0).unwrap();
-            msg = js_trim(&msg[whole.end()..]);
+            msg = js_trim(&msg[whole.end()..]).to_string();
             bare_used = true;
         }
     }
 
     // 3. 括号级别（裸写未命中/不在集合时；最左匹配，upper 后校验）
     if !bare_used {
-        if let Some(caps) = bracket_level_re().captures(msg) {
-            let word = caps.get(1).unwrap().as_str();
-            // 捕获仅含 [A-Za-z]，to_uppercase 与 JS toUpperCase 等价
-            let upper = word.to_uppercase();
+        if let Some(caps) = bracket_level_re().captures(&msg) {
+            let upper = caps.get(1).unwrap().as_str().to_uppercase();
             if LEVELS.contains(&upper.as_str()) {
                 level = Some(upper);
-                let whole = caps.get(0).unwrap();
-                msg = js_trim(&msg[whole.end()..]);
+                let range = caps.get(0).unwrap().range();
+                msg.replace_range(range, "");
+                msg = js_trim(&msg).to_string();
             }
         }
     }
@@ -89,7 +94,7 @@ pub fn parse_rest(rest: &str) -> RestParsed {
     RestParsed {
         thread,
         level,
-        message: msg.to_string(),
+        message: msg,
     }
 }
 
@@ -134,8 +139,9 @@ mod tests {
 
     #[test]
     fn lowercase_bracket_level_uppercased() {
-        // 小写 [info] → upper "INFO" ∈ LEVELS → level=INFO（JS 同）
-        let r = parse_rest("[info] started");
+        // 小写 (info) → upper "INFO" ∈ LEVELS → level=INFO（JS 同；
+        // 行首 [info] 会被 thread 正则吃掉，故用圆括号测括号级别分支）
+        let r = parse_rest("(info) started");
         assert_eq!(r.level.as_deref(), Some("INFO"));
         assert_eq!(r.message, "started");
     }

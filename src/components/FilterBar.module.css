@@ -179,6 +179,27 @@
   word-break: break-all;
 }
 
+.editor .warn {
+  border: 1px solid var(--warn, #d9a23a);
+  background: color-mix(in srgb, var(--warn, #d9a23a) 14%, transparent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.editor .warnTitle {
+  font-weight: 600;
+  color: var(--warn, #d9a23a);
+  margin-bottom: 2px;
+}
+
+.editor .warnBody {
+  color: var(--text-dim);
+  word-break: break-word;
+}
+
 .editor .toggles {
   display: flex;
   gap: 14px;

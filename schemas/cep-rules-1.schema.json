@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loggraph.dev/schemas/cep-rules-1.schema.json",
+  "title": "logGraph CEP rules file (version 1)",
+  "description": "约束 loggraph cep -R 规则文件。引用完整性等语义校验由引擎额外执行（契约 §3.8）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["filters"],
+  "properties": {
+    "$schema":    { "type": "string", "format": "uri" },
+    "version":    { "type": "integer", "const": 1, "default": 1 },
+    "description":{ "type": "string", "maxLength": 2000 },
+    "filters": {
+      "type": "array", "minItems": 1, "maxItems": 1024,
+      "items": { "$ref": "#/$defs/filter" }
+    },
+    "groups": {
+      "type": "array", "maxItems": 1024, "default": [],
+      "items": { "$ref": "#/$defs/group" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$"
+    },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "pattern"],
+      "properties": {
+        "id":           { "$ref": "#/$defs/id" },
+        "label":        { "type": "string", "maxLength": 64 },
+        "pattern":      { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "isRegex":      { "type": "boolean", "default": false },
+        "caseSensitive":{ "type": "boolean", "default": false }
+      }
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["groupId", "filterIds", "edges"],
+      "properties": {
+        "groupId":   { "$ref": "#/$defs/id" },
+        "label":     { "type": "string", "maxLength": 64 },
+        "scope":     { "enum": ["global", "thread"], "default": "global" },
+        "filterIds": {
+          "type": "array", "minItems": 1, "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "edges": {
+          "type": "array", "maxItems": 256,
+          "items": { "$ref": "#/$defs/edge" }
+        },
+        "nodeCounts": {
+          "type": "object", "maxProperties": 256,
+          "propertyNames": { "$ref": "#/$defs/id" },
+          "additionalProperties": { "$ref": "#/$defs/nodeCount" }
+        },
+        "nodeConditions": {
+          "type": "object", "maxProperties": 256,
+          "propertyNames": { "$ref": "#/$defs/id" },
+          "additionalProperties": { "$ref": "#/$defs/expr" }
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "fromFilterId", "maxGapMs"],
+      "properties": {
+        "id":           { "$ref": "#/$defs/id" },
+        "kind":         { "enum": ["seq", "not", "and", "or", "opt", "periodic"],
+                          "default": "seq" },
+        "fromFilterId": { "$ref": "#/$defs/id" },
+        "toFilterId":   { "$ref": "#/$defs/id" },
+        "toFilterIds":  {
+          "type": "array", "minItems": 2, "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "maxGapMs":     { "type": "integer", "minimum": 0 },
+        "periodMs":     { "type": "integer", "exclusiveMinimum": 0 }
+      },
+      "allOf": [
+        { "if": { "required": ["kind"],
+                  "properties": { "kind": { "enum": ["and", "or"] } } },
+          "then": { "required": ["toFilterIds"],
+                    "not": { "required": ["toFilterId"] } } },
+        { "if": { "properties": { "kind":
+                    { "enum": ["seq", "not", "opt", "periodic"] } } },
+          "then": { "required": ["toFilterId"],
+                    "not": { "required": ["toFilterIds"] } } },
+        { "if": { "required": ["kind"],
+                  "properties": { "kind": { "const": "periodic" } } },
+          "then": { "required": ["periodMs"] } },
+        { "if": { "properties": { "kind":
+                    { "enum": ["seq", "not", "and", "or", "opt"] } } },
+          "then": { "not": { "required": ["periodMs"] } } }
+      ]
+    },
+    "nodeCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min": { "type": "integer", "minimum": 1 },
+        "max": { "type": "integer", "minimum": 1 }
+      },
+      "anyOf": [ { "required": ["min"] }, { "required": ["max"] } ]
+    },
+    "expr": { "type": "string", "minLength": 1, "maxLength": 512 }
+  }
+}

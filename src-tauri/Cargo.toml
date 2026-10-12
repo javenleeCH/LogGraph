@@ -1,14 +1,19 @@
 [package]
 name = "loggraph"
-version = "0.1.0"
+version.workspace = true
 description = "Perfetto-style log timeline analyzer with multi-filter correlation"
 authors = ["logGraph"]
-edition = "2021"
+edition.workspace = true
 
 # Tauri 移动端 / 桌面端通用库结构
 [lib]
 name = "loggraph_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# GUI 二进制名与 CLI（cli/ 的 `loggraph`，契约 D7）区分开，避免共享 target 目录时互相覆盖
+[[bin]]
+name = "loggraph-app"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -19,11 +24,9 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 引擎 crate（engine_* IPC 命令，契约 §6；零数据库直扫 + CEP + 规则校验）
+loggraph-engine = { path = "../engine" }
 # Rust 原生日志解析引擎（时间戳/行解析正则；unicode 模式 + JS \s/\d 语义翻译，见 parser/timestamp.rs）
 regex = "1"
-
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true
+# 锁原语（内存库 RwLock 快照读 + filter 命中缓存内层 Mutex；无中毒错误路径）
+parking_lot = "0.12"

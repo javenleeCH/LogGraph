@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
 import { Link, AlertTriangle } from './Icon';
@@ -6,7 +6,9 @@ import type { FilterGroup, MatchedChain, LogEvent } from '../types';
 import styles from './DetailPanel.module.css';
 
 /** group 匹配结果 tab：链列表 + 异常列表 + 筛选按钮 + 关键字检索 */
-export function GroupMatchesTab({ group }: { group: FilterGroup }) {
+/** memo：group 引用稳定；缩放期间（correlatedEventIds 更新等父级重渲）跳过
+ *  本组件重渲——2 万链 + 数十万 uncovered 的 DOM reconcile 是长帧来源 */
+export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group: FilterGroup }) {
   const [keyword, setKeyword] = useState('');
   /** 内容筛选：all=匹配+异常；chains=仅匹配链；anomaly=仅异常 */
   const [mode, setMode] = useState<'all' | 'chains' | 'anomaly'>('all');
@@ -217,4 +219,4 @@ export function GroupMatchesTab({ group }: { group: FilterGroup }) {
       </div>
     </div>
   );
-}
+});

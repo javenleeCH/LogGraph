@@ -19,6 +19,7 @@ import type { LogMeta } from '../store/logStore';
 import { parseLogText, parseLogPath, type FullParseResult } from '../parser/parseBridge';
 import { isLogFileName } from './fileLoader';
 import { isTauri, loadDialog, loadFs, basename } from '../lib/tauri';
+import { notify } from '../store/uiStore';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -41,7 +42,7 @@ function idbOpen(): Promise<IDBDatabase> {
   });
 }
 
-async function idbGet<T>(key: string): Promise<T | undefined> {
+export async function idbGet<T>(key: string): Promise<T | undefined> {
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readonly');
@@ -51,7 +52,7 @@ async function idbGet<T>(key: string): Promise<T | undefined> {
   });
 }
 
-async function idbSet(key: string, val: unknown): Promise<void> {
+export async function idbSet(key: string, val: unknown): Promise<void> {
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
@@ -102,7 +103,10 @@ export async function pickLogDirectory(): Promise<any | null> {
   }
 
   if (!isFSASupported()) {
-    alert('当前浏览器不支持 File System Access API，请使用 Chrome/Edge 等 Chromium 浏览器');
+    notify(
+      '当前浏览器不支持 File System Access API',
+      { kind: 'warn', detail: '请使用 Chrome / Edge 等 Chromium 浏览器以启用「打开目录」工作区能力' },
+    );
     return null;
   }
   const handle = await (window as any).showDirectoryPicker({
@@ -111,7 +115,10 @@ export async function pickLogDirectory(): Promise<any | null> {
     startIn: 'documents',
   });
   if (!(await verifyPermission(handle, true))) {
-    alert('需要读写权限：工作区状态（过滤器/分组）会保存在所选目录内的 .logGraph 下');
+    notify('需要读写权限', {
+      kind: 'warn',
+      detail: '工作区状态（过滤器 / 分组）会保存在所选目录内的 .logGraph 下，请授予读写权限',
+    });
     return null;
   }
   await idbSet(KEY_LOGS_DIR, handle);
@@ -163,7 +170,9 @@ export async function listLogFiles(
       }
       for (const entry of entries) {
         if (entry.isDirectory) {
-          if (recursive) await walk(`${dirPath}/${entry.name}`, [...pathPrefix, entry.name], depth + 1);
+          if (recursive && entry.name !== '.logGraph') {
+            await walk(`${dirPath}/${entry.name}`, [...pathPrefix, entry.name], depth + 1);
+          }
         } else if (entry.isFile) {
           if (isLogFileName(entry.name)) {
             let size = 0;
@@ -203,7 +212,7 @@ export async function listLogFiles(
             path: [...pathPrefix, entry.name],
           });
         }
-      } else if (entry.kind === 'directory' && recursive) {
+      } else if (entry.kind === 'directory' && recursive && entry.name !== '.logGraph') {
         await walk(entry, [...pathPrefix, entry.name], depth + 1);
       }
     }
@@ -303,6 +312,51 @@ export async function loadMultiple(
     ? String(dirHandle.path).replace(/[\\/]+$/, '')
     : null;
 
+  // ---- 快速路径：Tauri + Rust parse_dir（枚举+解析+合并+排序 全在 Rust，1 次 IPC）----
+  if (tauriRoot) {
+    const { parseLogDir } = await import('../parser/parseBridge');
+    // 进度事件订阅（Rust 侧逐文件 emit）
+    let unlisten: (() => void) | null = null;
+    try {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen<{ loaded: number; total: number; current: string }>(
+        'parse_dir_progress',
+        (e) => onProgress?.(e.payload.loaded, e.payload.total, e.payload.current),
+      );
+    } catch {
+      /* 进度订阅失败不阻断加载 */
+    }
+    try {
+      const r = await parseLogDir(tauriRoot, (frac) => {
+        // 拉取阶段进度：映射到 loaded/total 语义（解析事件已由 parse_dir_progress 推送）
+        onProgress?.(
+          Math.min(names.length, Math.round(frac * names.length)),
+          names.length,
+          '合并传输中',
+        );
+      });
+      if (r) {
+        // Rust 已完成合并排序：零拷贝构造（事件对象直接透传，sourceFile 已赋值）
+        return {
+          events: r.events,
+          rawLines: r.rawLines,
+          meta: {
+            fileName: '',
+            fileSize: 0,
+            totalLines: r.totalLines,
+            skipped: r.skipped,
+            timestampFormatId: r.timestampFormatId,
+          },
+        };
+      }
+    } catch (err) {
+      console.warn('[dirLoader] parse_dir 快速路径失败，回退逐文件:', err);
+    } finally {
+      unlisten?.();
+    }
+  }
+
+  // ---- 逐文件路径（浏览器 / Rust 不可用降级）----
   const files: { name: string; parse: FullParseResult }[] = [];
   for (let fi = 0; fi < names.length; fi++) {
     const name = names[fi];

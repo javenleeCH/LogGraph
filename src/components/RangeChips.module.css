@@ -1,0 +1,201 @@
+.root {
+  position: relative;
+  display: inline-flex;
+  max-width: 46vw;
+  min-width: 0;
+}
+
+.wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  min-width: 0;
+}
+
+.wrap::-webkit-scrollbar {
+  display: none;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.chip.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elevated));
+}
+
+.chip.editing {
+  border-color: var(--accent);
+}
+
+.editBtn {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-faint);
+  padding: 2px 3px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.editBtn:hover {
+  color: var(--accent-light);
+}
+
+.apply {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 4px 2px 10px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip.active .apply {
+  color: var(--accent-light);
+  font-weight: 600;
+}
+
+.apply:hover {
+  color: var(--accent-light);
+}
+
+.del {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-faint);
+  padding: 2px 7px 2px 3px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.del:hover {
+  color: var(--danger);
+}
+
+.add {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-dim);
+  padding: 3px 9px;
+  background: var(--bg-elevated);
+  border: 1px dashed var(--border);
+  border-radius: 20px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.add:hover:not(:disabled) {
+  color: var(--accent-light);
+  border-color: var(--accent);
+}
+
+.add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 编辑弹层：fixed 由组件按书签条实测位置锚定在窗口顶部状态栏的下方；
+   z-index 低于 Toast（1200），高于主内容 */
+.editor {
+  position: fixed;
+  width: 330px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field label {
+  flex: 0 0 32px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.field input {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+input.ts {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.err {
+  font-size: 11px;
+  color: var(--danger);
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.actions button {
+  font-size: 11px;
+  padding: 4px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.actions button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.actions .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.actions .primary:hover {
+  color: #fff;
+  opacity: 0.9;
+}

@@ -1,0 +1,16 @@
+[package]
+name = "filter-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WASM build of the Rust `regex` crate, used as the Web filter engine for LogGraph so it matches the desktop (Tauri) engine exactly."
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 标准 regex crate —— 与桌面端 db.rs / raw_search.rs 使用的引擎完全一致。
+# 默认特性（含 unicode）与桌面 regex::Regex::new 行为对齐。
+regex = "1"
+# 必须与已安装的 wasm-bindgen-cli 版本一致（schema 校验）
+wasm-bindgen = "=0.2.129"

@@ -1,0 +1,19 @@
+# logGraph Cargo workspace
+# 三层架构：
+#   engine/    —— 纯 Rust 引擎（rg 直扫 + CEP 序列匹配），不依赖 tauri，可独立测试/复用
+#   src-tauri/ —— Tauri 薄壳层（窗口 + IPC 命令，转发给 engine）
+#   src/       —— React UI 层
+[workspace]
+members = ["engine", "cli", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true

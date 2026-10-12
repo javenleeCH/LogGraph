@@ -39,6 +39,16 @@ interface RustParseResult {
   totalLines: number;
 }
 
+/** 是否开启双引擎一致性自检：?dualengine=1 强制开启；dev 构建默认开启。 */
+function dualEngineEnabled(): boolean {
+  try {
+    if (new URLSearchParams(location.search).get('dualengine') === '1') return true;
+    return import.meta.env.DEV === true;
+  } catch {
+    return false;
+  }
+}
+
 /** 浏览器 JS 引擎（原路径，逐字符等价于改造前 parser.parse + text.split） */
 function parseWithJs(text: string, engine: 'rust' | 'js'): FullParseResult {
   const r = new LogParser().parse(text);
@@ -142,6 +152,16 @@ function dualEngineCheck(rust: FullParseResult, js: FullParseResult): void {
       `[dualengine] Rust/JS 解析不一致（以 Rust 结果继续）：${diffs.join('; ')}，` +
         `events=${rust.events.length}/${js.events.length}`,
     );
+    // 通知 UI 弹出非阻塞告警横幅（web-desktop-consistency-review.md §1.3）
+    try {
+      window.dispatchEvent(
+        new CustomEvent('loggraph:parser-drift', {
+          detail: { diffs, rust: rust.events.length, js: js.events.length },
+        }),
+      );
+    } catch {
+      /* 非浏览器环境忽略 */
+    }
   } else {
     console.info(
       `[dualengine] 一致 ✓ events=${rust.events.length} lines=${rust.totalLines} skipped=${rust.skipped}`,
@@ -159,7 +179,7 @@ function dualEngineCheck(rust: FullParseResult, js: FullParseResult): void {
 export async function parseLogText(text: string): Promise<FullParseResult> {
   const rust = await invokeRust({ text });
   if (rust) {
-    if (new URLSearchParams(location.search).get('dualengine') === '1') {
+    if (dualEngineEnabled()) {
       dualEngineCheck(rust, parseWithJs(text, 'js'));
     }
     return rust;
@@ -173,6 +193,126 @@ export async function parseLogText(text: string): Promise<FullParseResult> {
  */
 export async function parseLogPath(path: string): Promise<FullParseResult | null> {
   return invokeRust({ path });
+}
+
+// ---- 目录批量解析（P2：141 文件场景 1 次 IPC 替代 141 次）----
+
+/** Rust parse_dir 返回的 DTO（serde camelCase） */
+export interface RustDirEvent {
+  id: number;
+  ts: number;
+  raw: string;
+  thread?: string;
+  level?: string;
+  message: string;
+  sourceFile?: string;
+}
+
+/** prepare 阶段返回的元数据（不含大数据体） */
+export interface RustDirMeta {
+  totalEvents: number;
+  totalLines: number;
+  skipped: number;
+  fileCount: number;
+  timestampFormatId: string | null;
+  fileNames: string[];
+}
+
+/** 目录批量解析最终结果（分块拉取后拼装） */
+export interface RustDirParseResult {
+  events: RustDirEvent[];
+  rawLines: string[];
+  fileNames: string[];
+  totalLines: number;
+  skipped: number;
+  timestampFormatId: string | null;
+}
+
+/** 形状校验：防 Rust 侧异常返回把脏数据塞进 store */
+function isRustDirMeta(v: unknown): v is RustDirMeta {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as RustDirMeta;
+  return (
+    typeof r.totalEvents === 'number' &&
+    typeof r.totalLines === 'number' &&
+    typeof r.skipped === 'number' &&
+    typeof r.fileCount === 'number' &&
+    (r.timestampFormatId === null || typeof r.timestampFormatId === 'string') &&
+    Array.isArray(r.fileNames)
+  );
+}
+
+/** 单块行数（≈15MB JSON，IPC 安全阈值） */
+const DIR_CHUNK_LINES = 60_000;
+
+/**
+ * Tauri 专用：批量解析整个目录（分块传输防 OOM）。
+ * 协议：invoke parse_dir（prepare，Rust 解析+缓存+回元数据）
+ *   → 循环 invoke dir_lines_chunk / dir_events_chunk 分块拉取
+ *   → invoke dir_cache_drop 释放。
+ * onProgress(0..1) 报告拉取阶段进度。返回 null 表示不可用/失败，调用方回退逐文件。
+ */
+export async function parseLogDir(
+  dir: string,
+  onProgress?: (frac: number) => void,
+): Promise<RustDirParseResult | null> {
+  if (!isTauri()) return null;
+  let invokeFn: typeof import('@tauri-apps/api/core').invoke;
+  try {
+    ({ invoke: invokeFn } = await import('@tauri-apps/api/core'));
+  } catch {
+    return null;
+  }
+  try {
+    // 1) prepare：Rust 枚举+解析+排序+缓存
+    const meta = await invokeFn<RustDirMeta>('parse_dir', { dir });
+    if (!isRustDirMeta(meta)) {
+      console.warn('[parseBridge] Rust parse_dir 返回形状异常，回退逐文件路径', meta);
+      return null;
+    }
+    // 2) 分块拉取 rawLines（行数已知，块间让出主线程保 UI 响应）
+    const rawLines: string[] = new Array(meta.totalLines);
+    let off = 0;
+    while (off < meta.totalLines) {
+      const chunk = await invokeFn<string[]>('dir_lines_chunk', {
+        offset: off,
+        max: DIR_CHUNK_LINES,
+      });
+      if (!Array.isArray(chunk) || chunk.length === 0) break;
+      for (let i = 0; i < chunk.length; i++) rawLines[off + i] = chunk[i];
+      off += chunk.length;
+      onProgress?.(off / (meta.totalLines + meta.totalEvents));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    // 3) 分块拉取 events（按 ts 升序拼接）
+    const events: RustDirEvent[] = [];
+    while (events.length < meta.totalEvents) {
+      const chunk = await invokeFn<RustDirEvent[]>('dir_events_chunk', {
+        offset: events.length,
+        max: DIR_CHUNK_LINES,
+      });
+      if (!Array.isArray(chunk) || chunk.length === 0) break;
+      for (const ev of chunk) events.push(ev);
+      onProgress?.(
+        (meta.totalLines + events.length) / (meta.totalLines + meta.totalEvents),
+      );
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    // 4) 释放 Rust 缓存
+    invokeFn('dir_cache_drop').catch(() => {});
+    return {
+      events,
+      rawLines,
+      fileNames: meta.fileNames,
+      totalLines: meta.totalLines,
+      skipped: meta.skipped,
+      timestampFormatId: meta.timestampFormatId,
+    };
+  } catch (err) {
+    console.warn('[parseBridge] parse_dir 分块协议失败，回退逐文件路径:', err);
+    invokeFn('dir_cache_drop').catch(() => {});
+    return null;
+  }
 }
 
 /**
@@ -190,7 +330,7 @@ export async function parseLoadedFile(loaded: {
   if (loaded.path) {
     const rust = await invokeRust({ path: loaded.path });
     if (rust) {
-      if (new URLSearchParams(location.search).get('dualengine') === '1' && loaded.text) {
+      if (dualEngineEnabled() && loaded.text) {
         dualEngineCheck(rust, parseWithJs(loaded.text, 'js'));
       }
       return rust;

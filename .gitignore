@@ -13,6 +13,11 @@ perfetto
 
 # 构建缓存
 tsconfig.tsbuildinfo
+vite-out.txt
+
+# Cargo workspace 构建产物（workspace 根统一 target/）
+/target/
+/target-rel/
 
 # 前端依赖锁定文件（不入库）
 package-lock.json
@@ -22,3 +27,9 @@ package-lock.json
 
 # logGraph 工作区状态（打开日志目录时自动生成）
 .logGraph/
+
+# wasm 过滤引擎 crate 的构建产物（源码在 filter-wasm/，生成物进 src/filters/wasm-filter/pkg）
+filter-wasm/target/
+
+# 性能测试大数据集（scripts/gen-perf-data.mjs 生成，勿入库）
+perf-data/

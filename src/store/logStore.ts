@@ -4,7 +4,7 @@
  */
 
 import { create } from 'zustand';
-import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, SequenceConfig, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
+import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, SavedRange, SequenceConfig, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
 import { FilterEngine } from '../filters/FilterEngine';
 import { runSequenceMatching } from '../sequence/SequenceMatcher';
 import {
@@ -22,9 +22,79 @@ import {
   ensureReadPermission,
   isFSASupported as isFSASupportedDir,
 } from '../io/dirLoader';
+import { recordOpenProject } from '../io/recentProjects';
+import {
+  dbClose,
+  runDbFiltersBatch,
+  runDbSequences,
+  fetchCorrIds,
+  type DbRunSeqGroup,
+  type DbFilterHits,
+} from '../io/dbStore';
 
-// 延迟重算关联，避免拖拽/缩放时每帧都重算导致抖动
 let corrRaf = 0;
+let corrSeq = 0; // dbMode 关联下推的响应序号（过期丢弃）
+
+// ---- 已保存时间范围（localStorage 持久化，跨会话/跨目录共享） ----
+
+const SAVED_RANGES_KEY = 'loggraph.saved-ranges';
+
+function loadSavedRanges(): SavedRange[] {
+  try {
+    const raw = localStorage.getItem(SAVED_RANGES_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(
+      (r): r is SavedRange =>
+        r && typeof r.id === 'string' && typeof r.name === 'string' &&
+        typeof r.start === 'number' && typeof r.end === 'number' && r.start < r.end,
+    );
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedRanges(ranges: SavedRange[]): void {
+  try {
+    localStorage.setItem(SAVED_RANGES_KEY, JSON.stringify(ranges));
+  } catch {
+    /* 隐私模式等场景写入失败：仅当前会话可用 */
+  }
+}
+
+// ---- dbMode 命中查询（v4：无事件索引，matches 骨架自带 ts） ----
+
+/** dbMode 下按行号查命中 ts（选中/悬停都是低频点击级操作，线性足够）；
+ *  非命中行（如上下文行）返回 null。 */
+export function hitTsByLine(
+  state: { matches: FilterMatch[] },
+  line: number,
+): number | null {
+  for (const m of state.matches) {
+    const ev = m.events.find((e) => e.id === line);
+    if (ev) return ev.ts;
+  }
+  return null;
+}
+
+/** 事件总数（dbMode 走行数——事件不物化，matches 只含命中） */
+export const selectEventCount = (s: {
+  dbMode: boolean;
+  meta: LogMeta | null;
+  events: LogEvent[];
+}): number => (s.dbMode ? s.meta?.totalLines ?? 0 : s.events.length);
+
+/** 二进制命中 → 骨架事件数组（raw/message 按需拉行；ts 升序由 Rust 保证） */
+function skelEvents(hits: DbFilterHits | undefined): LogEvent[] {
+  if (!hits || hits.lines.length === 0) return [];
+  const out = new Array<LogEvent>(hits.lines.length);
+  for (let i = 0; i < hits.lines.length; i++) {
+    out[i] = { id: hits.lines[i], ts: hits.ts[i], raw: '', message: '' };
+  }
+  return out;
+}
+
 function scheduleCorrRecompute(run: () => void) {
   if (corrRaf) cancelAnimationFrame(corrRaf);
   corrRaf = requestAnimationFrame(() => {
@@ -53,6 +123,9 @@ const genGroupId = () => `g${Date.now()}_${groupSeq++}`;
 
 let edgeSeq = 0;
 const genEdgeId = () => `e${Date.now()}_${edgeSeq++}`;
+
+// 分块过滤任务的取消句柄（连续编辑时取消旧任务，只保留最新）
+let chunkedCancel: (() => void) | null = null;
 
 // ---- 工作区持久化（目录即工作区，<日志目录>/.logGraph/filters.json） ----
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -102,6 +175,10 @@ interface LogState {
   events: LogEvent[];
   rawLines: string[]; // 原始行，用于上下文显示
   meta: LogMeta | null;
+
+  // --- 数据驻留模式（dbMode）---
+  /** true=数据驻留（rawLines 空、raw/message 惰性）；过滤走 Rust 下推 */
+  dbMode: boolean;
 
   // --- 过滤器 ---
   filters: Filter[];
@@ -176,6 +253,21 @@ interface LogState {
   // --- 视图 ---
   viewRange: TimeRange | null; // 当前可见时间窗
   fullRange: TimeRange | null; // 全量时间范围
+  /** 已保存的时间范围书签（时间线 Shift 框选 / 工具栏保存） */
+  savedRanges: SavedRange[];
+  /** 当前视口来自哪个书签（应用时设置；任何视口操作后清除，chips 高亮用） */
+  activeSavedRangeId: string | null;
+  /** 保存当前视口（或指定范围）为命名书签；返回新建项（视口无效时 null） */
+  saveRange: (name: string, range?: TimeRange) => SavedRange | null;
+  /** 应用已存范围：clamp 到 fullRange 后设为当前视口（表格流/时间线共用） */
+  applySavedRange: (id: string) => void;
+  /** 删除已存范围 */
+  removeSavedRange: (id: string) => void;
+  /** 重命名 / 修改已存范围的时间戳（校验 name 非空、start < end），失败返回 null */
+  updateSavedRange: (
+    id: string,
+    patch: { name?: string; start?: number; end?: number },
+  ) => SavedRange | null;
 
   // --- 交互 ---
   selectedEventId: number | null;
@@ -190,10 +282,18 @@ interface LogState {
 
   // --- actions ---
   setLog: (events: LogEvent[], rawLines: string[], meta: LogMeta) => void;
+  /** dbMode 装载：时间轴范围 + 元数据；事件不物化，命中/行文本惰性按需取 */
+  setLogDb: (range: { start: number | null; end: number | null }, meta: LogMeta) => void;
+  /** 离开 dbMode（切回普通模式/关闭目录） */
+  exitDbMode: () => void;
   addFilter: (partial?: Partial<Filter>) => string;
   updateFilter: (id: string, patch: Partial<Filter>) => void;
   removeFilter: (id: string) => void;
   recomputeMatches: () => void;
+  /** 单 filter 增量重算（编辑 filter 用；大数据量自动分块异步） */
+  recomputeFilterMatch: (id: string) => void;
+  /** 分块过滤进度（null=无进行中任务）；UI 展示进度条用 */
+  matchProgress: { filterId: string; done: number; total: number } | null;
   setViewRange: (r: TimeRange) => void;
   zoomTo: (centerTs: number, factor: number) => void;
   /** 增量缩放：ratioDelta>0 放大，<0 缩小；以 centerTs 为锚点保持该时刻不动 */
@@ -245,15 +345,19 @@ export const useLogStore = create<LogState>((set, get) => ({
   events: [],
   rawLines: [],
   meta: null,
+  dbMode: false,
 
   filters: [],
   matches: [],
+  matchProgress: null,
   groups: [],
   collapsedGroups: new Set(),
   sequenceResults: {},
 
   viewRange: null,
   fullRange: null,
+  savedRanges: loadSavedRanges(),
+  activeSavedRangeId: null,
 
   selectedEventId: null,
   hoveredEventId: null,
@@ -379,6 +483,50 @@ export const useLogStore = create<LogState>((set, get) => ({
     get().recomputeMatches();
   },
 
+  setLogDb: (range, meta) => {
+    // 无行或无任何 ts → 与旧版（事件索引为空）同语义：退回非 dbMode
+    if (meta.totalLines === 0 || range.start == null || range.end == null) {
+      get().exitDbMode();
+      set({ meta });
+      return;
+    }
+    // v4：无事件索引/无 JS 侧物化（旧版 10M 行 posByLine 双循环 ~4s）——
+    // 时间轴范围来自建库首/末行 ts，命中 ts 在 matches 骨架里
+    const fullRange = { start: range.start, end: range.end };
+    set({
+      events: [], // dbMode：事件不物化，视口/详情按需拉
+      rawLines: [],
+      meta,
+      dbMode: true,
+      fullRange,
+      viewRange: { ...fullRange },
+      matches: [],
+      selectedEventId: null,
+      hoveredEventId: null,
+      scrubberTs: null,
+      correlatedEventIds: new Set(),
+    });
+    get().recomputeMatches();
+  },
+
+  exitDbMode: () => {
+    dbClose();
+    set({
+      events: [],
+      rawLines: [],
+      meta: null,
+      dbMode: false,
+      fullRange: null,
+      viewRange: null,
+      matches: [],
+      sequenceResults: {},
+      selectedEventId: null,
+      hoveredEventId: null,
+      scrubberTs: null,
+      correlatedEventIds: new Set(),
+    });
+  },
+
   addFilter: (partial) => {
     const id = genFilterId();
     const idx = get().filters.length;
@@ -403,8 +551,84 @@ export const useLogStore = create<LogState>((set, get) => ({
     set({
       filters: get().filters.map((f) => (f.id === id ? { ...f, ...patch } : f)),
     });
-    get().recomputeMatches();
+    get().recomputeFilterMatch(id); // 增量：只重跑该 filter，其余 matches 引用复用
     schedulePersist(get);
+  },
+
+  /** 单 filter 增量重算：dbMode 走 Rust 下推；大数据量（>30 万）走分块异步 + 进度 */
+  recomputeFilterMatch: (id) => {
+    const { events, filters, matches, dbMode } = get();
+    const filter = filters.find((f) => f.id === id);
+    if (!filter || (dbMode ? get().meta?.totalLines === 0 : events.length === 0)) {
+      get().recomputeMatches();
+      return;
+    }
+    // 取消上一次未完成的分块任务（连续编辑时只保留最新）
+    if (chunkedCancel) {
+      chunkedCancel();
+      chunkedCancel = null;
+    }
+    // dbMode：单 filter 也走批量下推（缓存命中直接读库；否则并入单遍扫描），
+    // 二进制 (line, ts)[] 直接组装骨架事件
+    if (dbMode) {
+      void (async () => {
+        let events: LogEvent[] = [];
+        if (filter.pattern && filter.enabled) {
+          try {
+            const res = await runDbFiltersBatch([{
+              filterId: id,
+              pattern: filter.pattern,
+              isRegex: filter.isRegex,
+              caseSensitive: filter.caseSensitive,
+              scope: filter.scope,
+            }]);
+            events = skelEvents(res.get(id));
+          } catch (err) {
+            console.warn('[dbMode] db_filters_batch 失败，该 filter 置空:', id, err);
+          }
+        }
+        const match: FilterMatch = { filterId: id, events };
+        // 编辑期间 filter 又变了 → 丢弃本次结果
+        const cur = get().filters.find((f) => f.id === id);
+        if (cur !== filter) return;
+        const idx = matches.findIndex((m) => m.filterId === id);
+        const next = idx >= 0
+          ? matches.map((m, i) => (i === idx ? match : m))
+          : [...matches, match];
+        set({ matches: next });
+        get().recomputeSequences();
+        get().recomputeCorrelations();
+      })();
+      return;
+    }
+    const applyResult = (match: FilterMatch) => {
+      // 与 filters 原序对齐替换该 filter 的 match（其余引用复用）
+      const idx = matches.findIndex((m) => m.filterId === id);
+      const next = idx >= 0
+        ? matches.map((m, i) => (i === idx ? match : m))
+        : [...matches, match];
+      set({ matches: next, matchProgress: null });
+      get().recomputeSequences();
+      get().recomputeCorrelations();
+    };
+    if (events.length <= 300_000) {
+      applyResult(FilterEngine.runFilter(events, filter));
+      return;
+    }
+    set({ matchProgress: { filterId: id, done: 0, total: events.length } });
+    chunkedCancel = FilterEngine.runFilterChunked(
+      events,
+      filter,
+      (done, total) => {
+        // 进度节流：仅当百分比变化 ≥2% 才写 store
+        const cur = get().matchProgress;
+        if (!cur || cur.filterId !== id) return;
+        if (total - done < 50_000 || done - cur.done >= total * 0.02) {
+          set({ matchProgress: { filterId: id, done, total } });
+        }
+      },
+      applyResult,
+    );
   },
 
   removeFilter: (id) => {
@@ -504,7 +728,44 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   /** 重算所有 group 的序列匹配（依赖 matches + groups.sequence） */
   recomputeSequences: () => {
-    const { groups, matches } = get();
+    const { groups, matches, dbMode } = get();
+    // dbMode：优先下推 Rust（PR-4 CEP 加速路径），不支持的特性整体回退 TS 引擎
+    if (dbMode) {
+      void (async () => {
+        const seqGroups: DbRunSeqGroup[] = groups
+          .filter((g) => g.sequence && g.sequence.edges.length > 0)
+          .map((g) => ({
+            groupId: g.id,
+            filterIds: g.filterIds,
+            scope: g.sequence!.scope,
+            edges: g.sequence!.edges.map((e) => ({
+              id: e.id,
+              fromFilterId: e.fromFilterId,
+              toFilterId: e.toFilterId,
+              toFilterIds: e.toFilterIds,
+              kind: e.kind,
+              maxGapMs: e.maxGapMs,
+              periodMs: e.periodMs,
+            })),
+            nodeConditions: g.sequence!.nodeConditions,
+            nodeCounts: g.sequence!.nodeCounts,
+          }));
+        let results: Record<string, SequenceMatchResult>;
+        try {
+          const resp = await runDbSequences(seqGroups);
+          if (resp.fallback) {
+            results = runSequenceMatching(groups, matches);
+          } else {
+            results = resp.results as Record<string, SequenceMatchResult>;
+          }
+        } catch {
+          results = runSequenceMatching(groups, matches);
+        }
+        set({ sequenceResults: results });
+        get().recomputeCorrelations();
+      })();
+      return;
+    }
     const results = runSequenceMatching(groups, matches);
     // 引用不变时避免无谓 set（runSequenceMatching 每次新对象，简单比较）
     set({ sequenceResults: results });
@@ -637,9 +898,42 @@ export const useLogStore = create<LogState>((set, get) => ({
   },
 
   recomputeMatches: () => {
-    const { events, filters } = get();
-    if (events.length === 0 || filters.length === 0) {
+    const { events, filters, dbMode } = get();
+    if ((dbMode ? get().meta?.totalLines : events.length) === 0 || filters.length === 0) {
       set({ matches: [], correlatedEventIds: new Set(), sequenceResults: {} });
+      return;
+    }
+    // dbMode：全部 filter 一次批量下推（单遍扫描；缓存命中的 filter 直接读库）
+    if (dbMode) {
+      void (async () => {
+        const active = filters.filter((f) => f.pattern && f.enabled);
+        let results = new Map<string, DbFilterHits>();
+        if (active.length > 0) {
+          try {
+            results = await runDbFiltersBatch(active.map((f) => ({
+              filterId: f.id,
+              pattern: f.pattern,
+              isRegex: f.isRegex,
+              caseSensitive: f.caseSensitive,
+              scope: f.scope,
+            })));
+          } catch (err) {
+            console.warn('[dbMode] db_filters_batch 失败，全部置空:', err);
+          }
+        }
+        const out: FilterMatch[] = filters.map((f) => ({
+          filterId: f.id,
+          events: skelEvents(results.get(f.id)),
+        }));
+        // 过滤期间用户可能又改了 filters → 结果以最新为准重新跑
+        if (get().filters !== filters) {
+          get().recomputeMatches();
+          return;
+        }
+        set({ matches: out });
+        get().recomputeSequences();
+        get().recomputeCorrelations();
+      })();
       return;
     }
     const matches = FilterEngine.run(events, filters);
@@ -649,7 +943,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   },
 
   setViewRange: (r) => {
-    set({ viewRange: r });
+    set({ viewRange: r, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
@@ -669,7 +963,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       end = fullRange.end;
       start = end - next;
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
@@ -693,7 +987,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       end = fullRange.end;
       start = end - next;
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
@@ -715,7 +1009,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       start -= d;
       end -= d;
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
@@ -734,37 +1028,91 @@ export const useLogStore = create<LogState>((set, get) => ({
       start -= d;
       end -= d;
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
   resetView: () => {
     const { fullRange } = get();
-    if (fullRange) set({ viewRange: { ...fullRange } });
+    if (fullRange) set({ viewRange: { ...fullRange }, activeSavedRangeId: null });
+  },
+
+  saveRange: (name, range) => {
+    const r = range ?? get().viewRange;
+    const trimmed = name.trim();
+    if (!r || !trimmed || r.end <= r.start) return null;
+    const item: SavedRange = {
+      id: `rng_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`,
+      name: trimmed,
+      start: r.start,
+      end: r.end,
+    };
+    const next = [...get().savedRanges, item];
+    set({ savedRanges: next });
+    persistSavedRanges(next);
+    return item;
+  },
+
+  applySavedRange: (id) => {
+    const { savedRanges, fullRange } = get();
+    const item = savedRanges.find((r) => r.id === id);
+    if (!item) return;
+    // clamp 到当前数据范围；完全不相交（换了数据集）则不动作
+    if (fullRange) {
+      const start = Math.max(item.start, fullRange.start);
+      const end = Math.min(item.end, fullRange.end);
+      if (start >= end) return;
+      set({ viewRange: { start, end }, activeSavedRangeId: id });
+    } else {
+      set({ viewRange: { start: item.start, end: item.end }, activeSavedRangeId: id });
+    }
+    scheduleCorrRecompute(() => get().recomputeCorrelations());
+  },
+
+  removeSavedRange: (id) => {
+    const next = get().savedRanges.filter((r) => r.id !== id);
+    set({ savedRanges: next });
+    persistSavedRanges(next);
+  },
+
+  updateSavedRange: (id, patch) => {
+    const cur = get().savedRanges.find((r) => r.id === id);
+    if (!cur) return null;
+    const name = patch.name !== undefined ? patch.name.trim() : cur.name;
+    const start = patch.start !== undefined ? patch.start : cur.start;
+    const end = patch.end !== undefined ? patch.end : cur.end;
+    if (!name || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+    if (name === cur.name && start === cur.start && end === cur.end) return cur;
+    const item: SavedRange = { id: cur.id, name, start, end };
+    const next = get().savedRanges.map((r) => (r.id === id ? item : r));
+    set({ savedRanges: next });
+    persistSavedRanges(next);
+    // 该范围正被使用时，编辑后同步切换到新范围（含 fullRange 钳制）
+    if (get().activeSavedRangeId === id) get().applySavedRange(id);
+    return item;
   },
 
   selectEvent: (id) => {
     set({ selectedEventId: id });
-    const { events } = get();
     if (id !== null) {
-      const ev = events.find((e) => e.id === id);
-      if (ev) {
-        set({ scrubberTs: ev.ts });
-      }
+      const s = get();
+      const ts = s.dbMode ? hitTsByLine(s, id) : (s.events.find((e) => e.id === id)?.ts ?? null);
+      if (ts !== null) set({ scrubberTs: ts });
     }
     get().recomputeCorrelations();
   },
 
   focusEvent: (id) => {
     get().selectEvent(id);
-    const { events, viewRange, fullRange } = get();
-    const ev = events.find((e) => e.id === id);
-    if (!ev || !viewRange || !fullRange) return;
+    const s = get();
+    const { viewRange, fullRange } = s;
+    const evTs = s.dbMode ? hitTsByLine(s, id) : (s.events.find((e) => e.id === id)?.ts ?? null);
+    if (evTs === null || !viewRange || !fullRange) return;
     // 已在可视范围内则不平移
-    if (ev.ts >= viewRange.start && ev.ts <= viewRange.end) return;
+    if (evTs >= viewRange.start && evTs <= viewRange.end) return;
     // 平移视图使事件居中（宽度保持不变）
     const span = viewRange.end - viewRange.start || 1;
-    let start = ev.ts - span / 2;
+    let start = evTs - span / 2;
     let end = start + span;
     if (start < fullRange.start) {
       start = fullRange.start;
@@ -774,7 +1122,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       end = fullRange.end;
       start = Math.max(fullRange.start, end - span);
     }
-    set({ viewRange: { start, end } });
+    set({ viewRange: { start, end }, activeSavedRangeId: null });
     scheduleCorrRecompute(() => get().recomputeCorrelations());
   },
 
@@ -789,25 +1137,21 @@ export const useLogStore = create<LogState>((set, get) => ({
   },
 
   recomputeCorrelations: () => {
-    const {
-      matches,
-      selectedEventId,
-      events,
-      viewRange,
-      correlationHalfWindow,
-      scrubberTs,
-    } = get();
+    const s = get();
+    const { matches, selectedEventId, events, viewRange, correlationHalfWindow, scrubberTs } = s;
 
     // 选中事件驱动关联；若无选中则用游标
     let centerTs: number | null = null;
     if (selectedEventId !== null) {
-      const ev = events.find((e) => e.id === selectedEventId);
-      if (ev) centerTs = ev.ts;
+      centerTs = s.dbMode
+        ? hitTsByLine(s, selectedEventId)
+        : (events.find((e) => e.id === selectedEventId)?.ts ?? null);
     } else if (scrubberTs !== null) {
       centerTs = scrubberTs;
     }
 
-    if (centerTs === null || matches.length === 0) {
+    const filterIds = matches.filter((m) => m.events.length > 0).map((m) => m.filterId);
+    if (centerTs === null || filterIds.length === 0) {
       if (get().correlatedEventIds.size > 0) {
         set({ correlatedEventIds: new Set() });
       }
@@ -818,6 +1162,22 @@ export const useLogStore = create<LogState>((set, get) => ({
     const half =
       correlationHalfWindow ??
       (viewRange ? (viewRange.end - viewRange.start) * 0.02 : 1000);
+
+    if (s.dbMode) {
+      // v3：关联窗口下推 SQL（line_ts 覆盖索引范围扫 × filter_hits 点查），
+      // 替代 JS 全量扫 matches（每次视图变化 O(总命中数)）
+      const seq = ++corrSeq; // 视图快速变化时丢弃过期响应
+      void fetchCorrIds(filterIds, centerTs - half, centerTs + half)
+        .then((ids) => {
+          if (seq !== corrSeq) return;
+          set({ correlatedEventIds: new Set(ids) });
+        })
+        .catch(() => {
+          if (seq !== corrSeq) return;
+          set({ correlatedEventIds: new Set() });
+        });
+      return;
+    }
 
     const ids = new Set<number>();
     const lo = centerTs - half;
@@ -832,11 +1192,17 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   // ---- 工作区持久化（目录即工作区） ----
   applyPersistedFilters: (saved) => {
-    // 旧 filter id → 新 filter id 的映射（filter 加载时重新生成 id）
+    // filter id 沿用持久化原值(缺失/重复才生成新 id):
+    // db 缓存(filter_meta 指纹 → filter_hits 复用)按 filter_id 命中,
+    // 换 id = 每次打开目录都全量重扫+重写百万级命中行,且旧行成为
+    // 无人清理的死数据(实测 cache.db 膨胀到 3.74GB)。
     const oldToNewFid = new Map<string, string>();
+    const seenIds = new Set<string>();
     // 从 JSON 恢复过滤器（补全默认字段；保留原 groupId 用于迁移）
     const restoredRaw: Filter[] = saved.filters.map((f: any, i: number) => {
-      const newId = genFilterId();
+      const keep = typeof f.id === 'string' && !!f.id && !seenIds.has(f.id);
+      const newId = keep ? f.id : genFilterId();
+      seenIds.add(newId);
       if (f.id) oldToNewFid.set(f.id, newId);
       return {
         id: newId,
@@ -1019,6 +1385,8 @@ export const useLogStore = create<LogState>((set, get) => ({
     set({ logsDirHandle: dir, logsDirName: dir.name });
     // 目录即工作区：绑定 .logGraph（恢复存档或继承当前状态播种）
     await get().openWorkspace(dir);
+    // 用户显式选择的目录计入最近项目（initLogsDir 的自动恢复不记录）
+    await recordOpenProject({ name: dir.name, kind: 'dir', path: dir.path ?? null, handle: dir });
   },
 
   initLogsDir: async () => {

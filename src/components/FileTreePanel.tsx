@@ -12,6 +12,8 @@ import {
   type LogFileInfo,
 } from '../io/dirLoader';
 import { ChevronDown, ChevronRight, Folder, FileText } from './Icon';
+import { toast } from '../store/uiStore';
+import * as dbStore from '../io/dbStore';
 import styles from './FileTreePanel.module.css';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -143,6 +145,39 @@ export function FileTreePanel() {
     if (names.length === 0) return;
     setLoading(true);
     try {
+      // ---- 快速路径：SQLite 数据驻留（Tauri + 全目录加载时）----
+      // v4：便宜通道建库（读+偏移+计数+范围）；无事件索引——命中 ts 扫描时解析
+      const handle: unknown = logsDirHandle;
+      const isTauriDir =
+        !!handle && typeof handle === 'object' && '__tauriDir' in handle && handle.__tauriDir === true;
+      const allSelected = names.length === files.length;
+      if (isTauriDir && allSelected) {
+        const dir =
+          handle && typeof handle === 'object' && 'path' in handle && typeof handle.path === 'string'
+            ? handle.path
+            : '';
+        const { dbOpen } = dbStore;
+        const opened = await dbOpen(dir, (loaded, total, cur) => {
+          if (mountedRef.current) {
+            setProgress(`索引 ${loaded}/${total} ${cur}`);
+          }
+        });
+        if (opened) {
+          useLogStore.getState().setLogDb(
+            { start: opened.rangeStart, end: opened.rangeEnd },
+            {
+              fileName: `${logsDirName ?? dir} (${opened.fileCount} 文件)`,
+              fileSize: totalSelectedSize,
+              totalLines: opened.totalLines,
+              skipped: opened.skipped,
+              timestampFormatId: opened.timestampFormatId,
+            },
+          );
+          return;
+        }
+        // dbOpen 失败 → 落回旧全量路径
+      }
+
       const result = await loadMultiple(logsDirHandle, names, (loaded, total, cur) => {
         if (mountedRef.current) {
           setProgress(`加载中 ${loaded}/${total} ${cur}`);
@@ -158,7 +193,7 @@ export function FileTreePanel() {
       });
     } catch (e) {
       console.error('加载日志失败', e);
-      alert('加载日志失败：' + (e as Error).message);
+      toast.error('加载日志失败', (e as Error).message);
     } finally {
       setLoading(false);
       setProgress('');
@@ -256,7 +291,7 @@ export function FileTreePanel() {
               : '点击工具栏「打开目录」选择一个日志文件夹'}
           </div>
         )}
-        {loading && files.length === 0 && (
+        {loading && (
           <div className={styles['fileTree-loading']}>{progress || '加载中…'}</div>
         )}
         {renderNode(tree, 0, '')}

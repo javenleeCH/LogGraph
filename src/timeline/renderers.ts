@@ -368,6 +368,57 @@ export function drawLaneEventsAt(
   ctx.beginPath();
   ctx.rect(chartLeft, y, chartWidth, h);
   ctx.clip();
+  // ---- 密度模式（可见事件过多）----
+  // 桶聚合绘制 + 仅单独绘制选中/悬停/关联标记：宽视口下逐标记 fillRect
+  // 是每帧数百 ms 的主因（WASD 卡顿）；密度图在大 zoom-out 下信息量等价。
+  if (events.length > LAYOUT.DENSITY_EVENT_THRESHOLD) {
+    const bucketW = 3;
+    const bucketCount = Math.ceil(chartWidth / bucketW);
+    const buckets = new Int32Array(bucketCount);
+    const specials: { x: number; ev: LogEvent }[] = [];
+    for (const ev of events) {
+      if (ev.ts < view.start || ev.ts > view.end) continue;
+      const x = timeToX(ev.ts);
+      if (x < chartLeft || x >= width) continue;
+      buckets[Math.min(bucketCount - 1, Math.floor((x - chartLeft) / bucketW))]++;
+      if (
+        ev.id === selectedId ||
+        ev.id === hoveredId ||
+        correlatedIds.has(ev.id)
+      ) {
+        specials.push({ x, ev });
+      }
+    }
+    let maxCount = 1;
+    for (let i = 0; i < bucketCount; i++) {
+      if (buckets[i] > maxCount) maxCount = buckets[i];
+    }
+    const barH = h * LAYOUT.EVENT_HEIGHT_RATIO;
+    const barTop = y + (h - barH) / 2;
+    for (let i = 0; i < bucketCount; i++) {
+      const cnt = buckets[i];
+      if (cnt === 0) continue;
+      ctx.fillStyle = withAlpha(filter.color, 0.25 + (cnt / maxCount) * 0.7);
+      ctx.fillRect(chartLeft + i * bucketW, barTop, bucketW - 0.5, barH);
+    }
+    // 特殊标记（少量）单独绘制，保持选中/悬停/关联在密度图上可见
+    for (const { x, ev } of specials) {
+      const isSel = ev.id === selectedId;
+      const isHov = ev.id === hoveredId;
+      const isCorr = correlatedIds.has(ev.id);
+      const w = isSel ? 3.5 : isHov ? 3 : LAYOUT.EVENT_MIN_WIDTH;
+      ctx.fillStyle = isSel ? C.selectedFill : isCorr ? lightenHex(filter.color, 0.15) : filter.color;
+      ctx.fillRect(x - w / 2, eventY, w, eventH);
+      if (isCorr && !isSel) {
+        ctx.strokeStyle = C.corrStroke;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x - w / 2 - 1, eventY - 1, w + 2, eventH + 2);
+      }
+    }
+    ctx.restore();
+    return;
+  }
+
   for (const ev of events) {
     if (ev.ts < view.start || ev.ts > view.end) continue;
     const x = timeToX(ev.ts);
@@ -434,6 +485,24 @@ export function drawLaneEventsAt(
   ctx.restore();
 }
 
+/** Shift 框选拖拽中的高亮带：accent 半透明填充 + 边线 + 两端把手 */
+export function drawBrushOverlay(rc: RenderContext, x1: number, x2: number) {
+  const { ctx, height } = rc;
+  const top = LAYOUT.AXIS_HEIGHT;
+  const bottom = height - LAYOUT.MINIMAP_HEIGHT - LAYOUT.MINIMAP_GAP;
+  if (x2 <= x1 || bottom <= top) return;
+  const accent = readVar('--accent', '#1a73e8');
+  ctx.save();
+  ctx.fillStyle = withAlpha(accent, 0.15);
+  ctx.fillRect(x1, top, x2 - x1, bottom - top);
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x1 + 0.5, top + 0.5, x2 - x1 - 1, bottom - top - 1);
+  ctx.fillStyle = accent;
+  ctx.fillRect(x1 - 1.5, top, 3, bottom - top);
+  ctx.fillRect(x2 - 1.5, top, 3, bottom - top);
+  ctx.restore();
+}
 /** 绘制关联连线：选中/游标事件竖线贯穿所有 lane */
 export function drawCorrelationLinks(
   rc: RenderContext,
@@ -507,13 +576,20 @@ export function drawScrubber(rc: RenderContext, scrubberTs: number | null) {
   ctx.restore();
 }
 
-/** 绘制 minimap */
+/** minimap 离屏直方图缓存（由 TimelineCanvas 的 useMemo 维护） */
+export interface MinimapCache {
+  canvas: HTMLCanvasElement;
+  key: string;
+}
+
+/** 绘制 minimap（直方图走离屏缓存位图，每帧仅 drawImage + 视口框） */
 export function drawMinimap(
   rc: RenderContext,
   fullRange: TimeRange,
   view: TimeRange,
   matches: FilterMatch[],
   filters: Filter[],
+  cache: MinimapCache | null = null,
 ) {
   const { ctx, width, height } = rc;
   const top = height - LAYOUT.MINIMAP_HEIGHT;
@@ -540,14 +616,19 @@ export function drawMinimap(
   const span = fullRange.end - fullRange.start || 1;
   const tToX = (t: number) => left + ((t - fullRange.start) / span) * w;
 
-  for (let i = 0; i < matches.length; i++) {
-    const fm = matches[i];
-    const color = filters.find((f) => f.id === fm.filterId)?.color ?? '#888';
-    const bandTop = top + 6 + (i % 4) * 8;
-    ctx.fillStyle = withAlpha(color, 0.9);
-    for (const ev of fm.events) {
-      const x = tToX(ev.ts);
-      ctx.fillRect(x, bandTop, 1, 7);
+  // 直方图：优先离屏缓存（O(1) drawImage）；缓存缺失时降级为直绘
+  if (cache) {
+    ctx.drawImage(cache.canvas, left, top, w, h);
+  } else {
+    for (let i = 0; i < matches.length; i++) {
+      const fm = matches[i];
+      const color = filters.find((f) => f.id === fm.filterId)?.color ?? '#888';
+      const bandTop = top + 6 + (i % 4) * 8;
+      ctx.fillStyle = withAlpha(color, 0.9);
+      for (const ev of fm.events) {
+        const x = tToX(ev.ts);
+        ctx.fillRect(x, bandTop, 1, 7);
+      }
     }
   }
 
@@ -831,6 +912,9 @@ export function drawSequenceLinks(
     if (group.visible === false) continue;
 
     const chains: MatchedChain[] = result.chains;
+    // 链数过多时连线已是色块噪声（2 万条贝塞尔/帧也是显著开销），跳过绘制；
+    // 放大使视口内链数降到阈值内后自动恢复
+    if (chains.length > LAYOUT.SEQ_LINK_MAX_CHAINS) continue;
     const alphaBase = C.seqLinkAlpha;
     // 多链时降低单链透明度，避免重叠糊成一团
     const alpha = chains.length > 8 ? 0.35 : chains.length > 3 ? 0.5 : alphaBase;
