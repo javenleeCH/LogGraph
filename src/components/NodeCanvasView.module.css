@@ -655,6 +655,33 @@
   color: var(--danger);
 }
 
+.condNote {
+  flex: 0 1 34%;
+  min-width: 0;
+  font-size: 11px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  box-sizing: border-box;
+  outline: none;
+}
+
+.condNote::placeholder {
+  color: var(--text-faint);
+}
+
+.condNote:hover {
+  border-color: var(--border);
+}
+
+.condNote:focus {
+  border-color: var(--accent);
+  background: var(--bg);
+  color: var(--text);
+}
+
 .condAdd {
   align-self: flex-start;
   display: flex;

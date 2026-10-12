@@ -540,6 +540,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       caseSensitive: partial?.caseSensitive ?? false,
       enabled: partial?.enabled ?? true,
       scope: partial?.scope ?? 'raw',
+      ...(Array.isArray(partial?.subNotes) ? { subNotes: partial.subNotes } : {}),
     };
     set({ filters: [...get().filters, filter] });
     get().recomputeMatches();
@@ -1213,6 +1214,9 @@ export const useLogStore = create<LogState>((set, get) => ({
         caseSensitive: f.caseSensitive ?? false,
         enabled: f.enabled ?? true,
         scope: f.scope === 'message' ? 'message' : 'raw',
+        ...(Array.isArray(f.subNotes)
+          ? { subNotes: f.subNotes.map((n: unknown) => (typeof n === 'string' ? n : '')) }
+          : {}),
         groupId: f.groupId ?? null, // 旧字段，迁移后置 null
       };
     });

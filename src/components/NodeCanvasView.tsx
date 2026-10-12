@@ -330,26 +330,33 @@ export function EdgeEditModal(props: {
 interface CondRow {
   negate: boolean;
   text: string;
+  /** 该条件的备注（描述匹配什么；不参与匹配，随行删除） */
+  note: string;
 }
 
-/** pattern 字符串 → 条件行列表（剥 ! 前缀；空 pattern 给一个空行起步） */
-function patternToRows(pattern: string): CondRow[] {
+/** pattern 字符串 → 条件行列表（剥 ! 前缀；空 pattern 给一个空行起步）。
+ *  subNotes 与非空条件行按序对齐（rowsToOut 的逆操作）。 */
+function patternToRows(pattern: string, subNotes?: string[]): CondRow[] {
   const rows: CondRow[] = [];
   for (const line of pattern.split('\n')) {
     const t = line.trim();
     if (!t) continue;
-    if (t.startsWith('!')) rows.push({ negate: true, text: t.slice(1).trim() });
-    else rows.push({ negate: false, text: t });
+    if (t.startsWith('!')) rows.push({ negate: true, text: t.slice(1).trim(), note: subNotes?.[rows.length] ?? '' });
+    else rows.push({ negate: false, text: t, note: subNotes?.[rows.length] ?? '' });
   }
-  return rows.length > 0 ? rows : [{ negate: false, text: '' }];
+  return rows.length > 0 ? rows : [{ negate: false, text: '', note: '' }];
 }
 
-/** 条件行列表 → pattern 字符串（空文本行跳过；全空 = ''） */
-function rowsToPattern(rows: CondRow[]): string {
-  return rows
-    .filter((r) => r.text.trim())
-    .map((r) => (r.negate ? `!${r.text.trim()}` : r.text.trim()))
-    .join('\n');
+/** 条件行列表 → { pattern, subNotes }（空文本行跳过，备注随之过滤保持对齐；
+ *  全空备注不存储） */
+function rowsToOut(rows: CondRow[]): { pattern: string; subNotes?: string[] } {
+  const kept = rows.filter((r) => r.text.trim());
+  const subNotes = kept.map((r) => r.note.trim());
+  return {
+    pattern: kept.map((r) => (r.negate ? `!${r.text.trim()}` : r.text.trim())).join('\n'),
+    // 显式 undefined 覆盖旧值（updateFilter 是 Partial 合并，缺省键不清理）
+    subNotes: subNotes.some(Boolean) ? subNotes : undefined,
+  };
 }
 
 export function FilterDetailModal() {
@@ -363,28 +370,28 @@ export function FilterDetailModal() {
   const removeFilterFromGroup = useLogStore((s) => s.removeFilterFromGroup);
 
   const filter = filters.find((f) => f.id === editingFilterId) ?? null;
-  const [rows, setRows] = useState<CondRow[]>(() => patternToRows(filter?.pattern ?? ''));
+  const [rows, setRows] = useState<CondRow[]>(() => patternToRows(filter?.pattern ?? '', filter?.subNotes));
 
   // 换一个 filter 编辑时重新初始化行（同 filter 内不重置，避免光标跳动）
   useEffect(() => {
-    setRows(patternToRows(filter?.pattern ?? ''));
+    setRows(patternToRows(filter?.pattern ?? '', filter?.subNotes));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingFilterId]);
 
-  /** 行变更 → 更新本地行并合成提交 pattern */
+  /** 行变更 → 更新本地行并合成提交 pattern + subNotes */
   const commitRows = (next: CondRow[]) => {
     setRows(next);
-    if (filter) updateFilter(filter.id, { pattern: rowsToPattern(next) });
+    if (filter) updateFilter(filter.id, rowsToOut(next));
   };
   const setRow = (i: number, patch: Partial<CondRow>) => {
     commitRows(rows.map((r, k) => (k === i ? { ...r, ...patch } : r)));
   };
   const removeRow = (i: number) => {
     const next = rows.filter((_, k) => k !== i);
-    commitRows(next.length > 0 ? next : [{ negate: false, text: '' }]);
+    commitRows(next.length > 0 ? next : [{ negate: false, text: '', note: '' }]);
   };
   const addRow = () => {
-    commitRows([...rows, { negate: false, text: '' }]);
+    commitRows([...rows, { negate: false, text: '', note: '' }]);
   };
 
   useEffect(() => {
@@ -444,6 +451,14 @@ export function FilterDetailModal() {
                   onChange={(e) => setRow(i, { text: e.target.value })}
                   placeholder={filter.isRegex ? `条件 ${i + 1}（正则）` : `条件 ${i + 1}（关键词）`}
                   autoFocus={i === 0}
+                />
+                <input
+                  className={styles.condNote}
+                  type="text"
+                  value={row.note}
+                  onChange={(e) => setRow(i, { note: e.target.value })}
+                  placeholder="备注"
+                  title="备注：描述这个条件用来匹配什么（不参与匹配）"
                 />
                 <button
                   className={styles.condRemove}

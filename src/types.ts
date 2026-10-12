@@ -34,6 +34,8 @@ export interface Filter {
   enabled: boolean;
   /** 匹配字段范围：完整行 raw，或正文 message */
   scope: 'raw' | 'message';
+  /** 子条件备注（与 pattern 的非空条件行按序对齐；纯 UI 元数据，不参与匹配） */
+  subNotes?: string[];
   /** 所属 group id；null 或 undefined=未分组（顶层） */
   groupId?: string | null;
 }
