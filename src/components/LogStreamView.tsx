@@ -55,9 +55,21 @@ interface TickMark {
 function buildRows(
   matches: { filterId: string; events: LogEvent[] }[],
   viewRange: { start: number; end: number } | null,
-): { rows: RowData[]; laneEvents: LogEvent[][] } {
+): {
+  rows: RowData[];
+  laneEvents: LogEvent[][];
+  /** lane 内事件按 ts 分组（对齐模式渲染按行 O(1) 取事件） */
+  laneByTs: Map<number, LogEvent[]>[];
+  /** 事件 id → 行下标（选中定位 O(1) 查表，替代旧 O(N²) 全量扫描） */
+  rowOfEvent: Map<number, number>;
+} {
   if (!viewRange || matches.length === 0) {
-    return { rows: [], laneEvents: matches.map(() => []) };
+    return {
+      rows: [],
+      laneEvents: matches.map(() => []),
+      laneByTs: matches.map(() => new Map()),
+      rowOfEvent: new Map(),
+    };
   }
   // 收集每个 lane 在 viewRange 内的事件
   const laneEvents: LogEvent[][] = matches.map((fm) => {
@@ -87,15 +99,27 @@ function buildRows(
   });
   // 构建行
   const rows: RowData[] = [];
+  const rowOfTs = new Map<number, number>();
   let top = 0;
   for (const ts of tsList) {
+    rowOfTs.set(ts, rows.length);
     const counts = laneByTs.map((m) => m.get(ts)?.length ?? 0);
     const maxCount = Math.max(1, ...counts);
     const height = maxCount * CARD_H + ROW_PAD * 2;
     rows.push({ ts, counts, height, top });
     top += height;
   }
-  return { rows, laneEvents };
+  // 事件 id → 行下标（同一物理行命中多列时行下标一致，先到先得即可）
+  const rowOfEvent = new Map<number, number>();
+  for (const le of laneEvents) {
+    for (const ev of le) {
+      if (!rowOfEvent.has(ev.id)) {
+        const ri = rowOfTs.get(ev.ts);
+        if (ri !== undefined) rowOfEvent.set(ev.id, ri);
+      }
+    }
+  }
+  return { rows, laneEvents, laneByTs, rowOfEvent };
 }
 
 /** 可见列分段：group 包裹子 filter 列 + 顶层 filter 列 */
@@ -330,7 +354,7 @@ export function LogStreamView() {
     () => totalSlots * 5,
     [totalSlots],
   );
-  const { rows, laneEvents } = useMemo(
+  const { rows, laneEvents, laneByTs, rowOfEvent } = useMemo(
     () => buildRows(visibleMatches, viewRange),
     [visibleMatches, viewRange],
   );
@@ -494,43 +518,30 @@ export function LogStreamView() {
     const el = scrollRef.current;
     if (!el) return;
 
-    // 全局模式：按事件真实 ts 定位
+    // O(1) 查表定位行（rowOfEvent 由 buildRows 一次构建）。
+    // 旧实现对齐模式是逐行 × 逐列 .some() 全量扫描 = O(N²)：百万级事件下
+    // 点一次选中就卡死主线程数分钟——详情不更新、后续点击无响应、光标
+    // 冻结在小手指（滚轮走合成线程仍可动）的根因。
+    const rowIdx = rowOfEvent.get(selectedEventId);
+    if (rowIdx === undefined) return;
+    const targetRow = rows[rowIdx];
+    if (!targetRow) return;
+
     if (mode === 'global' && viewRange && globalData) {
-      let targetTs: number | null = null;
-      for (const le of laneEvents) {
-        const ev = le.find((e) => e.id === selectedEventId);
-        if (ev) {
-          targetTs = ev.ts;
-          break;
-        }
-      }
-      if (targetTs === null) return;
-      const y = (targetTs - viewRange.start) * globalData.pxPerMs;
+      // 全局模式：按事件真实 ts 定位（行桶 ts 即事件 ts）
+      const y = (targetRow.ts - viewRange.start) * globalData.pxPerMs;
       if (y < el.scrollTop || y > el.scrollTop + el.clientHeight) {
         el.scrollTo({ top: y - el.clientHeight / 3, behavior: 'smooth' });
       }
-      lastScrollTarget.current = selectedEventId;
-      return;
-    }
-
-    // 对齐模式：按行定位
-    let targetRow: RowData | undefined;
-    for (const r of rows) {
-      for (let li = 0; li < laneEvents.length; li++) {
-        if (laneEvents[li].some((e) => e.id === selectedEventId && e.ts === r.ts)) {
-          targetRow = r;
-          break;
-        }
+    } else {
+      // 对齐/独立模式：按行 top 定位
+      const y = targetRow.top;
+      if (y < el.scrollTop || y > el.scrollTop + el.clientHeight) {
+        el.scrollTo({ top: y - el.clientHeight / 3, behavior: 'smooth' });
       }
-      if (targetRow) break;
-    }
-    if (!targetRow) return;
-    const y = targetRow.top;
-    if (y < el.scrollTop || y > el.scrollTop + el.clientHeight) {
-      el.scrollTo({ top: y - el.clientHeight / 3, behavior: 'smooth' });
     }
     lastScrollTarget.current = selectedEventId;
-  }, [selectedEventId, rows, laneEvents, mode, viewRange, globalData]);
+  }, [selectedEventId, rows, rowOfEvent, mode, viewRange, globalData]);
 
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
@@ -541,21 +552,7 @@ export function LogStreamView() {
     }
   }, []);
 
-  // 每个 lane 按 ts 分组（供对齐模式渲染）
-  const laneByTs = useMemo(() => {
-    return laneEvents.map((le) => {
-      const m = new Map<number, LogEvent[]>();
-      for (const ev of le) {
-        let arr = m.get(ev.ts);
-        if (!arr) {
-          arr = [];
-          m.set(ev.ts, arr);
-        }
-        arr.push(ev);
-      }
-      return m;
-    });
-  }, [laneEvents]);
+  // laneByTs / rowOfEvent 由 buildRows 一并构建（旧代码在此重复建 Map，浪费一次 O(N)）
 
   // 当前视口内真正会渲染的事件 id 集合（按视图模式推断），供 dbMode 惰性取文本
   const renderedIds = useMemo(() => {
