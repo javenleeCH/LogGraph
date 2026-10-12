@@ -1,8 +1,8 @@
-/* 时间格式编辑器弹层（portal 到 body，fixed 定位由组件注入） */
+/* 时间格式选择器弹层（portal 到 body，fixed 定位由组件注入） */
 .popover {
   position: fixed;
-  width: 420px;
-  max-height: 70vh;
+  width: 440px;
+  max-height: 74vh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -19,20 +19,101 @@
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text);
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
 }
 
-.current {
-  font-size: 10.5px;
-  font-weight: 400;
+/* 当前生效格式 */
+.currentBox {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft, rgba(26, 115, 232, 0.12));
+  font-size: 11.5px;
+  flex-wrap: wrap;
+}
+
+.currentLabel {
   color: var(--text-faint);
+  flex: 0 0 auto;
+}
+
+.currentPattern {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text);
+  word-break: break-all;
+}
+
+.currentSource {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+/* 预设列表 */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: 'name check' 'sub check';
+  column-gap: 8px;
+  align-items: center;
+  text-align: left;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.item:hover {
+  background: var(--bg-elevated-hover);
+}
+
+.item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.itemName {
+  grid-area: name;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.itemSub {
+  grid-area: sub;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  min-width: 0;
+}
+
+.itemSub code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.itemSample {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.check {
+  grid-area: check;
+  color: var(--success, #3fb950);
+}
+
+/* 自定义输入区 */
 .label {
   display: flex;
   flex-direction: column;

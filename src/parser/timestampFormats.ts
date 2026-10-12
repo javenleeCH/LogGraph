@@ -11,6 +11,13 @@ export interface TimestampFormat {
   id: string;
   /** 显示名 */
   label: string;
+  /**
+   * 展示用 pattern（%Y %m %d… 语法）。仅供 UI 显示 / 用户抄去自定义参考，
+   * 解析仍走下方 regex/parse（内置正则比 pattern 更宽容）。
+   */
+  pattern?: string;
+  /** 展示用示例行 */
+  sample?: string;
   /** 匹配时间戳的正则（必须为无锚点，从行首搜索） */
   regex: RegExp;
   /**
@@ -32,6 +39,8 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'iso-local-ms',
     label: 'YYYY-MM-DD HH:mm:ss.SSS',
+    pattern: '%Y-%m-%d %H:%M:%S.%f',
+    sample: '2024-01-01 12:00:00.123',
     regex: /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?/,
     parse: (m) => {
       const ms = m[7] ? m[7].padEnd(3, '0') : '0';
@@ -45,6 +54,8 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'iso-8601',
     label: 'ISO 8601 (Z/offset)',
+    pattern: '%Y-%m-%dT%H:%M:%S%z',
+    sample: '2024-01-01T12:00:00+08:00',
     regex: /(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:?\d{2})?/,
     parse: (m) => {
       const ms = m[7] ? m[7].padEnd(3, '0') : '0';
@@ -64,6 +75,8 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'syslog',
     label: 'syslog (MMM DD HH:mm:ss)',
+    pattern: '%b %d %H:%M:%S',
+    sample: 'Jan 01 12:00:00',
     regex: /([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})/,
     parse: (m) => {
       const mon = MONTHS[m[1]];
@@ -77,6 +90,8 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'time-only-ms',
     label: 'HH:mm:ss.SSS (当天)',
+    pattern: '%H:%M:%S.%f',
+    sample: '12:00:00.123',
     regex: /(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?/,
     parse: (m) => {
       const ms = m[4] ? m[4].padEnd(3, '0') : '0';
@@ -88,6 +103,7 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
   {
     id: 'epoch',
     label: 'Unix epoch (ms/s)',
+    sample: '1709596800123',
     regex: /(?<!\d)(\d{13})(?!\d)|(?<!\d)(\d{10})(?!\d)/,
     parse: (m) => {
       if (m[1]) return +m[1];
