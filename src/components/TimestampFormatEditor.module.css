@@ -1,0 +1,114 @@
+/* 时间格式编辑器弹层（portal 到 body，fixed 定位由组件注入） */
+.popover {
+  position: fixed;
+  width: 420px;
+  max-height: 70vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+}
+
+.head {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.current {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.input {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.tokens {
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+
+.tokens code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--accent);
+}
+
+.preview {
+  font-size: 11.5px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px dashed var(--border);
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.preview[data-kind='ok'] {
+  border-style: solid;
+  border-color: var(--success, #3fb950);
+  color: var(--text);
+}
+
+.preview[data-kind='invalid'],
+.preview[data-kind='noMatch'] {
+  border-color: var(--danger, #f85149);
+}
+
+.preview code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.actions button {
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.hint {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  line-height: 1.6;
+}

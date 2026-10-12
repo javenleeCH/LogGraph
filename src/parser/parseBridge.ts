@@ -12,6 +12,7 @@
 import type { LogEvent } from '../types';
 import { isTauri } from '../lib/tauri';
 import { LogParser, type ParseResult } from './LogParser';
+import type { TimestampFormat } from './timestampFormats';
 
 /** JS ParseResult + 逐行原文（与 text.split(/\r?\n/) 一致，DetailPanel 上下文索引用） */
 export interface FullParseResult extends ParseResult {
@@ -175,8 +176,17 @@ function dualEngineCheck(rust: FullParseResult, js: FullParseResult): void {
  * 解析一段已就位的文本。
  * - Tauri：text 过 IPC 给 Rust 解析（文本已在手上时用；有文件路径请优先 parseLogPath）；
  * - 浏览器：JS 引擎。
+ * - opts.format：强制使用的时间戳格式（用户自定义）。自定义格式目前只有 JS 引擎实现，
+ *   跳过 Rust 与双引擎自检；Rust 侧支持后此处可改为下推。
  */
-export async function parseLogText(text: string): Promise<FullParseResult> {
+export async function parseLogText(
+  text: string,
+  opts?: { format?: TimestampFormat },
+): Promise<FullParseResult> {
+  if (opts?.format) {
+    const r = new LogParser().parse(text, { timestampFormat: opts.format });
+    return { ...r, rawLines: text.split(/\r?\n/), engine: 'js' };
+  }
   const rust = await invokeRust({ text });
   if (rust) {
     if (dualEngineEnabled()) {
