@@ -262,6 +262,11 @@ interface LogState {
   applySavedRange: (id: string) => void;
   /** 删除已存范围 */
   removeSavedRange: (id: string) => void;
+  /** 重命名 / 修改已存范围的时间戳（校验 name 非空、start < end），失败返回 null */
+  updateSavedRange: (
+    id: string,
+    patch: { name?: string; start?: number; end?: number },
+  ) => SavedRange | null;
 
   // --- 交互 ---
   selectedEventId: number | null;
@@ -1067,6 +1072,23 @@ export const useLogStore = create<LogState>((set, get) => ({
     const next = get().savedRanges.filter((r) => r.id !== id);
     set({ savedRanges: next });
     persistSavedRanges(next);
+  },
+
+  updateSavedRange: (id, patch) => {
+    const cur = get().savedRanges.find((r) => r.id === id);
+    if (!cur) return null;
+    const name = patch.name !== undefined ? patch.name.trim() : cur.name;
+    const start = patch.start !== undefined ? patch.start : cur.start;
+    const end = patch.end !== undefined ? patch.end : cur.end;
+    if (!name || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+    if (name === cur.name && start === cur.start && end === cur.end) return cur;
+    const item: SavedRange = { id: cur.id, name, start, end };
+    const next = get().savedRanges.map((r) => (r.id === id ? item : r));
+    set({ savedRanges: next });
+    persistSavedRanges(next);
+    // 该范围正被使用时，编辑后同步切换到新范围（含 fullRange 钳制）
+    if (get().activeSavedRangeId === id) get().applySavedRange(id);
+    return item;
   },
 
   selectEvent: (id) => {
