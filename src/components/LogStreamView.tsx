@@ -62,6 +62,8 @@ function buildRows(
   laneByTs: Map<number, LogEvent[]>[];
   /** 事件 id → 行下标（选中定位 O(1) 查表，替代旧 O(N²) 全量扫描） */
   rowOfEvent: Map<number, number>;
+  /** 事件 id → 卡片绝对 Y（对齐模式堆叠内精确定位，行级判定会误伤可见卡片） */
+  cardTopOfEvent: Map<number, number>;
 } {
   if (!viewRange || matches.length === 0) {
     return {
@@ -69,6 +71,7 @@ function buildRows(
       laneEvents: matches.map(() => []),
       laneByTs: matches.map(() => new Map()),
       rowOfEvent: new Map(),
+      cardTopOfEvent: new Map(),
     };
   }
   // 收集每个 lane 在 viewRange 内的事件
@@ -112,17 +115,23 @@ function buildRows(
     rows.push({ ts, counts, height, top });
     top += height;
   }
-  // 事件 id → 行下标（同一物理行命中多列时行下标一致，先到先得即可）
+  // 事件 id → 行下标 / 卡片绝对 Y（同一物理行命中多列时行下标一致，先到先得）。
+  // 卡片 Y 对齐 .eventStack 几何：padding-top 2px + 堆叠序 × (卡片 18 + gap 2)
   const rowOfEvent = new Map<number, number>();
-  for (const le of laneEvents) {
-    for (const ev of le) {
-      if (!rowOfEvent.has(ev.id)) {
-        const ri = rowOfTs.get(ev.ts);
-        if (ri !== undefined) rowOfEvent.set(ev.id, ri);
+  const cardTopOfEvent = new Map<number, number>();
+  for (const m of laneByTs) {
+    for (const [ts, evs] of m) {
+      const ri = rowOfTs.get(ts);
+      if (ri === undefined) continue;
+      const rowTop = rows[ri].top;
+      for (let i = 0; i < evs.length; i++) {
+        const id = evs[i].id;
+        if (!rowOfEvent.has(id)) rowOfEvent.set(id, ri);
+        if (!cardTopOfEvent.has(id)) cardTopOfEvent.set(id, rowTop + 2 + i * CARD_H);
       }
     }
   }
-  return { rows, laneEvents, laneByTs, rowOfEvent };
+  return { rows, laneEvents, laneByTs, rowOfEvent, cardTopOfEvent };
 }
 
 /** 可见列分段：group 包裹子 filter 列 + 顶层 filter 列 */
@@ -357,7 +366,7 @@ export function LogStreamView() {
     () => totalSlots * 5,
     [totalSlots],
   );
-  const { rows, laneEvents, laneByTs, rowOfEvent } = useMemo(
+  const { rows, laneEvents, laneByTs, rowOfEvent, cardTopOfEvent } = useMemo(
     () => buildRows(visibleMatches, viewRange),
     [visibleMatches, viewRange],
   );
@@ -521,7 +530,7 @@ export function LogStreamView() {
     const el = scrollRef.current;
     if (!el) return;
 
-    // O(1) 查表定位行（rowOfEvent 由 buildRows 一次构建）。
+    // O(1) 查表定位（rowOfEvent/cardTopOfEvent 由 buildRows 一次构建）。
     // 旧实现对齐模式是逐行 × 逐列 .some() 全量扫描 = O(N²)：百万级事件下
     // 点一次选中就卡死主线程数分钟——详情不更新、后续点击无响应、光标
     // 冻结在小手指（滚轮走合成线程仍可动）的根因。
@@ -530,21 +539,29 @@ export function LogStreamView() {
     const targetRow = rows[rowIdx];
     if (!targetRow) return;
 
-    if (mode === 'global' && viewRange && globalData) {
-      // 全局模式：按事件真实 ts 定位（行桶 ts 即事件 ts）
-      const y = (targetRow.ts - viewRange.start) * globalData.pxPerMs;
-      if (y < el.scrollTop || y > el.scrollTop + el.clientHeight) {
-        el.scrollTo({ top: y - el.clientHeight / 3, behavior: 'smooth' });
-      }
+    // 目标卡片（对齐模式用堆叠内精确 Y；全局模式用 ts 映射 Y，忽略级联偏移）
+    const cardY =
+      mode === 'global' && viewRange && globalData
+        ? (targetRow.ts - viewRange.start) * globalData.pxPerMs
+        : (cardTopOfEvent.get(selectedEventId) ?? targetRow.top);
+
+    // 卡片已（完全）可见 → 一动不动。按行 top 判定会误伤：高堆叠行或行顶
+    // 在视口上沿之外的行，卡片明明可见也被拽到固定位置（"点击后自己跳转"
+    // 的根因）；不可见时也只做最小量滚动露出卡片，不再跳到 1/3 视口处。
+    if (cardY >= el.scrollTop && cardY + CARD_H <= el.scrollTop + el.clientHeight) {
+      lastScrollTarget.current = selectedEventId;
+      return;
+    }
+    const MARGIN = 24;
+    if (cardY < el.scrollTop) {
+      // 在视口上方：下滚刚好露出（带上边距）
+      el.scrollTo({ top: Math.max(0, cardY - MARGIN), behavior: 'smooth' });
     } else {
-      // 对齐/独立模式：按行 top 定位
-      const y = targetRow.top;
-      if (y < el.scrollTop || y > el.scrollTop + el.clientHeight) {
-        el.scrollTo({ top: y - el.clientHeight / 3, behavior: 'smooth' });
-      }
+      // 在视口下方：上滚刚好露出（带下边距）
+      el.scrollTo({ top: cardY + CARD_H + MARGIN - el.clientHeight, behavior: 'smooth' });
     }
     lastScrollTarget.current = selectedEventId;
-  }, [selectedEventId, rows, rowOfEvent, mode, viewRange, globalData]);
+  }, [selectedEventId, rows, rowOfEvent, cardTopOfEvent, mode, viewRange, globalData]);
 
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
