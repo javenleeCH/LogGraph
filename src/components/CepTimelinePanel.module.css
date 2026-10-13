@@ -119,34 +119,31 @@
   font-variant-numeric: tabular-nums;
 }
 
-.timeRange {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.node {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.1s, box-shadow 0.1s;
 }
 
-/* 右侧节点图标：每个节点一个（filter 色） */
+/* 右侧节点图标：每个节点一个（filter 色 + 链内步序号） */
 .nodes {
   display: flex;
   flex: 0 0 auto;
   gap: 2px;
 }
 
-.node {
-  flex: 0 0 auto;
-  width: 11px;
-  height: 11px;
-  padding: 0;
-  border: none;
-  border-radius: 3px;
-  cursor: pointer;
-  opacity: 0.85;
-  transition: opacity 0.1s, box-shadow 0.1s;
-}
 
 .node:hover {
   opacity: 1;

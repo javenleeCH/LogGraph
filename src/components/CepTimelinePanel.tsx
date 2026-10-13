@@ -9,6 +9,8 @@ interface CepNode {
   eventId: number;
   /** 图标色：链节点=来源 filter 色；异常/违规=红 */
   color: string;
+  /** 节点序号（链内第几步，1-based）——图标上显示的数字 */
+  stepNo: number;
   /** 悬浮提示：来源 filter 名 */
   filterLabel?: string;
   anomaly?: boolean;
@@ -17,7 +19,7 @@ interface CepNode {
 
 /** CEP 面板一行：一条匹配链 / 一个异常事件 / 一对 NOT 违规 */
 interface CepRow {
-  /** 左侧计数：链=节点数；异常=1；违规=2 */
+  /** 行序号（块内按 startTime 排序后 1-based） */
   count: number;
   startTs: number;
   endTs: number;
@@ -40,23 +42,24 @@ interface CepBlock {
   rows: CepRow[];
 }
 
-/** 链行：count=节点数，图标=各步 filter 色块 */
+/** 链行：节点=各步 filter 色块 + 链内步序号 */
 function chainRow(
   g: FilterGroup,
   chain: SequenceMatchResult['chains'][number],
   filters: Map<string, Filter>,
 ): CepRow {
   return {
-    count: chain.steps.length,
+    count: 0,
     startTs: chain.startTs,
     endTs: chain.endTs,
     kind: 'chain',
     chainIndex: chain.chainIndex,
-    nodes: chain.steps.map((stp) => {
+    nodes: chain.steps.map((stp, i) => {
       const f = filters.get(stp.filterId);
       return {
         eventId: stp.event.id,
         color: f?.color ?? g.color,
+        stepNo: i + 1,
         filterLabel: f?.label,
       };
     }),
@@ -79,12 +82,12 @@ function buildBlocks(
       for (const ev of r.uncoveredEvents) {
         anomalyCount++;
         rows.push({
-          count: 1,
+          count: 0,
           startTs: ev.ts,
           endTs: ev.ts,
           kind: 'anomaly',
           chainIndex: 0,
-          nodes: [{ eventId: ev.id, color: 'var(--danger, #e5484d)', anomaly: true }],
+          nodes: [{ eventId: ev.id, color: 'var(--danger, #e5484d)', stepNo: 1, anomaly: true }],
         });
       }
     }
@@ -92,18 +95,22 @@ function buildBlocks(
       const from = v.fromEvent as LogEvent;
       const to = v.toEvent as LogEvent;
       rows.push({
-        count: 2,
+        count: 0,
         startTs: Math.min(from.ts, to.ts),
         endTs: Math.max(from.ts, to.ts),
         kind: 'violation',
         chainIndex: 0,
         nodes: [
-          { eventId: from.id, color: 'var(--danger, #e5484d)', violation: true },
-          { eventId: to.id, color: 'var(--danger, #e5484d)', violation: true },
+          { eventId: from.id, color: 'var(--danger, #e5484d)', stepNo: 1, violation: true },
+          { eventId: to.id, color: 'var(--danger, #e5484d)', stepNo: 2, violation: true },
         ],
       });
     }
     rows.sort((a, b) => a.startTs - b.startTs || a.chainIndex - b.chainIndex);
+    // 行序号：块内按 startTime 排序后 1-based
+    rows.forEach((row, i) => {
+      row.count = i + 1;
+    });
     out.push({
       groupId: g.id,
       label: g.label,
@@ -117,7 +124,7 @@ function buildBlocks(
 }
 
 function rowTitle(row: CepRow): string {
-  if (row.kind === 'chain') return `链 ${row.chainIndex} · ${row.count} 节点`;
+  if (row.kind === 'chain') return `链 ${row.chainIndex} · ${row.nodes.length} 节点`;
   if (row.kind === 'violation') return `NOT 违规 · A 窗口内出现禁止事件`;
   return `异常 · 未被任何链覆盖`;
 }
@@ -178,7 +185,9 @@ export function CepTimelinePanel() {
                         style={{ background: n.color }}
                         title={`${n.filterLabel ? n.filterLabel + ' · ' : ''}${n.anomaly ? '异常' : n.violation ? 'NOT 违规' : '点击跳转'}（事件 #${n.eventId}）`}
                         onClick={() => focusEvent(n.eventId)}
-                      />
+                      >
+                        {n.stepNo}
+                      </button>
                     ))}
                   </span>
                 </div>
