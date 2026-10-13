@@ -3,7 +3,7 @@
   display: flex;
   flex-direction: column;
   flex: 0 0 auto;
-  width: 236px;
+  width: 258px;
   min-height: 0;
   border-right: 1px solid var(--border);
   background: var(--bg);
@@ -85,63 +85,75 @@
   font-size: 11px;
 }
 
-/* 时间行：独立时间纵轴（仅由本组 CEP 事件时间戳决定） */
-.tsRow {
+/* 行：count | startTime ~ endTime | 节点图标组（按 startTime 升序） */
+.row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 6px;
-  padding: 1px 8px 1px 14px;
-  font-size: 11px;
-  line-height: 20px;
+  padding: 2px 8px 2px 11px;
+  font-size: 10px;
+  line-height: 18px;
 }
 
-.tsRow:hover {
+.row:hover {
   background: var(--bg-elevated);
 }
 
-.tsLabel {
-  flex: 0 0 86px;
+/* 异常/违规行：左侧计数与时间标红 */
+.rowAnomaly .count,
+.rowAnomaly .timeRange {
+  color: var(--danger, #e5484d);
+}
+
+/* 左侧 count 徽章 */
+.count {
+  flex: 0 0 18px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.timeRange {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.marks {
+/* 右侧节点图标：每个节点一个（filter 色） */
+.nodes {
   display: flex;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
   gap: 2px;
-  min-width: 0;
 }
 
-/* 链标记：分组色底 + 链号 */
-.mark {
+.node {
   flex: 0 0 auto;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 3px;
+  width: 11px;
+  height: 11px;
+  padding: 0;
   border: none;
-  border-radius: 4px;
-  color: #fff;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 18px;
-  text-align: center;
+  border-radius: 3px;
   cursor: pointer;
   opacity: 0.85;
   transition: opacity 0.1s, box-shadow 0.1s;
 }
 
-.mark:hover {
+.node:hover {
   opacity: 1;
 }
 
-/* 异常 / 违规标记：红底 */
-.markAnomaly {
-  background: var(--danger, #e5484d);
-}
-
-.markSelected {
+/* 选中事件的节点：accent 描边 */
+.nodeSelected {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
   opacity: 1;
 }

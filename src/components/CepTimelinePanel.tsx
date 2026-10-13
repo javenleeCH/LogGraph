@@ -1,117 +1,109 @@
 import { useMemo } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatTime } from '../utils/timeFormat';
-import type { FilterGroup, SequenceMatchResult } from '../types';
+import type { Filter, FilterGroup, LogEvent, SequenceMatchResult } from '../types';
 import styles from './CepTimelinePanel.module.css';
 
-/** 单个 CEP 标记（链上一步 / 异常 / NOT 违规） */
-interface CepMark {
+/** 行内单个节点图标（链上一步 / 异常 / 违规事件） */
+interface CepNode {
   eventId: number;
-  ts: number;
-  /** 所属链号；异常事件为 0 */
-  chainIndex: number;
+  /** 图标色：链节点=来源 filter 色；异常/违规=红 */
   color: string;
-  anomaly: boolean;
-  /** NOT 边违规（A 的窗口内出现了禁止的 B） */
-  violation?: boolean;
-  /** 来源 filter 名（悬浮提示） */
+  /** 悬浮提示：来源 filter 名 */
   filterLabel?: string;
+  anomaly?: boolean;
+  violation?: boolean;
 }
 
-/** 一个 CEP 规则分组的独立时间轴块 */
+/** CEP 面板一行：一条匹配链 / 一个异常事件 / 一对 NOT 违规 */
+interface CepRow {
+  /** 左侧计数：链=节点数；异常=1；违规=2 */
+  count: number;
+  startTs: number;
+  endTs: number;
+  /** 行类型（悬浮提示与样式） */
+  kind: 'chain' | 'anomaly' | 'violation';
+  /** 链号（链行标识；异常/违规为 0） */
+  chainIndex: number;
+  /** 右侧节点图标：有多少节点就有多少个 */
+  nodes: CepNode[];
+}
+
+/** 一个 CEP 规则分组的块 */
 interface CepBlock {
   groupId: string;
   label: string;
   color: string;
   chainCount: number;
   anomalyCount: number;
-  /** 该组 CEP 事件按去重时间戳升序的行 */
-  rows: { ts: number; marks: CepMark[] }[];
+  /** 行按 startTs 升序 */
+  rows: CepRow[];
 }
 
-/** 链上一步 / 异常事件 → 标记（同事件只记首次；违规覆盖为异常标记） */
-function collectMarks(
-  g: Pick<FilterGroup, 'color' | 'sequence'>,
-  r: SequenceMatchResult,
-  filterLabels: Map<string, string>,
-): { markOfEvent: Map<number, CepMark>; anomalyCount: number } {
-  const markOfEvent = new Map<number, CepMark>();
-  for (const ch of r.chains) {
-    for (const stp of ch.steps) {
-      if (!markOfEvent.has(stp.event.id)) {
-        markOfEvent.set(stp.event.id, {
-          eventId: stp.event.id,
-          ts: stp.event.ts,
-          chainIndex: ch.chainIndex,
-          color: g.color,
-          anomaly: false,
-          filterLabel: filterLabels.get(stp.filterId),
-        });
-      }
-    }
-  }
-  let anomalyCount = 0;
-  if (g.sequence?.anomalyEnabled) {
-    for (const ev of r.uncoveredEvents) {
-      if (markOfEvent.has(ev.id)) continue;
-      anomalyCount++;
-      markOfEvent.set(ev.id, {
-        eventId: ev.id,
-        ts: ev.ts,
-        chainIndex: 0,
-        color: g.color,
-        anomaly: true,
-      });
-    }
-  }
-  // NOT 违规：覆盖为异常标记（保留原链号与来源 filter）
-  for (const v of r.notViolations) {
-    for (const ev of [v.fromEvent, v.toEvent]) {
-      const prev = markOfEvent.get(ev.id);
-      markOfEvent.set(ev.id, {
-        eventId: ev.id,
-        ts: prev?.ts ?? ev.ts,
-        chainIndex: prev?.chainIndex ?? 0,
-        color: g.color,
-        anomaly: true,
-        violation: true,
-        filterLabel: prev?.filterLabel,
-      });
-    }
-  }
-  return { markOfEvent, anomalyCount };
+/** 链行：count=节点数，图标=各步 filter 色块 */
+function chainRow(
+  g: FilterGroup,
+  chain: SequenceMatchResult['chains'][number],
+  filters: Map<string, Filter>,
+): CepRow {
+  return {
+    count: chain.steps.length,
+    startTs: chain.startTs,
+    endTs: chain.endTs,
+    kind: 'chain',
+    chainIndex: chain.chainIndex,
+    nodes: chain.steps.map((stp) => {
+      const f = filters.get(stp.filterId);
+      return {
+        eventId: stp.event.id,
+        color: f?.color ?? g.color,
+        filterLabel: f?.label,
+      };
+    }),
+  };
 }
 
-/**
- * 从 sequenceResults 构建每分组的独立时间轴块。
- * 时间行仅由该组 CEP 结果事件的去重时间戳决定——与右侧 filter
- * 视图的时间轴（viewRange / 对齐行）完全无关。
- */
+/** 从 sequenceResults 构建每分组的行列表（按 startTs 升序，时间纵轴与 filter 视图无关） */
 function buildBlocks(
   groups: FilterGroup[],
   sequenceResults: Record<string, SequenceMatchResult>,
-  filterLabels: Map<string, string>,
+  filters: Map<string, Filter>,
 ): CepBlock[] {
   const out: CepBlock[] = [];
   for (const g of groups) {
     const r = sequenceResults[g.id];
     if (!r) continue;
-    const { markOfEvent, anomalyCount } = collectMarks(g, r, filterLabels);
-    const marksByTs = new Map<number, CepMark[]>();
-    for (const mark of markOfEvent.values()) {
-      let arr = marksByTs.get(mark.ts);
-      if (!arr) {
-        arr = [];
-        marksByTs.set(mark.ts, arr);
+    const rows: CepRow[] = r.chains.map((ch) => chainRow(g, ch, filters));
+    let anomalyCount = 0;
+    if (g.sequence?.anomalyEnabled) {
+      for (const ev of r.uncoveredEvents) {
+        anomalyCount++;
+        rows.push({
+          count: 1,
+          startTs: ev.ts,
+          endTs: ev.ts,
+          kind: 'anomaly',
+          chainIndex: 0,
+          nodes: [{ eventId: ev.id, color: 'var(--danger, #e5484d)', anomaly: true }],
+        });
       }
-      arr.push(mark);
     }
-    const rows = Array.from(marksByTs.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([ts, marks]) => ({
-        ts,
-        marks: marks.sort((a, b) => a.chainIndex - b.chainIndex || a.eventId - b.eventId),
-      }));
+    for (const v of r.notViolations) {
+      const from = v.fromEvent as LogEvent;
+      const to = v.toEvent as LogEvent;
+      rows.push({
+        count: 2,
+        startTs: Math.min(from.ts, to.ts),
+        endTs: Math.max(from.ts, to.ts),
+        kind: 'violation',
+        chainIndex: 0,
+        nodes: [
+          { eventId: from.id, color: 'var(--danger, #e5484d)', violation: true },
+          { eventId: to.id, color: 'var(--danger, #e5484d)', violation: true },
+        ],
+      });
+    }
+    rows.sort((a, b) => a.startTs - b.startTs || a.chainIndex - b.chainIndex);
     out.push({
       groupId: g.id,
       label: g.label,
@@ -124,17 +116,23 @@ function buildBlocks(
   return out;
 }
 
-/** CEP 规则筛选结果面板：独立时间纵轴（左区，仅在有结果时显示） */
+function rowTitle(row: CepRow): string {
+  if (row.kind === 'chain') return `链 ${row.chainIndex} · ${row.count} 节点`;
+  if (row.kind === 'violation') return `NOT 违规 · A 窗口内出现禁止事件`;
+  return `异常 · 未被任何链覆盖`;
+}
+
+/** CEP 规则筛选结果面板：每行一条匹配链/异常（独立时间纵轴，仅在有结果时显示） */
 export function CepTimelinePanel() {
   const groups = useLogStore((s) => s.groups);
   const sequenceResults = useLogStore((s) => s.sequenceResults);
   const filters = useLogStore((s) => s.filters);
   const selectedEventId = useLogStore((s) => s.selectedEventId);
-  const selectEvent = useLogStore((s) => s.selectEvent);
+  const focusEvent = useLogStore((s) => s.focusEvent);
 
   const blocks = useMemo(() => {
-    const filterLabels = new Map(filters.map((f) => [f.id, f.label] as const));
-    return buildBlocks(groups, sequenceResults, filterLabels);
+    const filterMap = new Map(filters.map((f) => [f.id, f] as const));
+    return buildBlocks(groups, sequenceResults, filterMap);
   }, [groups, sequenceResults, filters]);
 
   if (blocks.length === 0) return null;
@@ -156,26 +154,31 @@ export function CepTimelinePanel() {
               </span>
             </div>
             {b.rows.length === 0 ? (
-              <div className={styles.blockEmpty}>无匹配事件</div>
+              <div className={styles.blockEmpty}>无匹配结果</div>
             ) : (
-              b.rows.map((row) => (
-                <div key={row.ts} className={styles.tsRow}>
-                  <span className={styles.tsLabel}>{formatTime(row.ts)}</span>
-                  <span className={styles.marks}>
-                    {row.marks.map((m) => (
+              b.rows.map((row, ri) => (
+                <div
+                  key={`${row.startTs}-${ri}`}
+                  className={`${styles.row} ${row.kind !== 'chain' ? styles.rowAnomaly : ''}`}
+                  title={rowTitle(row)}
+                >
+                  <span className={styles.count}>{row.count}</span>
+                  <span className={styles.timeRange}>
+                    {formatTime(row.startTs)}
+                    {row.endTs > row.startTs ? ` ~ ${formatTime(row.endTs)}` : ''}
+                  </span>
+                  <span className={styles.nodes}>
+                    {row.nodes.map((n) => (
                       <button
-                        key={m.eventId}
+                        key={n.eventId}
                         className={[
-                          styles.mark,
-                          m.anomaly ? styles.markAnomaly : '',
-                          m.eventId === selectedEventId ? styles.markSelected : '',
+                          styles.node,
+                          n.eventId === selectedEventId ? styles.nodeSelected : '',
                         ].join(' ')}
-                        style={m.anomaly ? undefined : { background: m.color }}
-                        title={`链 ${m.chainIndex}${m.filterLabel ? ` · ${m.filterLabel}` : ''}${m.anomaly ? ' · 异常' : ''}${m.violation ? ' · NOT 违规' : ''}`}
-                        onClick={() => selectEvent(m.eventId)}
-                      >
-                        {m.violation ? '⃠' : m.anomaly ? '✕' : m.chainIndex}
-                      </button>
+                        style={{ background: n.color }}
+                        title={`${n.filterLabel ? n.filterLabel + ' · ' : ''}${n.anomaly ? '异常' : n.violation ? 'NOT 违规' : '点击跳转'}（事件 #${n.eventId}）`}
+                        onClick={() => focusEvent(n.eventId)}
+                      />
                     ))}
                   </span>
                 </div>
