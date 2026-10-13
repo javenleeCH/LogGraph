@@ -99,11 +99,16 @@ export function resolveChains(edges: SequenceEdge[]): ResolvedChain[] {
   return chains;
 }
 
-/** 在 events（ts 升序）中从 ts>lo 起找第一个未消耗事件的索引（找不到返回 length） */
-function nextUnusedIdx(events: LogEvent[], consumed: Set<number>, lo: number): number {
-  let i = bisectLeft(events, lo);
-  if (i > 0 && events[i - 1].ts > lo) i--;
-  while (i < events.length && (events[i].ts <= lo || consumed.has(events[i].id))) i++;
+/** 事件先后：ts 相同时以全局行号（跨文件物理顺序）定序——
+ *  时间戳精度不足（同毫秒/同秒）时的先后兜底 */
+function evBefore(a: LogEvent, b: LogEvent): boolean {
+  return a.ts < b.ts || (a.ts === b.ts && a.id < b.id);
+}
+
+/** 在 events（ts 升序）中找第一个严格晚于 from（ts, id 复合序）且未消耗的事件索引 */
+function nextUnusedIdx(events: LogEvent[], consumed: Set<number>, from: LogEvent): number {
+  let i = bisectLeft(events, from.ts);
+  while (i < events.length && (!evBefore(from, events[i]) || consumed.has(events[i].id))) i++;
   return i;
 }
 
@@ -128,8 +133,9 @@ function advanceEdge(
   fromEvents: LogEvent[],
   eventsByTarget: Map<string, LogEvent[]>,
   consumed: Set<number>,
-  fromTs: number,
+  from: LogEvent,
 ): AdvanceResult {
+  const fromTs = from.ts;
   const hi = fromTs + edge.maxGapMs;
   const kind = edge.kind ?? 'seq';
   const targets = targetsOf(edge);
@@ -138,9 +144,9 @@ function advanceEdge(
   const idx = new Map<string, number>();
   for (const t of targets) {
     const evs = eventsByTarget.get(t) ?? [];
-    idx.set(t, nextUnusedIdx(evs, consumed, fromTs));
+    idx.set(t, nextUnusedIdx(evs, consumed, from));
   }
-  let iFrom = nextUnusedIdx(fromEvents, consumed, fromTs);
+  let iFrom = nextUnusedIdx(fromEvents, consumed, from);
 
   const isNot = kind === 'not';
   const earliestReady = (): { fid: string; ev: LogEvent } | null => {
@@ -148,11 +154,11 @@ function advanceEdge(
     for (const t of targets) {
       const evs = eventsByTarget.get(t) ?? [];
       let i = idx.get(t) ?? evs.length;
-      while (i < evs.length && (evs[i].ts <= fromTs || consumed.has(evs[i].id))) i++;
+      while (i < evs.length && (!evBefore(from, evs[i]) || consumed.has(evs[i].id))) i++;
       idx.set(t, i);
       if (i < evs.length) {
         const ev = evs[i];
-        if (!best || ev.ts < best.ev.ts || (ev.ts === best.ev.ts && t < best.fid)) {
+        if (!best || evBefore(ev, best.ev)) {
           best = { fid: t, ev };
         }
       }
@@ -166,7 +172,7 @@ function advanceEdge(
       const fromEv = iFrom < fromEvents.length ? fromEvents[iFrom] : null;
       const ready = earliestReady();
       // 目标事件超出窗口或不存在 → 检查是否因另一 A 先到而提前结束
-      if (ready && ready.ev.ts <= hi && (!fromEv || ready.ev.ts < fromEv.ts)) {
+      if (ready && ready.ev.ts <= hi && (!fromEv || evBefore(ready.ev, fromEv))) {
         return { violation: true, target: ready.ev };
       }
       // 另一 A 先到（或目标超窗）→ 观察期结束，B 未出现 → 通过
@@ -184,7 +190,7 @@ function advanceEdge(
     const readyTs = ready !== null ? ready.ev.ts : Infinity;
 
     if (readyTs > hi && fromTsNext > hi) return null; // 窗口耗尽
-    if (readyTs <= hi && readyTs < fromTsNext && ready !== null) {
+    if (ready !== null && readyTs <= hi && (fromEv === null || evBefore(ready.ev, fromEv))) {
       // 目标先到
       if (kind === 'and') {
         andReady.set(ready.fid, ready.ev);
@@ -194,7 +200,7 @@ function advanceEdge(
           // 全部就绪：返回最早的一个作为 movedTo（其余在链产出时统一消耗）
           let first: LogEvent | null = null;
           for (const ev of andReady.values()) {
-            if (first === null || ev.ts < first.ts) first = ev;
+            if (first === null || evBefore(ev, first)) first = ev;
           }
           return { ok: true, movedTo: first };
         }
@@ -203,7 +209,7 @@ function advanceEdge(
       // seq / or：单就绪即推进
       return { ok: true, movedTo: ready.ev };
     }
-    // 另一 A 实例先到（严格晚于 fromTs，未消耗，且在窗口内）或目标全超窗 → 断裂
+    // 另一 A 实例先到（严格晚于 from，未消耗，且在窗口内）或目标全超窗 → 断裂
     return null;
   }
 }
@@ -293,7 +299,7 @@ function matchBucket(
         fromEvents,
         new Map([[edge.toFilterId, toEvents]]),
         noConsumed,
-        fe.ts,
+        fe,
       );
       if (r !== null && 'violation' in r) {
         violations.push({ edgeId: edge.id, fromEvent: fe, toEvent: r.target });
@@ -333,7 +339,7 @@ function matchBucket(
             fromEvents,
             eventsByTarget,
             consumed,
-            cur.ts,
+            cur,
           );
           const st = edgeStats.get(edge.id);
           if (rOpt !== null && 'ok' in rOpt && rOpt.movedTo) {
@@ -353,7 +359,7 @@ function matchBucket(
           continue;
         }
 
-        const r = advanceEdge(edge, fromEvents, eventsByTarget, consumed, cur.ts);
+        const r = advanceEdge(edge, fromEvents, eventsByTarget, consumed, cur);
         if (r === null) {
           const st = edgeStats.get(edge.id);
           if (st) st.missCount++;
@@ -376,7 +382,7 @@ function matchBucket(
             // 重新收集窗口内各目标最早未消耗事件（与 advanceEdge 一致）
             for (const t of targetsOf(edge)) {
               const evs = eventsByTarget.get(t) ?? [];
-              const i = nextUnusedIdx(evs, consumed, cur.ts);
+              const i = nextUnusedIdx(evs, consumed, cur);
               if (i < evs.length && evs[i].ts <= cur.ts + edge.maxGapMs) {
                 steps.push({ edgeId: edge.id, filterId: t, event: evs[i] });
               }
@@ -396,13 +402,13 @@ function matchBucket(
             if (nc && nc.min > 1) {
               const evs = eventsOf(tFid);
               const collected: LogEvent[] = [];
-              let lastTs = cur.ts;
+              let lastEv = cur;
               for (const ev of evs) {
-                if (ev.ts <= lastTs) continue;
-                if (ev.ts - lastTs > edge.maxGapMs) break;
+                if (!evBefore(lastEv, ev)) continue;
+                if (ev.ts - lastEv.ts > edge.maxGapMs) break;
                 if (consumed.has(ev.id) || ev.id === cur.id) continue;
                 collected.push(ev);
-                lastTs = ev.ts;
+                lastEv = ev;
                 if (collected.length >= nc.max - 1) break; // 含首事件共 max 个
               }
               if (collected.length + 1 < nc.min) {
@@ -526,7 +532,9 @@ export function matchGroup(
   }
 
   // 链按 startTs 排序重编 chainIndex
-  allChains.sort((a, b) => a.startTs - b.startTs || a.endTs - b.endTs);
+  allChains.sort(
+    (a, b) => a.startTs - b.startTs || a.endTs - b.endTs || a.steps[0].event.id - b.steps[0].event.id,
+  );
   allChains.forEach((c, i) => (c.chainIndex = i + 1));
 
   // 未覆盖事件
