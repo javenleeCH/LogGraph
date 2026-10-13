@@ -11,7 +11,7 @@ import {
   loadMultiple,
   type LogFileInfo,
 } from '../io/dirLoader';
-import { ChevronDown, ChevronRight, Folder, FileText } from './Icon';
+import { ChevronDown, ChevronRight, Folder, LogFile } from './Icon';
 import { toast } from '../store/uiStore';
 import * as dbStore from '../io/dbStore';
 import styles from './FileTreePanel.module.css';
@@ -247,7 +247,7 @@ export function FileTreePanel() {
           onChange={() => toggleCheck(node.fullPath ?? path)}
           onClick={(e) => e.stopPropagation()}
         />
-        <span className={styles.icon}><FileText size={14} /></span>
+        <span className={styles.icon}><LogFile size={14} /></span>
         <span className={styles.name}>{node.name}</span>
         <span className={styles.size}>{fmtSize(node.size)}</span>
       </div>

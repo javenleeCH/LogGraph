@@ -26,7 +26,7 @@ import {
   FolderTree,
   Folder,
   FolderOpen,
-  FileText,
+  Funnel,
   NewFile,
   NewFolder,
   Copy,
@@ -344,8 +344,8 @@ function FilterRow({
       }}
       title="拖拽到分组可将其加入该分组"
     >
-      <span className={styles.treeIcon} title="过滤器（文件）">
-        <FileText size={12} />
+      <span className={styles.treeIcon} title="过滤器">
+        <Funnel size={12} />
       </span>
       <span className={styles.rowLabel}>{filter.label}</span>
       <span className={styles.rowCount}>{matchCount}</span>
