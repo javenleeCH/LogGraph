@@ -96,6 +96,46 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  position: relative;
+}
+
+/* 收纳态竖条（左侧栏整体收起后的展开入口） */
+.treeCollapsed {
+  flex: 0 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  border-right: 1px solid var(--border-light);
+  background: var(--bg-panel);
+}
+
+.treeCollapseBtn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.treeCollapseBtn:hover {
+  opacity: 1;
+  color: var(--accent-light);
+}
+
+/* 展开态：收纳按钮悬浮在 treePane 右上角 */
+.treeCollapseFloat {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 5;
 }
 
 /* ---- 竖向分隔条 ---- */

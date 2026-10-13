@@ -25,6 +25,36 @@
   color: var(--text);
 }
 
+/* 收纳态竖条（展开入口） */
+.panelCollapsed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.collapseBtn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.collapseBtn:hover {
+  opacity: 1;
+  color: var(--accent-light);
+}
 .panelCount {
   margin-left: auto;
   color: var(--text-faint);

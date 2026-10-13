@@ -1,10 +1,10 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatTime } from '../utils/timeFormat';
 import type { Filter, FilterGroup, LogEvent, SequenceMatchResult } from '../types';
 import styles from './CepTimelinePanel.module.css';
+import { ChevronLeft, ChevronRight } from './Icon';
 
-/** 行内单个节点图标（链上一步 / 异常 / 违规事件） */
 interface CepNode {
   eventId: number;
   /** 图标色：链节点=来源 filter 色；异常/违规=红 */
@@ -136,6 +136,8 @@ export function CepTimelinePanel() {
   const filters = useLogStore((s) => s.filters);
   const selectedEventId = useLogStore((s) => s.selectedEventId);
   const focusEvent = useLogStore((s) => s.focusEvent);
+  // 面板收纳（收纳后留 24px 竖条作展开入口）
+  const [collapsed, setCollapsed] = useState(false);
 
   const blocks = useMemo(() => {
     const filterMap = new Map(filters.map((f) => [f.id, f] as const));
@@ -144,11 +146,32 @@ export function CepTimelinePanel() {
 
   if (blocks.length === 0) return null;
 
+  if (collapsed) {
+    return (
+      <div className={styles.panelCollapsed}>
+        <button
+          className={styles.collapseBtn}
+          title="展开 CEP 规则面板"
+          onClick={() => setCollapsed(false)}
+        >
+          <ChevronLeft size={14} />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.panel}>
       <div className={styles.panelHeader}>
         <span className={styles.panelTitle}>CEP 规则</span>
         <span className={styles.panelCount}>{blocks.length} 组规则</span>
+        <button
+          className={styles.collapseBtn}
+          title="收纳 CEP 面板"
+          onClick={() => setCollapsed(true)}
+        >
+          <ChevronRight size={12} />
+        </button>
       </div>
       <div className={styles.panelBody}>
         {blocks.map((b) => (

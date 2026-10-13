@@ -4,6 +4,7 @@ import { LogStreamView } from './components/LogStreamView';
 import { TimelineCanvas } from './timeline/TimelineCanvas';
 import { DetailPanel } from './components/DetailPanel';
 import { SidePanel } from './components/SidePanel';
+import { ChevronLeft, ChevronRight } from './components/Icon';
 import { FilterChips } from './components/FilterChips';
 import { GroupEditorPage, FilterDetailModal } from './components/NodeCanvasView';
 import { useLogStore, selectEventCount } from './store/logStore';
@@ -50,6 +51,8 @@ export default function App() {
 
   // 左侧文件树 / 主区域 可拖拽分隔：treeRatio = 文件树占比 [0, 0.4]
   const [treeRatio, setTreeRatio] = useState(0.18);
+  // 左侧栏整体收纳（收纳后留 24px 竖条作展开入口）
+  const [sideCollapsed, setSideCollapsed] = useState(false);
   const treeDragging = useRef(false);
 
   const onTreeSplitMouseDown = useCallback((e: React.MouseEvent) => {
@@ -330,21 +333,39 @@ export default function App() {
       <ParserDriftBanner />
       <Toolbar />
       <div className={styles['main-row']}>
-        {hasContent && (
-          <>
-            <div
-              className={styles.treePane}
-              style={{ flex: `${treeRatio} 1 0` }}
-            >
-              <SidePanel />
+        {hasContent &&
+          (sideCollapsed ? (
+            <div className={styles.treeCollapsed}>
+              <button
+                className={styles.treeCollapseBtn}
+                title="展开左侧栏"
+                onClick={() => setSideCollapsed(false)}
+              >
+                <ChevronRight size={14} />
+              </button>
             </div>
-            <div
-              className={styles['resizer-v']}
-              onMouseDown={onTreeSplitMouseDown}
-              title="拖拽调节左侧栏宽度"
-            />
-          </>
-        )}
+          ) : (
+            <>
+              <div
+                className={styles.treePane}
+                style={{ flex: `${treeRatio} 1 0` }}
+              >
+                <SidePanel />
+                <button
+                  className={styles.treeCollapseBtn + ' ' + styles.treeCollapseFloat}
+                  title="收纳左侧栏"
+                  onClick={() => setSideCollapsed(true)}
+                >
+                  <ChevronLeft size={14} />
+                </button>
+              </div>
+              <div
+                className={styles['resizer-v']}
+                onMouseDown={onTreeSplitMouseDown}
+                title="拖拽调节左侧栏宽度"
+              />
+            </>
+          ))}
         <div
           ref={centerRef}
           className={styles['app-center']}
