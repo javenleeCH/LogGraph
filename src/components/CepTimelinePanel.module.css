@@ -1,0 +1,147 @@
+/* CEP 规则筛选结果面板：左侧独立区，时间纵轴与 filter 视图无关 */
+.panel {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  width: 236px;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.panelHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.panelTitle {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.panelCount {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+/* 滚动区独立于右侧 filter 视图 */
+.panelBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.block {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.blockHeader {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px 4px;
+  border-left: 3px solid transparent;
+  font-size: 12px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
+}
+
+.blockDot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.blockTitle {
+  color: var(--text);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blockStat {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.blockEmpty {
+  padding: 8px 12px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+/* 时间行：独立时间纵轴（仅由本组 CEP 事件时间戳决定） */
+.tsRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 1px 8px 1px 14px;
+  font-size: 11px;
+  line-height: 20px;
+}
+
+.tsRow:hover {
+  background: var(--bg-elevated);
+}
+
+.tsLabel {
+  flex: 0 0 86px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 链标记：分组色底 + 链号 */
+.mark {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 3px;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.1s, box-shadow 0.1s;
+}
+
+.mark:hover {
+  opacity: 1;
+}
+
+/* 异常 / 违规标记：红底 */
+.markAnomaly {
+  background: var(--danger, #e5484d);
+}
+
+.markSelected {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
+  opacity: 1;
+}

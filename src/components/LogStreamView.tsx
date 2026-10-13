@@ -4,11 +4,11 @@ import { bisectLeft } from '../timeline/correlation';
 import { formatTime, formatDuration, chooseTickStep } from '../utils/timeFormat';
 import { levelColor as getLevelColor } from '../constants';
 import { ChevronLeft, ChevronRight, AlignCenter, Columns, Globe } from './Icon';
+import { CepTimelinePanel } from './CepTimelinePanel';
 import { WelcomeState, NoFilterState } from './EmptyState';
 import type { LogEvent, Filter } from '../types';
 import styles from './LogStreamView.module.css';
 import { fetchLinesByIds } from '../io/dbStore';
-
 const CARD_H = 20; // 单个事件卡片高度
 const ROW_PAD = 4; // 行内上下留白
 const TIME_COL_WIDTH = 104; // 左侧时间列宽
@@ -800,6 +800,10 @@ export function LogStreamView() {
         </button>
       </div>
 
+      {/* 主体行：左 CEP 规则结果（独立时间纵轴）+ 右 filter 视图 */}
+      <div className={styles.mainRow}>
+        <CepTimelinePanel />
+        <div className={styles.filterArea}>
       {/* 列头（内层 inner 跟随主体横向滚动，transform 由 ref 同步避免脱轨） */}
       <div className={styles.columnHeader}>
         <div ref={headerInnerRef} className={styles.columnHeaderInner}>
@@ -932,6 +936,8 @@ export function LogStreamView() {
             )}
           </div>
         )}
+      </div>
+        </div>
       </div>
     </div>
   );

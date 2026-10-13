@@ -170,6 +170,21 @@
   min-width: 0;
 }
 
+/* 主体行：左 CEP 结果面板 + 右 filter 视图（各自独立滚动） */
+.mainRow {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.filterArea {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
 /* 主体：纵向滚动 */
 .body {
   flex: 1 1 auto;
