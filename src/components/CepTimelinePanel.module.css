@@ -1,13 +1,35 @@
 /* CEP 规则筛选结果面板：左侧独立区，时间纵轴与 filter 视图无关。
-   固定深色配色（不随主题切换）：浅色主题下与主区形成侧栏对比 */
-.panel {
+   浅色主题下用 slate-100 底与右侧白色 filter 视图区分；
+   深色主题自动切 slate-800（:global 主题选择器覆盖局部变量）。 */
+.panel,
+.panelCollapsed {
+  --cep-bg: #f1f5f9;
+  --cep-bg-hover: #e2e8f0;
+  --cep-border: #cbd5e1;
+  --cep-title: #0f172a;
+  --cep-text: #475569;
+  --cep-faint: #64748b;
+  --cep-btn: #475569;
+  --cep-btn-hover: #0f172a;
   display: flex;
   flex-direction: column;
   flex: 0 0 auto;
   width: 258px;
   min-height: 0;
-  border-right: 1px solid #0f172a;
-  background: #1e293b;
+  border-right: 1px solid var(--cep-border);
+  background: var(--cep-bg);
+}
+
+:global([data-theme='dark']) .panel,
+:global([data-theme='dark']) .panelCollapsed {
+  --cep-bg: #1e293b;
+  --cep-bg-hover: #334155;
+  --cep-border: #0f172a;
+  --cep-title: #f8fafc;
+  --cep-text: #cbd5e1;
+  --cep-faint: #94a3b8;
+  --cep-btn: #cbd5e1;
+  --cep-btn-hover: #ffffff;
 }
 
 .panelHeader {
@@ -17,18 +39,18 @@
   flex: 0 0 auto;
   height: 28px;
   padding: 0 10px;
-  border-bottom: 1px solid #0f172a;
+  border-bottom: 1px solid var(--cep-border);
   font-size: 12px;
 }
 
 .panelTitle {
   font-weight: 600;
-  color: #f8fafc;
+  color: var(--cep-title);
 }
 
 .panelCount {
   margin-left: auto;
-  color: #94a3b8;
+  color: var(--cep-faint);
   font-size: 11px;
 }
 
@@ -41,8 +63,8 @@
   flex: 0 0 24px;
   min-height: 0;
   padding-bottom: 10px;
-  border-right: 1px solid #0f172a;
-  background: #1e293b;
+  border-right: 1px solid var(--cep-border, #cbd5e1);
+  background: var(--cep-bg, #f1f5f9);
 }
 
 /* 底部收纳条 */
@@ -53,7 +75,7 @@
   flex: 0 0 auto;
   height: 26px;
   padding-right: 6px;
-  border-top: 1px solid #0f172a;
+  border-top: 1px solid var(--cep-border);
 }
 
 .collapseBtn {
@@ -66,13 +88,13 @@
   padding: 0 !important;
   border: none !important;
   background: transparent !important;
-  color: #cbd5e1;
+  color: var(--cep-btn);
   cursor: pointer;
 }
 
 .collapseBtn:hover {
-  color: #ffffff;
-  background: #334155 !important;
+  color: var(--cep-btn-hover);
+  background: var(--cep-bg-hover) !important;
 }
 
 /* 滚动区独立于右侧 filter 视图 */
@@ -84,7 +106,7 @@
 }
 
 .block {
-  border-bottom: 1px solid #0f172a;
+  border-bottom: 1px solid var(--cep-border);
   padding-bottom: 4px;
 }
 
@@ -97,7 +119,7 @@
   font-size: 12px;
   position: sticky;
   top: 0;
-  background: #1e293b;
+  background: var(--cep-bg);
   z-index: 1;
 }
 
@@ -109,7 +131,7 @@
 }
 
 .blockTitle {
-  color: #f8fafc;
+  color: var(--cep-title);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -119,13 +141,13 @@
 .blockStat {
   margin-left: auto;
   flex: 0 0 auto;
-  color: #94a3b8;
+  color: var(--cep-faint);
   font-size: 11px;
 }
 
 .blockEmpty {
   padding: 8px 12px;
-  color: #94a3b8;
+  color: var(--cep-faint);
   font-size: 11px;
 }
 
@@ -138,7 +160,7 @@
   line-height: 20px;
 }
 .row:hover {
-  background: #334155;
+  background: var(--cep-bg-hover);
 }
 
 /* 异常/违规行：左侧计数与时间标红 */
@@ -152,8 +174,8 @@
   flex: 0 0 20px;
   height: 18px;
   border-radius: 4px;
-  background: #334155;
-  color: #cbd5e1;
+  background: var(--cep-bg-hover);
+  color: var(--cep-text);
   font-size: 11px;
   font-weight: 600;
   line-height: 18px;
@@ -164,7 +186,7 @@
 .timeRange {
   flex: 1 1 auto;
   min-width: 0;
-  color: #cbd5e1;
+  color: var(--cep-text);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;

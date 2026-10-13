@@ -7,9 +7,26 @@
   backdrop-filter: blur(8px);
 }
 
+/* 顶条固定 Slate 深色（与左侧栏一致）：变量作用域覆盖，
+   子树内 Toolbar 各元素 var() 引用自动取深色值 */
+.toolbar {
+  --bg-panel: #1e293b;
+  --bg: #1e293b;
+  --bg-elevated: #334155;
+  --bg-hover: rgba(148, 163, 184, 0.16);
+  --text: #f8fafc;
+  --text-dim: #cbd5e1;
+  --text-faint: #94a3b8;
+  --border: #0f172a;
+  --border-light: #334155;
+  --border-strong: #475569;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
   gap: 10px;
   padding: 0 14px;
   height: 46px;
