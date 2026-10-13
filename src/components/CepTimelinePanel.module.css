@@ -120,6 +120,9 @@
 }
 
 .node {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
   flex: 0 0 auto;
   width: 15px;
   height: 15px;
