@@ -17,7 +17,8 @@ import type { Filter, FilterGroup } from '../types';
 import {
   ChevronRight,
   ChevronDown,
-  Pencil,
+  Rename,
+  Edit,
   Eye,
   EyeOff,
   X,
@@ -29,7 +30,6 @@ import {
   NewFile,
   NewFolder,
   Copy,
-  Grid,
   Trash,
 } from './Icon';
 import styles from './SidePanel.module.css';
@@ -299,7 +299,7 @@ function GroupRow({
           title="编辑分组（节点与序列编排）"
           onClick={(e) => { e.stopPropagation(); onOpen(); }}
         >
-          <Grid size={12} />
+          <Edit size={12} />
           <span>编辑</span>
         </button>
         <button
@@ -307,7 +307,7 @@ function GroupRow({
           title="重命名"
           onClick={(e) => { e.stopPropagation(); setEditing(true); }}
         >
-          <Pencil size={12} />
+          <Rename size={12} />
         </button>
         <button className={styles.miniBtn} title={hidden ? '显示' : '隐藏'} onClick={onToggleVisible}>
           {hidden ? <EyeOff size={12} /> : <Eye size={12} />}
@@ -351,7 +351,7 @@ function FilterRow({
       <span className={styles.rowCount}>{matchCount}</span>
       <div className={styles.rowActions} onClick={(e) => e.stopPropagation()}>
         <button className={styles.editBtn} title="编辑过滤器" onClick={onEdit}>
-          <Pencil size={12} />
+          <Edit size={12} />
           <span>编辑</span>
         </button>
         <button
