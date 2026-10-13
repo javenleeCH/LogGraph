@@ -327,3 +327,25 @@
 .filterRow:active {
   cursor: grabbing;
 }
+
+/* 「编辑分组」按钮：icon+文字 + 主题色描边，与纯图标灰色按钮（重命名等）明确区分 */
+.editBtn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent) !important;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.editBtn:hover {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  border-color: var(--accent) !important;
+}

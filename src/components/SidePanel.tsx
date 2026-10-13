@@ -28,6 +28,7 @@ import {
   FolderOpen,
   FileText,
   Copy,
+  Grid,
   Trash,
 } from './Icon';
 import styles from './SidePanel.module.css';
@@ -257,7 +258,7 @@ function GroupRow({
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
-      onClick={() => { if (!editing) onOpen(); }}
+      onClick={() => { if (!editing) onToggleExpanded(); }}
     >
       <button
         className={styles.treeToggle}
@@ -288,10 +289,18 @@ function GroupRow({
           }}
         />
       ) : (
-        <span className={styles.rowLabel} title="点击进入画布编辑">{group.label}</span>
+        <span className={styles.rowLabel} title="点击展开/折叠">{group.label}</span>
       )}
       <span className={styles.rowCount}>{group.filterIds.length}</span>
       <div className={styles.rowActions} onClick={(e) => e.stopPropagation()}>
+        <button
+          className={styles.editBtn}
+          title="编辑分组（节点与序列编排）"
+          onClick={(e) => { e.stopPropagation(); onOpen(); }}
+        >
+          <Grid size={12} />
+          <span>编辑</span>
+        </button>
         <button
           className={styles.miniBtn}
           title="重命名"
@@ -332,7 +341,6 @@ function FilterRow({
         e.dataTransfer.setData(FILTER_DRAG_TYPE, filter.id);
         e.dataTransfer.effectAllowed = 'link';
       }}
-      onClick={onEdit}
       title="拖拽到分组可将其加入该分组"
     >
       <span className={styles.treeIcon} title="过滤器（文件）">
@@ -341,6 +349,10 @@ function FilterRow({
       <span className={styles.rowLabel}>{filter.label}</span>
       <span className={styles.rowCount}>{matchCount}</span>
       <div className={styles.rowActions} onClick={(e) => e.stopPropagation()}>
+        <button className={styles.editBtn} title="编辑过滤器" onClick={onEdit}>
+          <Pencil size={12} />
+          <span>编辑</span>
+        </button>
         <button
           className={styles.miniBtn}
           title={`复制过滤器「${filter.label}」（沿用所属分组）`}
