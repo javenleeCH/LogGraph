@@ -6,8 +6,8 @@
   flex: 0 0 auto;
   width: 258px;
   min-height: 0;
-  border-right: 1px solid #171920;
-  background: #23262e;
+  border-right: 1px solid #0f172a;
+  background: #1e293b;
 }
 
 .panelHeader {
@@ -17,18 +17,18 @@
   flex: 0 0 auto;
   height: 28px;
   padding: 0 10px;
-  border-bottom: 1px solid #171920;
+  border-bottom: 1px solid #0f172a;
   font-size: 12px;
 }
 
 .panelTitle {
   font-weight: 600;
-  color: #e8eaf0;
+  color: #f8fafc;
 }
 
 .panelCount {
   margin-left: auto;
-  color: #8b90a0;
+  color: #94a3b8;
   font-size: 11px;
 }
 
@@ -41,8 +41,8 @@
   flex: 0 0 24px;
   min-height: 0;
   padding-bottom: 10px;
-  border-right: 1px solid #171920;
-  background: #23262e;
+  border-right: 1px solid #0f172a;
+  background: #1e293b;
 }
 
 /* 底部收纳条 */
@@ -53,7 +53,7 @@
   flex: 0 0 auto;
   height: 26px;
   padding-right: 6px;
-  border-top: 1px solid #171920;
+  border-top: 1px solid #0f172a;
 }
 
 .collapseBtn {
@@ -66,13 +66,13 @@
   padding: 0 !important;
   border: none !important;
   background: transparent !important;
-  color: #c3c7d4;
+  color: #cbd5e1;
   cursor: pointer;
 }
 
 .collapseBtn:hover {
   color: #ffffff;
-  background: #2c303a !important;
+  background: #334155 !important;
 }
 
 /* 滚动区独立于右侧 filter 视图 */
@@ -84,7 +84,7 @@
 }
 
 .block {
-  border-bottom: 1px solid #171920;
+  border-bottom: 1px solid #0f172a;
   padding-bottom: 4px;
 }
 
@@ -97,7 +97,7 @@
   font-size: 12px;
   position: sticky;
   top: 0;
-  background: #23262e;
+  background: #1e293b;
   z-index: 1;
 }
 
@@ -109,7 +109,7 @@
 }
 
 .blockTitle {
-  color: #e8eaf0;
+  color: #f8fafc;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -119,13 +119,13 @@
 .blockStat {
   margin-left: auto;
   flex: 0 0 auto;
-  color: #8b90a0;
+  color: #94a3b8;
   font-size: 11px;
 }
 
 .blockEmpty {
   padding: 8px 12px;
-  color: #8b90a0;
+  color: #94a3b8;
   font-size: 11px;
 }
 
@@ -138,7 +138,7 @@
   line-height: 20px;
 }
 .row:hover {
-  background: #2c303a;
+  background: #334155;
 }
 
 /* 异常/违规行：左侧计数与时间标红 */
@@ -152,8 +152,8 @@
   flex: 0 0 20px;
   height: 18px;
   border-radius: 4px;
-  background: #2c303a;
-  color: #c3c7d4;
+  background: #334155;
+  color: #cbd5e1;
   font-size: 11px;
   font-weight: 600;
   line-height: 18px;
@@ -164,7 +164,7 @@
 .timeRange {
   flex: 1 1 auto;
   min-width: 0;
-  color: #a8adbd;
+  color: #cbd5e1;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;

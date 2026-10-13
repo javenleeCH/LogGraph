@@ -108,8 +108,8 @@
   justify-content: flex-end;
   min-height: 0;
   padding-bottom: 10px;
-  border-right: 1px solid var(--border-light);
-  background: var(--bg-panel);
+  border-right: 1px solid #0f172a;
+  background: #1e293b;
 }
 
 .treeCollapseBtn {
@@ -122,13 +122,13 @@
   padding: 0 !important;
   border: none !important;
   background: transparent !important;
-  color: var(--text-dim);
+  color: #cbd5e1;
   cursor: pointer;
 }
 
 .treeCollapseBtn:hover {
-  color: var(--accent-light);
-  background: var(--bg-elevated) !important;
+  color: #f8fafc;
+  background: #334155 !important;
 }
 
 /* 展开态：收纳按钮固定在 treePane 底部右侧 */
