@@ -18,16 +18,12 @@
   overflow: hidden;
 }
 
-/* 文件树段固定较小比例，group/filter 段均分剩余空间 */
+/* 文件树段固定较小比例，过滤器树段占剩余空间 */
 .section:first-child {
   flex: 0 0 38%;
   min-height: 80px;
 }
 .section:nth-child(2) {
-  flex: 1 1 auto;
-  min-height: 60px;
-}
-.section:nth-child(3) {
   flex: 1 1 auto;
   min-height: 60px;
 }
@@ -285,4 +281,49 @@
   opacity: 0.45;
   text-align: center;
   color: var(--text-dim);
+}
+
+/* ── 过滤器树 ── */
+
+/* 行首折叠箭头（分组专用） */
+.treeToggle {
+  flex: 0 0 auto;
+  padding: 0;
+  width: 16px;
+  height: 16px;
+  border: none !important;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.treeToggle:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 文件夹/文件 icon */
+.treeIcon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--text-faint);
+}
+
+/* 分组内 filter 缩进（树形层级） */
+.nested {
+  padding-left: 40px;
+}
+
+/* 拖拽悬停的目标分组高亮 */
+.dropTarget {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+}
+
+.filterRow:active {
+  cursor: grabbing;
 }

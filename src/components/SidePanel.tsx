@@ -1,16 +1,19 @@
 /**
- * 左侧栏三段可折叠区块：
+ * 左侧栏两段可折叠区块：
  * - 上：日志文件树（FileTreePanel）
- * - 中：Group 列表（+ 新建按钮，点击卡片 → setActiveGroup）
- * - 下：Filter 列表（+ 新建按钮，点击卡片 → setEditingFilterId）
+ * - 下：过滤器树（分组=文件夹，filter=文件；顶层 filter 平铺在分组之后）
  *
- * 每段 header 可点击折叠，折叠后只显示标题条；展开时内容区滚动。
+ * 过滤器树：
+ * - Group 行：文件夹 icon + 折叠箭头，展开列出组内 filter（缩进）
+ * - Filter 行：文档 icon，支持复制（落回源分组）、拖拽进分组（HTML5 DnD）
+ * - 一个 filter 可属于多个分组（多对多），在每个分组下各出现一次
+ * - 「顶层」= 不属于任何分组的 filter
  */
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FileTreePanel } from './FileTreePanel';
 import { removeFilterWithUndo, removeGroupWithUndo } from '../store/undoable';
-import type { FilterGroup } from '../types';
+import type { Filter, FilterGroup } from '../types';
 import {
   ChevronRight,
   ChevronDown,
@@ -19,14 +22,20 @@ import {
   Eye,
   EyeOff,
   X,
-  Layers,
   Filter as FilterIcon,
   FolderTree,
+  Folder,
+  FolderOpen,
+  FileText,
+  Copy,
   Trash,
 } from './Icon';
 import styles from './SidePanel.module.css';
 
-type SectionKey = 'files' | 'groups' | 'filters';
+type SectionKey = 'files' | 'filters';
+
+/** 拖拽 filter 用的 dataTransfer MIME 键 */
+const FILTER_DRAG_TYPE = 'application/x-loggraph-filter';
 
 export function SidePanel() {
   const filters = useLogStore((s) => s.filters);
@@ -34,25 +43,59 @@ export function SidePanel() {
   const matches = useLogStore((s) => s.matches);
   const addGroup = useLogStore((s) => s.addGroup);
   const addFilter = useLogStore((s) => s.addFilter);
+  const addFilterToGroup = useLogStore((s) => s.addFilterToGroup);
   const setActiveGroup = useLogStore((s) => s.setActiveGroup);
   const setEditingFilterId = useLogStore((s) => s.setEditingFilterId);
   const updateGroup = useLogStore((s) => s.updateGroup);
   const toggleGroupVisible = useLogStore((s) => s.toggleGroupVisible);
-  const toggleGroupCollapsed = useLogStore((s) => s.toggleGroupCollapsed);
 
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     files: false,
-    groups: false,
     filters: false,
   });
+  /** 树形分组展开态（与时间线的 group.collapsed 轨道折叠语义无关，仅本栏） */
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  /** 拖拽悬停的目标分组 id（高亮用） */
+  const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
 
   const toggle = (k: SectionKey) =>
     setCollapsed((prev) => ({ ...prev, [k]: !prev[k] }));
+
+  const toggleExpanded = (gid: string) =>
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(gid)) next.delete(gid);
+      else next.add(gid);
+      return next;
+    });
 
   const matchCount = useMemo(
     () => (fid: string) => matches.find((m) => m.filterId === fid)?.events.length ?? 0,
     [matches],
   );
+
+  /** 分组展开/新建时默认全展开 */
+  useEffect(() => {
+    setExpandedGroups((prev) => {
+      const next = new Set(groups.map((g) => g.id));
+      if (next.size === prev.size) return prev;
+      return next;
+    });
+  }, [groups]);
+
+  /** 顶层 filter：不属于任何分组 */
+  const topLevelFilters = useMemo(
+    () => filters.filter((f) => !groups.some((g) => g.filterIds.includes(f.id))),
+    [filters, groups],
+  );
+
+  const dropOnGroup = (e: React.DragEvent, gid: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverGroup(null);
+    const fid = e.dataTransfer.getData(FILTER_DRAG_TYPE);
+    if (fid) addFilterToGroup(fid, gid);
+  };
 
   return (
     <div className={styles.sidePanel}>
@@ -72,57 +115,26 @@ export function SidePanel() {
         )}
       </section>
 
-      {/* ── 中：Group 列表 ── */}
-      <section className={`${styles.section} ${collapsed.groups ? styles.collapsed : ''}`}>
-        <header className={styles.sectionHeader} onClick={() => toggle('groups')}>
-          <span className={styles.caret}>
-            {collapsed.groups ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-          </span>
-          <Layers size={13} className={styles.sectionIcon} />
-          <span className={styles.sectionTitle}>分组 Groups</span>
-          <span className={styles.sectionCount}>{groups.length}</span>
-          <div className={styles.spacer} />
-          <button
-            className={styles.addBtn}
-            title="新建分组"
-            onClick={(e) => {
-              e.stopPropagation();
-              addGroup({});
-            }}
-          >
-            <Plus size={13} />
-          </button>
-        </header>
-        {!collapsed.groups && (
-          <div className={styles.sectionBody}>
-            {groups.map((g) => (
-              <GroupRow
-                key={g.id}
-                group={g}
-                onOpen={() => setActiveGroup(g.id)}
-                onRename={(label) => updateGroup(g.id, { label })}
-                onRemove={() => removeGroupWithUndo(g.id)}
-                onToggleVisible={() => toggleGroupVisible(g.id)}
-                onToggleCollapsed={() => toggleGroupCollapsed(g.id)}
-              />
-            ))}
-            {groups.length === 0 && (
-              <div className={styles.emptyHint}>暂无分组，点击 ＋ 新建</div>
-            )}
-          </div>
-        )}
-      </section>
-
-      {/* ── 下：Filter 列表 ── */}
+      {/* ── 下：过滤器树（分组=文件夹 + filter=文件） ── */}
       <section className={`${styles.section} ${collapsed.filters ? styles.collapsed : ''}`}>
         <header className={styles.sectionHeader} onClick={() => toggle('filters')}>
           <span className={styles.caret}>
             {collapsed.filters ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
           </span>
           <FilterIcon size={13} className={styles.sectionIcon} />
-          <span className={styles.sectionTitle}>过滤器 Filters</span>
+          <span className={styles.sectionTitle}>过滤器</span>
           <span className={styles.sectionCount}>{filters.length}</span>
           <div className={styles.spacer} />
+          <button
+            className={styles.addBtn}
+            title="新建分组（文件夹）"
+            onClick={(e) => {
+              e.stopPropagation();
+              addGroup({});
+            }}
+          >
+            <Folder size={13} />
+          </button>
           <button
             className={styles.addBtn}
             title="新建过滤器"
@@ -137,44 +149,53 @@ export function SidePanel() {
         </header>
         {!collapsed.filters && (
           <div className={styles.sectionBody}>
-            {filters.map((f) => {
-              const owningGroups = groups.filter((g) => g.filterIds.includes(f.id));
+            {groups.map((g) => {
+              const expanded = expandedGroups.has(g.id);
+              const memberFilters = g.filterIds
+                .map((fid) => filters.find((f) => f.id === fid))
+                .filter((f): f is Filter => !!f);
               return (
-                <div
-                  key={f.id}
-                  className={`${styles.filterRow} ${f.enabled ? '' : styles.dim}`}
-                  style={{ borderLeftColor: f.color }}
-                  onClick={() => setEditingFilterId(f.id)}
-                >
-                  <span className={styles.dot} style={{ background: f.color }} />
-                  <span className={styles.rowLabel}>{f.label}</span>
-                  <span className={styles.rowCount}>{matchCount(f.id)}</span>
-                  <div className={styles.rowTags}>
-                    {owningGroups.length === 0 ? (
-                      <span className={styles.rowTag}>顶层</span>
-                    ) : (
-                      owningGroups.map((g) => (
-                        <span key={g.id} className={styles.rowTag} style={{ borderColor: g.color }}>
-                          {g.label}
-                        </span>
-                      ))
-                    )}
-                  </div>
-                  <button
-                    className={styles.rowDelete}
-                    title={`删除过滤器「${f.label}」（可撤销）`}
-                    aria-label={`删除过滤器 ${f.label}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeFilterWithUndo(f.id);
+                <div key={g.id}>
+                  <GroupRow
+                    group={g}
+                    expanded={expanded}
+                    dropActive={dragOverGroup === g.id}
+                    onToggleExpanded={() => toggleExpanded(g.id)}
+                    onOpen={() => setActiveGroup(g.id)}
+                    onRename={(label) => updateGroup(g.id, { label })}
+                    onRemove={() => removeGroupWithUndo(g.id)}
+                    onToggleVisible={() => toggleGroupVisible(g.id)}
+                    onDragOver={(e) => {
+                      if (!e.dataTransfer.types.includes(FILTER_DRAG_TYPE)) return;
+                      e.preventDefault();
+                      setDragOverGroup(g.id);
                     }}
-                  >
-                    <Trash size={12} />
-                  </button>
+                    onDragLeave={() => setDragOverGroup((cur) => (cur === g.id ? null : cur))}
+                    onDrop={(e) => dropOnGroup(e, g.id)}
+                  />
+                  {expanded &&
+                    memberFilters.map((f) => (
+                      <FilterRow
+                        key={`${g.id}:${f.id}`}
+                        filter={f}
+                        nested
+                        matchCount={matchCount(f.id)}
+                        onEdit={() => setEditingFilterId(f.id)}
+                      />
+                    ))}
                 </div>
               );
             })}
-            {filters.length === 0 && (
+            {/* 顶层 filter（不属于任何分组） */}
+            {topLevelFilters.map((f) => (
+              <FilterRow
+                key={f.id}
+                filter={f}
+                matchCount={matchCount(f.id)}
+                onEdit={() => setEditingFilterId(f.id)}
+              />
+            ))}
+            {groups.length === 0 && filters.length === 0 && (
               <div className={styles.emptyHint}>暂无过滤器，点击 ＋ 新建</div>
             )}
           </div>
@@ -186,18 +207,28 @@ export function SidePanel() {
 
 function GroupRow({
   group,
+  expanded,
+  dropActive,
+  onToggleExpanded,
   onOpen,
   onRename,
   onRemove,
   onToggleVisible,
-  onToggleCollapsed,
+  onDragOver,
+  onDragLeave,
+  onDrop,
 }: {
   group: FilterGroup;
+  expanded: boolean;
+  dropActive: boolean;
+  onToggleExpanded: () => void;
   onOpen: () => void;
   onRename: (label: string) => void;
   onRemove: () => void;
   onToggleVisible: () => void;
-  onToggleCollapsed: () => void;
+  onDragOver: (e: React.DragEvent) => void;
+  onDragLeave: () => void;
+  onDrop: (e: React.DragEvent) => void;
 }) {
   const hidden = group.visible === false;
   const [editing, setEditing] = useState(false);
@@ -221,11 +252,26 @@ function GroupRow({
 
   return (
     <div
-      className={`${styles.groupRow} ${hidden ? styles.dim : ''}`}
+      className={`${styles.groupRow} ${hidden ? styles.dim : ''} ${dropActive ? styles.dropTarget : ''}`}
       style={{ borderLeftColor: group.color }}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
       onClick={() => { if (!editing) onOpen(); }}
     >
-      <span className={styles.dot} style={{ background: group.color }} />
+      <button
+        className={styles.treeToggle}
+        title={expanded ? '折叠分组' : '展开分组'}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleExpanded();
+        }}
+      >
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+      </button>
+      <span className={styles.treeIcon} title="分组（文件夹）">
+        {expanded ? <FolderOpen size={13} /> : <Folder size={13} />}
+      </span>
       {editing ? (
         <input
           ref={inputRef}
@@ -256,11 +302,59 @@ function GroupRow({
         <button className={styles.miniBtn} title={hidden ? '显示' : '隐藏'} onClick={onToggleVisible}>
           {hidden ? <EyeOff size={12} /> : <Eye size={12} />}
         </button>
-        <button className={styles.miniBtn} title={group.collapsed ? '展开' : '折叠'} onClick={onToggleCollapsed}>
-          {group.collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-        </button>
         <button className={styles.miniBtn} title="删除分组" onClick={onRemove}>
           <X size={12} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FilterRow({
+  filter,
+  nested,
+  matchCount,
+  onEdit,
+}: {
+  filter: Filter;
+  /** 嵌套在分组下（缩进 + 不再显示分组标签） */
+  nested?: boolean;
+  matchCount: number;
+  onEdit: () => void;
+}) {
+  const duplicateFilter = useLogStore((s) => s.duplicateFilter);
+  return (
+    <div
+      className={`${styles.filterRow} ${nested ? styles.nested : ''} ${filter.enabled ? '' : styles.dim}`}
+      style={{ borderLeftColor: filter.color }}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(FILTER_DRAG_TYPE, filter.id);
+        e.dataTransfer.effectAllowed = 'link';
+      }}
+      onClick={onEdit}
+      title="拖拽到分组可将其加入该分组"
+    >
+      <span className={styles.treeIcon} title="过滤器（文件）">
+        <FileText size={12} />
+      </span>
+      <span className={styles.rowLabel}>{filter.label}</span>
+      <span className={styles.rowCount}>{matchCount}</span>
+      <div className={styles.rowActions} onClick={(e) => e.stopPropagation()}>
+        <button
+          className={styles.miniBtn}
+          title={`复制过滤器「${filter.label}」（沿用所属分组）`}
+          onClick={() => duplicateFilter(filter.id)}
+        >
+          <Copy size={12} />
+        </button>
+        <button
+          className={styles.rowDelete}
+          title={`删除过滤器「${filter.label}」（可撤销）`}
+          aria-label={`删除过滤器 ${filter.label}`}
+          onClick={() => removeFilterWithUndo(filter.id)}
+        >
+          <Trash size={12} />
         </button>
       </div>
     </div>

@@ -286,6 +286,8 @@ interface LogState {
   /** 离开 dbMode（切回普通模式/关闭目录） */
   exitDbMode: () => void;
   addFilter: (partial?: Partial<Filter>) => string;
+  /** 复制过滤器（同 pattern/选项/备注/颜色，沿用所属分组，label 加「副本」后缀） */
+  duplicateFilter: (id: string) => string;
   updateFilter: (id: string, patch: Partial<Filter>) => void;
   removeFilter: (id: string) => void;
   recomputeMatches: () => void;
@@ -545,6 +547,27 @@ export const useLogStore = create<LogState>((set, get) => ({
     get().recomputeMatches();
     schedulePersist(get);
     return id;
+  },
+
+  duplicateFilter: (id) => {
+    const src = get().filters.find((f) => f.id === id);
+    if (!src) return '';
+    const newId = genFilterId();
+    const copy: Filter = {
+      ...src,
+      id: newId,
+      label: `${src.label.replace(/ 副本$/, '')} 副本`,
+    };
+    set({
+      filters: [...get().filters, copy],
+      // 源 filter 所在的分组一并加入副本（文件复制落在同一文件夹）
+      groups: get().groups.map((g) =>
+        g.filterIds.includes(id) ? { ...g, filterIds: [...g.filterIds, newId] } : g,
+      ),
+    });
+    get().recomputeMatches();
+    schedulePersist(get);
+    return newId;
   },
 
   updateFilter: (id, patch) => {
