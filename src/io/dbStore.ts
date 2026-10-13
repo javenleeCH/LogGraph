@@ -6,6 +6,7 @@
  * - 详情/上下文：db_lines_by_ids / db_line（行偏移 seek 直读原文件）
  */
 
+import { splitSubConditions } from '../filters/FilterEngine';
 import { isTauri } from '../lib/tauri';
 import { toast } from '../store/uiStore';
 
@@ -96,28 +97,99 @@ export interface DbFilterHits {
   ts: Float64Array;
 }
 
+/** 多行 filter 子条件的下推 id 分隔符（fid \0 i；db_filter_drop 按 fid 前缀一并清理缓存） */
+const SUB_ID_SEP = '\u0000';
+
+/** 升序行号数组的二分包含判断 */
+function includesLine(arr: Uint32Array, x: number): boolean {
+  let lo = 0;
+  let hi = arr.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const v = arr[mid];
+    if (v === x) return true;
+    if (v < x) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return false;
+}
+
+/** 多行 filter 的子条件命中聚合：正向 sub 行集交集 − 排除 sub 行集并集。
+ *  行号升序保持；ts 取基列表（最短正向 sub）的同行值——同一物理行
+ *  的 ts 由 Rust line_ts_of 解析，各 sub 结果一致。 */
+function aggregateSubHits(pos: DbFilterHits[], neg: DbFilterHits[]): DbFilterHits {
+  const sorted = [...pos].sort((a, b) => a.lines.length - b.lines.length);
+  const base = sorted[0];
+  const lines: number[] = [];
+  const ts: number[] = [];
+  for (let i = 0; i < base.lines.length; i++) {
+    const line = base.lines[i];
+    let ok = true;
+    for (let k = 1; k < sorted.length && ok; k++) {
+      if (!includesLine(sorted[k].lines, line)) ok = false;
+    }
+    for (let k = 0; k < neg.length && ok; k++) {
+      if (includesLine(neg[k].lines, line)) ok = false;
+    }
+    if (!ok) continue;
+    lines.push(line);
+    ts.push(base.ts[i]);
+  }
+  return { lines: new Uint32Array(lines), ts: new Float64Array(ts) };
+}
+
 /**
  * 批量运行过滤器（单遍扫描下推：全部 filter 一次 invoke）。
  * 二进制布局（Rust encode_filter_batch）：
  * `[filterCount u32]` + 每 filter `[idLen u32][id utf8][hitCount u32][pad u32][line u32×n][ts f64×n]`
  * （百万级命中走 JSON 会 100MB+/双端数秒序列化，故走 ArrayBuffer 路径）
+ *
+ * 多行子条件（换行 AND / ! 排除）：拆成 K 个单行 pattern 一起下推——
+ * Rust scan_filters_once 本就单遍多 expr（文件只读一次，K 趟 prefilter），
+ * 扫描层零改动；命中在前端聚合（正向交集 − 排除并集），语义与 JS 引擎一致。
+ * 全部为排除 sub 的 filter 需要全量行基集，dbMode 拿不到，仍置空并提示。
  */
 export async function runDbFiltersBatch(
   queries: DbFilterQuery[],
 ): Promise<Map<string, DbFilterHits>> {
   const out = new Map<string, DbFilterHits>();
   if (queries.length === 0) return out;
-  // 多行子条件（换行 AND / ! 排除）暂只在前端 JS 引擎实现：
-  // dbMode 下 Rust 端尚不支持，先跳过这些 filter（结果为空）并提示。
-  const usable = queries.filter((q) => !q.pattern.includes('\n'));
-  if (usable.length < queries.length) {
-    toast.warn(
-      '多行条件暂不支持目录工作区',
-      '含换行/! 排除的过滤器在目录模式（数据驻留）暂不生效，已置空；Rust 端支持后开放',
-    );
+  const expanded: DbFilterQuery[] = [];
+  const multiPlans: { filterId: string; subs: { subId: string; negate: boolean }[] }[] = [];
+  let allNegate = 0;
+  for (const q of queries) {
+    if (!q.pattern.includes('\n')) {
+      expanded.push(q);
+      continue;
+    }
+    const subs = splitSubConditions(q.pattern);
+    if (subs.length === 0 || subs.every((s) => s.negate)) {
+      // 纯空白（视同空 pattern，无命中）或全排除（无正向锚，缺全行基集）
+      if (subs.length > 0) allNegate++;
+      continue;
+    }
+    const plan = { filterId: q.filterId, subs: [] as { subId: string; negate: boolean }[] };
+    subs.forEach((s, i) => {
+      const subId = `${q.filterId}${SUB_ID_SEP}${i}`;
+      expanded.push({
+        filterId: subId,
+        pattern: s.source,
+        isRegex: q.isRegex,
+        caseSensitive: q.caseSensitive,
+        scope: q.scope,
+      });
+      plan.subs.push({ subId, negate: s.negate });
+    });
+    multiPlans.push(plan);
   }
-  if (usable.length === 0) return out;
-  const buf = await invoke<ArrayBuffer>('db_filters_batch', { queries: usable });
+  if (expanded.length === 0) {
+    if (allNegate > 0) {
+      toast.warn('全排除条件暂不支持目录工作区', '全部为「排除」的过滤器需要全量行基集，目录模式暂不生效，已置空');
+    }
+    return out;
+  }
+  const buf = await invoke<ArrayBuffer>('db_filters_batch', { queries: expanded });
+  const raw = new Map<string, DbFilterHits>();
   const v = new DataView(buf);
   const dec = new TextDecoder();
   const fc = v.getUint32(0, true);
@@ -139,7 +211,29 @@ export async function runDbFiltersBatch(
       ts[k] = v.getFloat64(p + k * 8, true);
     }
     p += n * 8;
-    out.set(id, { lines, ts });
+    raw.set(id, { lines, ts });
+  }
+  // 单行 filter 直通；多行按 sub 聚合
+  for (const q of queries) {
+    if (!q.pattern.includes('\n')) {
+      const h = raw.get(q.filterId);
+      if (h) out.set(q.filterId, h);
+    }
+  }
+  for (const plan of multiPlans) {
+    const pos = plan.subs
+      .filter((s) => !s.negate)
+      .map((s) => raw.get(s.subId))
+      .filter((h): h is DbFilterHits => !!h);
+    if (pos.length === 0) continue;
+    const neg = plan.subs
+      .filter((s) => s.negate)
+      .map((s) => raw.get(s.subId))
+      .filter((h): h is DbFilterHits => !!h);
+    out.set(plan.filterId, aggregateSubHits(pos, neg));
+  }
+  if (allNegate > 0) {
+    toast.warn('全排除条件暂不支持目录工作区', '全部为「排除」的过滤器需要全量行基集，目录模式暂不生效，已置空');
   }
   return out;
 }

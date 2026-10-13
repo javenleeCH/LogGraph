@@ -43,8 +43,9 @@ interface CompiledFilter {
   caseSensitive: boolean;
 }
 
-/** pattern → 子条件文本列表（剥 ! 前缀、去首尾空白、跳过空行） */
-function splitSubConditions(pattern: string): { source: string; negate: boolean }[] {
+/** pattern → 子条件文本列表（剥 ! 前缀、去首尾空白、跳过空行）。
+ *  导出供 dbStore 拆分下推复用（多行 filter 在 dbMode 拆成单行子条件扫描） */
+export function splitSubConditions(pattern: string): { source: string; negate: boolean }[] {
   const out: { source: string; negate: boolean }[] = [];
   for (const rawLine of pattern.split('\n')) {
     const line = rawLine.trim();

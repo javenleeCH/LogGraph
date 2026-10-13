@@ -1042,6 +1042,10 @@ pub async fn db_filter_drop(filter_id: String) -> Result<(), String> {
         let mut fc = db.filters.lock();
         fc.hits.remove(&filter_id);
         fc.fps.remove(&filter_id);
+        // 多行子条件下推的 sub 缓存（fid\u{0}i）一并清理，避免编辑/删除后残留累积
+        let prefix = format!("{filter_id}\u{0}");
+        fc.hits.retain(|k, _| !k.starts_with(&prefix));
+        fc.fps.retain(|k, _| !k.starts_with(&prefix));
         Ok(())
     })
     .await
