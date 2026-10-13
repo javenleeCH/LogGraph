@@ -333,6 +333,7 @@ function FilterRow({
   onEdit: () => void;
 }) {
   const duplicateFilter = useLogStore((s) => s.duplicateFilter);
+  const updateFilter = useLogStore((s) => s.updateFilter);
   return (
     <div
       className={`${styles.filterRow} ${nested ? styles.nested : ''} ${filter.enabled ? '' : styles.dim}`}
@@ -353,6 +354,13 @@ function FilterRow({
         <button className={styles.editBtn} title="编辑过滤器" onClick={onEdit}>
           <Edit size={12} />
           <span>编辑</span>
+        </button>
+        <button
+          className={styles.miniBtn}
+          title={filter.enabled ? '隐藏过滤器（保留配置，不参与匹配）' : '显示过滤器'}
+          onClick={() => updateFilter(filter.id, { enabled: !filter.enabled })}
+        >
+          {filter.enabled ? <Eye size={12} /> : <EyeOff size={12} />}
         </button>
         <button
           className={styles.miniBtn}
