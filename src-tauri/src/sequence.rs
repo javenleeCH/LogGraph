@@ -220,15 +220,17 @@ fn bisect_left(events: &[SeqEvent], lo: i64) -> usize {
     lo_i
 }
 
-fn next_unused_idx(events: &[SeqEvent], consumed: &HashSet<u32>, lo: i64) -> usize {
-    let mut i = bisect_left(events, lo);
-    if i > 0 && events[i - 1].ts > lo {
-        i -= 1;
-    }
-    while i < events.len() && (events[i].ts <= lo || consumed.contains(&events[i].id)) {
+fn next_unused_idx(events: &[SeqEvent], consumed: &HashSet<u32>, from: &SeqEvent) -> usize {
+    let mut i = bisect_left(events, from.ts);
+    while i < events.len() && (!ev_before(from, &events[i]) || consumed.contains(&events[i].id)) {
         i += 1;
     }
     i
+}
+
+/// 事件先后：ts 相同时以行号（跨文件物理顺序）定序——时间戳精度不足时的先后兜底
+fn ev_before(a: &SeqEvent, b: &SeqEvent) -> bool {
+    a.ts < b.ts || (a.ts == b.ts && a.id < b.id)
 }
 
 /// 事件切片表：filter_id → 借用事件切片（匹配全程零整表拷贝）。
@@ -243,20 +245,20 @@ enum Advance {
     Break,
 }
 
-/// 在窗口内找最早就绪目标（ts 升序，ts 相同按 filterId 字典序）。
-/// 调用前先把各目标流中 <=from_ts 或已消耗的事件跳过，并把指针写回 idx。
+/// 在窗口内找最早就绪目标（ts 升序，ts 相同按行号定先后）。
+/// 调用前先把各目标流中不晚于 from 或已消耗的事件跳过，并把指针写回 idx。
 fn earliest_ready(
     targets: &[String],
     events_by_target: &EventSlices<'_>,
     consumed: &HashSet<u32>,
-    from_ts: i64,
+    from: &SeqEvent,
     idx: &mut HashMap<String, usize>,
 ) -> Option<(String, SeqEvent)> {
     let mut best: Option<(String, SeqEvent)> = None;
     for t in targets {
         let evs = events_by_target.get(t.as_str()).copied().unwrap_or(&[]);
         let mut i = *idx.get(t).unwrap_or(&evs.len());
-        while i < evs.len() && (evs[i].ts <= from_ts || consumed.contains(&evs[i].id)) {
+        while i < evs.len() && (!ev_before(from, &evs[i]) || consumed.contains(&evs[i].id)) {
             i += 1;
         }
         idx.insert(t.clone(), i);
@@ -265,7 +267,7 @@ fn earliest_ready(
             match &best {
                 None => best = Some((t.clone(), ev)),
                 Some(b) => {
-                    if ev.ts < b.1.ts || (ev.ts == b.1.ts && t < &b.0) {
+                    if ev_before(&ev, &b.1) {
                         best = Some((t.clone(), ev));
                     }
                 }
@@ -281,18 +283,18 @@ fn advance_edge(
     from_events: &[SeqEvent],
     events_by_target: &EventSlices<'_>,
     consumed: &HashSet<u32>,
-    from_ts: i64,
+    from: &SeqEvent,
 ) -> Advance {
-    let hi = from_ts + edge.max_gap_ms;
+    let hi = from.ts + edge.max_gap_ms;
     let kind = edge_kind(edge);
     let targets = targets_of(edge);
 
     let mut idx: HashMap<String, usize> = HashMap::new();
     for t in &targets {
         let evs = events_by_target.get(t.as_str()).copied().unwrap_or(&[]);
-        idx.insert(t.clone(), next_unused_idx(evs, consumed, from_ts));
+        idx.insert(t.clone(), next_unused_idx(evs, consumed, from));
     }
-    let i_from = next_unused_idx(from_events, consumed, from_ts);
+    let i_from = next_unused_idx(from_events, consumed, from);
 
     if kind == "not" {
         loop {
@@ -301,9 +303,9 @@ fn advance_edge(
             } else {
                 None
             };
-            let ready = earliest_ready(&targets, events_by_target, consumed, from_ts, &mut idx);
+            let ready = earliest_ready(&targets, events_by_target, consumed, from, &mut idx);
             if let Some(r) = ready {
-                if r.1.ts <= hi && (from_ev.is_none() || r.1.ts < from_ev.unwrap().ts) {
+                if r.1.ts <= hi && (from_ev.is_none() || ev_before(&r.1, from_ev.unwrap())) {
                     return Advance::Violation(r.1);
                 }
             }
@@ -320,36 +322,37 @@ fn advance_edge(
             None
         };
         let from_ts_next = from_ev.map(|e| e.ts).unwrap_or(i64::MAX);
-        let ready = earliest_ready(&targets, events_by_target, consumed, from_ts, &mut idx);
+        let ready = earliest_ready(&targets, events_by_target, consumed, from, &mut idx);
         let ready_ts = ready.as_ref().map(|r| r.1.ts).unwrap_or(i64::MAX);
 
         if ready_ts > hi && from_ts_next > hi {
             return Advance::Break;
         }
-        if ready_ts <= hi && ready_ts < from_ts_next && ready.is_some() {
-            let r = ready.unwrap();
-            if kind == "and" {
-                and_ready.insert(r.0.clone(), r.1.clone());
-                if let Some(slot) = idx.get_mut(&r.0) {
-                    *slot += 1;
-                }
-                if and_ready.len() == target_set.len() {
-                    let mut first: Option<SeqEvent> = None;
-                    for ev in and_ready.values() {
-                        match &first {
-                            None => first = Some(ev.clone()),
-                            Some(f) => {
-                                if ev.ts < f.ts {
-                                    first = Some(ev.clone());
+        if let Some(r) = ready {
+            if r.1.ts <= hi && (from_ev.is_none() || ev_before(&r.1, from_ev.unwrap())) {
+                if kind == "and" {
+                    and_ready.insert(r.0.clone(), r.1.clone());
+                    if let Some(slot) = idx.get_mut(&r.0) {
+                        *slot += 1;
+                    }
+                    if and_ready.len() == target_set.len() {
+                        let mut first: Option<SeqEvent> = None;
+                        for ev in and_ready.values() {
+                            match &first {
+                                None => first = Some(ev.clone()),
+                                Some(f) => {
+                                    if ev_before(ev, f) {
+                                        first = Some(ev.clone());
+                                    }
                                 }
                             }
                         }
+                        return Advance::Ok(first.map(|ev| (ev, None)));
                     }
-                    return Advance::Ok(first.map(|ev| (ev, None)));
+                    continue;
                 }
-                continue;
+                return Advance::Ok(Some((r.1, Some(r.0))));
             }
-            return Advance::Ok(Some((r.1, Some(r.0))));
         }
         return Advance::Break;
     }
@@ -521,7 +524,7 @@ fn match_group(db: &MemDb, spec: &GroupSpec) -> Result<SeqResult, String> {
         let from_events = get_slice(&edge.from_filter_id);
         let no_consumed = HashSet::new();
         for fe in from_events {
-            let r = advance_edge(edge, from_events, &slices, &no_consumed, fe.ts);
+            let r = advance_edge(edge, from_events, &slices, &no_consumed, fe);
             if let Advance::Violation(tgt) = r {
                 violations.push(NotViolation {
                     edge_id: edge.id.clone(),
@@ -564,7 +567,7 @@ fn match_group(db: &MemDb, spec: &GroupSpec) -> Result<SeqResult, String> {
             for edge in chain {
                 let kind = edge_kind(edge);
                 let from_events = get_slice(&edge.from_filter_id);
-                let r = advance_edge(edge, from_events, &slices, &consumed, cur.ts);
+                let r = advance_edge(edge, from_events, &slices, &consumed, &cur);
                 match r {
                     Advance::Break => {
                         if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
@@ -593,7 +596,7 @@ fn match_group(db: &MemDb, spec: &GroupSpec) -> Result<SeqResult, String> {
                             if kind == "and" {
                                 for t in targets_of(edge) {
                                     let evs = get_slice(&t);
-                                    let i = next_unused_idx(evs, &consumed, cur.ts);
+                                    let i = next_unused_idx(evs, &consumed, &cur);
                                     if i < evs.len() && evs[i].ts <= cur.ts + edge.max_gap_ms {
                                         steps.push(Step {
                                             edge_id: Some(edge.id.clone()),
@@ -649,7 +652,7 @@ fn match_group(db: &MemDb, spec: &GroupSpec) -> Result<SeqResult, String> {
     }
     uncovered.sort_by_key(|e| (e.ts, e.id));
 
-    chains.sort_by_key(|c| (c.start_ts, c.end_ts));
+    chains.sort_by_key(|c| (c.start_ts, c.end_ts, c.steps[0].event.id));
     for (i, c) in chains.iter_mut().enumerate() {
         c.chain_index = (i as u32) + 1;
     }

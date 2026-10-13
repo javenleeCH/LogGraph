@@ -28,7 +28,6 @@ import {
   runDbFiltersBatch,
   runDbSequences,
   fetchCorrIds,
-  type DbRunSeqGroup,
   type DbFilterHits,
 } from '../io/dbStore';
 
@@ -729,38 +728,51 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   /** 重算所有 group 的序列匹配（依赖 matches + groups.sequence） */
   recomputeSequences: () => {
-    const { groups, matches, dbMode } = get();
+    const { groups, matches, dbMode, filters } = get();
     // dbMode：优先下推 Rust（PR-4 CEP 加速路径），不支持的特性整体回退 TS 引擎
     if (dbMode) {
       void (async () => {
-        const seqGroups: DbRunSeqGroup[] = groups
-          .filter((g) => g.sequence && g.sequence.edges.length > 0)
-          .map((g) => ({
-            groupId: g.id,
-            filterIds: g.filterIds,
-            scope: g.sequence!.scope,
-            edges: g.sequence!.edges.map((e) => ({
-              id: e.id,
-              fromFilterId: e.fromFilterId,
-              toFilterId: e.toFilterId,
-              toFilterIds: e.toFilterIds,
-              kind: e.kind,
-              maxGapMs: e.maxGapMs,
-              periodMs: e.periodMs,
-            })),
-            nodeConditions: g.sequence!.nodeConditions,
-            nodeCounts: g.sequence!.nodeCounts,
-          }));
-        let results: Record<string, SequenceMatchResult>;
-        try {
-          const resp = await runDbSequences(seqGroups);
-          if (resp.fallback) {
-            results = runSequenceMatching(groups, matches);
-          } else {
-            results = resp.results as Record<string, SequenceMatchResult>;
+        // 多行 filter 的命中聚合只存在于前端（Rust 缓存仅有 fid\0i 子条件条目），
+        // 含多行 filter 的 group 整组用 TS 引擎跑，其余组下推
+        const seqGroups = groups.filter((g) => g.sequence && g.sequence.edges.length > 0);
+        const tsGroups = seqGroups.filter((g) =>
+          g.filterIds.some((fid) =>
+            (filters.find((f) => f.id === fid)?.pattern ?? '').includes('\n'),
+          ),
+        );
+        const rustGroups = seqGroups.filter((g) => !tsGroups.includes(g));
+        let results: Record<string, SequenceMatchResult> = {};
+        if (rustGroups.length > 0) {
+          try {
+            const resp = await runDbSequences(
+              rustGroups.map((g) => ({
+                groupId: g.id,
+                filterIds: g.filterIds,
+                scope: g.sequence!.scope,
+                edges: g.sequence!.edges.map((e) => ({
+                  id: e.id,
+                  fromFilterId: e.fromFilterId,
+                  toFilterId: e.toFilterId,
+                  toFilterIds: e.toFilterIds,
+                  kind: e.kind,
+                  maxGapMs: e.maxGapMs,
+                  periodMs: e.periodMs,
+                })),
+                nodeConditions: g.sequence!.nodeConditions,
+                nodeCounts: g.sequence!.nodeCounts,
+              })),
+            );
+            if (resp.fallback) {
+              results = runSequenceMatching(rustGroups, matches);
+            } else {
+              results = resp.results as Record<string, SequenceMatchResult>;
+            }
+          } catch {
+            results = runSequenceMatching(rustGroups, matches);
           }
-        } catch {
-          results = runSequenceMatching(groups, matches);
+        }
+        if (tsGroups.length > 0) {
+          Object.assign(results, runSequenceMatching(tsGroups, matches));
         }
         set({ sequenceResults: results });
         get().recomputeCorrelations();
@@ -1166,17 +1178,33 @@ export const useLogStore = create<LogState>((set, get) => ({
 
     if (s.dbMode) {
       // v3：关联窗口下推 SQL（line_ts 覆盖索引范围扫 × filter_hits 点查），
-      // 替代 JS 全量扫 matches（每次视图变化 O(总命中数)）
+      // 替代 JS 全量扫 matches（每次视图变化 O(总命中数)）。
+      // 多行 filter 的命中聚合只在前端（Rust 缓存无原 fid 条目）→ 下推集合之外前端补
       const seq = ++corrSeq; // 视图快速变化时丢弃过期响应
-      void fetchCorrIds(filterIds, centerTs - half, centerTs + half)
-        .then((ids) => {
-          if (seq !== corrSeq) return;
-          set({ correlatedEventIds: new Set(ids) });
-        })
-        .catch(() => {
-          if (seq !== corrSeq) return;
-          set({ correlatedEventIds: new Set() });
-        });
+      const multiFids = new Set(
+        s.filters.filter((f) => f.pattern.includes('\n')).map((f) => f.id),
+      );
+      const pushIds = filterIds.filter((fid) => !multiFids.has(fid));
+      const lo = centerTs - half;
+      const hi = centerTs + half;
+      const localIds: number[] = [];
+      for (const m of matches) {
+        if (!multiFids.has(m.filterId)) continue;
+        for (const ev of m.events) {
+          if (ev.ts >= lo && ev.ts <= hi) localIds.push(ev.id);
+        }
+      }
+      const apply = (ids: number[]) => {
+        if (seq !== corrSeq) return;
+        set({ correlatedEventIds: new Set([...ids, ...localIds]) });
+      };
+      if (pushIds.length === 0) {
+        apply([]);
+        return;
+      }
+      void fetchCorrIds(pushIds, lo, hi)
+        .then(apply)
+        .catch(() => apply([]));
       return;
     }
 
