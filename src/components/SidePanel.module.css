@@ -200,7 +200,8 @@
   gap: 2px;
   margin-left: auto;
 }
-.groupRow:hover .rowActions {
+.groupRow:hover .rowActions,
+.filterRow:hover .rowActions {
   display: flex;
 }
 
