@@ -85,16 +85,14 @@
   font-size: 11px;
 }
 
-/* 行：count | startTime ~ endTime | 节点图标组（按 startTime 升序） */
 .row {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 2px 8px 2px 11px;
-  font-size: 10px;
-  line-height: 18px;
+  font-size: 11px;
+  line-height: 20px;
 }
-
 .row:hover {
   background: var(--bg-elevated);
 }
@@ -107,14 +105,14 @@
 
 /* 左侧 count 徽章 */
 .count {
-  flex: 0 0 18px;
-  height: 16px;
+  flex: 0 0 20px;
+  height: 18px;
   border-radius: 4px;
   background: var(--bg-elevated);
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
-  line-height: 16px;
+  line-height: 18px;
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
@@ -124,15 +122,15 @@
   justify-content: center;
   align-items: center;
   flex: 0 0 auto;
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   padding: 0;
   border: none;
   border-radius: 4px;
   color: #fff;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
-  line-height: 15px;
+  line-height: 16px;
   text-align: center;
   text-shadow: 0 0 2px rgba(0, 0, 0, 0.45);
   cursor: pointer;
