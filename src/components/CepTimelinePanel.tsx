@@ -154,7 +154,7 @@ export function CepTimelinePanel() {
           title="展开 CEP 规则面板"
           onClick={() => setCollapsed(false)}
         >
-          <ChevronLeft size={14} />
+          <ChevronRight size={16} strokeWidth={2.5} />
         </button>
       </div>
     );
@@ -165,13 +165,6 @@ export function CepTimelinePanel() {
       <div className={styles.panelHeader}>
         <span className={styles.panelTitle}>CEP 规则</span>
         <span className={styles.panelCount}>{blocks.length} 组规则</span>
-        <button
-          className={styles.collapseBtn}
-          title="收纳 CEP 面板"
-          onClick={() => setCollapsed(true)}
-        >
-          <ChevronRight size={12} />
-        </button>
       </div>
       <div className={styles.panelBody}>
         {blocks.map((b) => (
@@ -218,6 +211,15 @@ export function CepTimelinePanel() {
             )}
           </div>
         ))}
+      </div>
+      <div className={styles.panelFooter}>
+        <button
+          className={styles.collapseBtn}
+          title="收纳 CEP 面板"
+          onClick={() => setCollapsed(true)}
+        >
+          <ChevronLeft size={16} strokeWidth={2.5} />
+        </button>
       </div>
     </div>
   );

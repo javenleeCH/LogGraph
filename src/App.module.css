@@ -99,13 +99,15 @@
   position: relative;
 }
 
-/* 收纳态竖条（左侧栏整体收起后的展开入口） */
+/* 收纳态竖条（左侧栏整体收起后的展开入口，按钮在底部） */
 .treeCollapsed {
   flex: 0 0 24px;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
   min-height: 0;
+  padding-bottom: 10px;
   border-right: 1px solid var(--border-light);
   background: var(--bg-panel);
 }
@@ -115,26 +117,25 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   padding: 0 !important;
   border: none !important;
   background: transparent !important;
   color: var(--text-dim);
   cursor: pointer;
-  opacity: 0.6;
 }
 
 .treeCollapseBtn:hover {
-  opacity: 1;
   color: var(--accent-light);
+  background: var(--bg-elevated) !important;
 }
 
-/* 展开态：收纳按钮悬浮在 treePane 右上角 */
+/* 展开态：收纳按钮固定在 treePane 底部右侧 */
 .treeCollapseFloat {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  bottom: 6px;
+  right: 6px;
   z-index: 5;
 }
 

@@ -341,7 +341,7 @@ export default function App() {
                 title="展开左侧栏"
                 onClick={() => setSideCollapsed(false)}
               >
-                <ChevronRight size={14} />
+                <ChevronRight size={16} strokeWidth={2.5} />
               </button>
             </div>
           ) : (
@@ -356,7 +356,7 @@ export default function App() {
                   title="收纳左侧栏"
                   onClick={() => setSideCollapsed(true)}
                 >
-                  <ChevronLeft size={14} />
+                  <ChevronLeft size={16} strokeWidth={2.5} />
                 </button>
               </div>
               <div
