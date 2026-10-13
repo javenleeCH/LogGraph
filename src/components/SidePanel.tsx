@@ -17,7 +17,6 @@ import type { Filter, FilterGroup } from '../types';
 import {
   ChevronRight,
   ChevronDown,
-  Plus,
   Pencil,
   Eye,
   EyeOff,
@@ -27,6 +26,8 @@ import {
   Folder,
   FolderOpen,
   FileText,
+  NewFile,
+  NewFolder,
   Copy,
   Grid,
   Trash,
@@ -134,7 +135,7 @@ export function SidePanel() {
               addGroup({});
             }}
           >
-            <Folder size={13} />
+            <NewFolder size={14} />
           </button>
           <button
             className={styles.addBtn}
@@ -145,7 +146,7 @@ export function SidePanel() {
               setEditingFilterId(id);
             }}
           >
-            <Plus size={13} />
+            <NewFile size={14} />
           </button>
         </header>
         {!collapsed.filters && (
