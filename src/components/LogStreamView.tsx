@@ -260,8 +260,6 @@ export function LogStreamView() {
   const setHovered = useLogStore((s) => s.setHovered);
   const resetView = useLogStore((s) => s.resetView);
   const focusEvent = useLogStore((s) => s.focusEvent);
-  // 全量 filter 索引（序列框前后节点 label 查找，含被隐藏的 filter）
-  const filtersById = useMemo(() => new Map(filters.map((x) => [x.id, x])), [filters]);
   // 选中事件的时间戳（列头序号二分定位用；dbMode 走行号命中表）
   const selTs = useMemo(() => {
     if (selectedEventId === null) return null;
@@ -853,8 +851,6 @@ export function LogStreamView() {
                   events={visibleMatches[li]?.events ?? []}
                   pos={lanePosOf(visibleMatches[li]?.events ?? [], selectedEventId, selTs)}
                   onNav={focusEvent}
-                  group={seg.kind === 'group' ? seg.group! : null}
-                  filtersById={filtersById}
                 />
               ),
               true,

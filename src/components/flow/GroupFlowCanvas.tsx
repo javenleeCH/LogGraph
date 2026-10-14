@@ -418,7 +418,7 @@ function EdgeEditModalLazy(props: {
 }
 
 /** 节点编辑弹窗：循环次数 + 条件表达式（EPL A{n,m} 与事件内部条件） */
-export function NodeEditModal(props: {
+function NodeEditModal(props: {
   group: FilterGroup;
   filterId: string;
   onClose: () => void;

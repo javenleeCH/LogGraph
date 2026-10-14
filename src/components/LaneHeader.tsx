@@ -1,20 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { useLogStore } from '../store/logStore';
-import type { Filter, FilterGroup, LogEvent } from '../types';
-import { NodeEditModal } from './flow/GroupFlowCanvas';
+import type { Filter, LogEvent } from '../types';
 import { ChevronDown, ChevronUp } from './Icon';
 import styles from './LogStreamView.module.css';
 
 /**
- * 纵轴视图列头：标题行（色点 + 名称 + 正则）+ 控制行。
+ * 纵轴视图列头：标题行（色点 + 名称 + 正则）+ 控制行（▲/▼ + 序号框）。
  *
- * 控制行：
- * - ▲/▼ + 序号框：在该 filter 的匹配事件间跳转（序号可输入直接定位，
- *   1-based，基于全量匹配而非当前视窗；跳转用 focusEvent——事件不在
- *   当前时间窗时自动平移视图，配合主体自动滚动露出卡片）
- * - 序列框：显示该节点在分组序列编排中的链上位置（前驱→[本节点]→后继），
- *   点击弹出节点约束编辑（循环次数 + 条件表达式，与编排器同一弹窗）；
- *   分组未编排序列时显示占位，点击跳转该分组编排。
+ * 序号框在该 filter 的匹配事件间跳转（可输入数字直接定位，1-based，
+ * 基于全量匹配而非当前视窗；跳转用 focusEvent——事件不在当前时间窗时
+ * 自动平移视图，配合主体自动滚动露出卡片）。
  */
 export function LaneHeader(props: {
   filter: Filter;
@@ -24,15 +18,9 @@ export function LaneHeader(props: {
   /** selectedEventId 在 events 中的下标；-1 = 选中事件不属于该列 */
   pos: number;
   onNav: (id: number) => void;
-  /** 该列所属分组（顶层 filter 无分组 → null，序列框不渲染） */
-  group: FilterGroup | null;
-  /** 前驱/后继节点 label 查找（含被隐藏的 filter） */
-  filtersById: Map<string, Filter>;
 }) {
-  const { filter: f, events, pos, onNav, group, filtersById } = props;
-  const setActiveGroup = useLogStore((s) => s.setActiveGroup);
+  const { filter: f, events, pos, onNav } = props;
   const [draft, setDraft] = useState('');
-  const [editingNode, setEditingNode] = useState(false);
   const draftDirty = useRef(false);
 
   // 外部选中变化 → 同步序号草稿（用户正在输入时不打扰）
@@ -59,21 +47,6 @@ export function LaneHeader(props: {
       setDraft(pos >= 0 ? String(pos + 1) : '');
     }
   };
-
-  // 序列链上位置：前驱/后继节点 label（DAG，多路 join '/'；含被隐藏 filter）
-  const seqCtx = (() => {
-    const seq = group?.sequence;
-    if (!group || !seq || seq.edges.length === 0) return null;
-    const preds = seq.edges
-      .filter((e) => (e.toFilterIds ?? [e.toFilterId]).includes(f.id))
-      .map((e) => filtersById.get(e.fromFilterId)?.label ?? '?');
-    const succs = seq.edges
-      .filter((e) => e.fromFilterId === f.id)
-      .flatMap((e) =>
-        (e.toFilterIds ?? [e.toFilterId]).map((id) => filtersById.get(id)?.label ?? '?'),
-      );
-    return { preds: [...new Set(preds)], succs: [...new Set(succs)] };
-  })();
 
   return (
     <div
@@ -120,25 +93,7 @@ export function LaneHeader(props: {
         >
           <ChevronDown size={11} />
         </button>
-        {group && (
-          <button
-            className={`${styles.seqBox} ${seqCtx ? '' : styles.seqBoxEmpty}`}
-            title={
-              seqCtx
-                ? `序列节点 ${f.label}：点击编辑循环次数 / 条件表达式`
-                : '该分组尚未编排序列，点击打开分组编排'
-            }
-            onClick={() => (seqCtx ? setEditingNode(true) : setActiveGroup(group.id))}
-          >
-            {seqCtx
-              ? `${seqCtx.preds.join('/')}→[${f.label}]→${seqCtx.succs.join('/')}`
-              : '⛓ 未编排'}
-          </button>
-        )}
       </div>
-      {editingNode && group && (
-        <NodeEditModal group={group} filterId={f.id} onClose={() => setEditingNode(false)} />
-      )}
     </div>
   );
 }
