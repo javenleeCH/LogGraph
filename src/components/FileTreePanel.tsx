@@ -12,7 +12,7 @@ import {
   tauriPathAsDirectory,
   type LogFileInfo,
 } from '../io/dirLoader';
-import { ChevronDown, ChevronRight, Folder, LogFile } from './Icon';
+import { ChevronDown, ChevronRight, Folder, FolderOpen, LogFile } from './Icon';
 import { toast } from '../store/uiStore';
 import * as dbStore from '../io/dbStore';
 import { loadOpener } from '../lib/tauri';
@@ -85,6 +85,13 @@ export function FileTreePanel() {
   const [progress, setProgress] = useState<string>('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  // Tauri 目录句柄携带绝对路径（浏览器 FSA 句柄无路径 → 按钮不显示）
+  const logsDirPathStr =
+    logsDirHandle && typeof logsDirHandle === 'object' && 'path' in logsDirHandle
+      ? typeof logsDirHandle.path === 'string'
+        ? logsDirHandle.path
+        : null
+      : null;
   const mountedRef = useRef(true);
 
   // 目录变化时枚举
@@ -251,6 +258,17 @@ export function FileTreePanel() {
     }
   }
 
+  /** 目录模式「打开目录」：资源管理器中打开该目录（Tauri opener openPath） */
+  async function openDirInFileManager(dirPath: string) {
+    try {
+      const opener = await loadOpener();
+      await opener.openPath(dirPath);
+    } catch (e) {
+      console.error('打开目录失败', e);
+      toast.error('打开目录失败', (e as Error).message);
+    }
+  }
+
   // 渲染树（递归）
   function renderNode(node: TreeNode, depth: number, parentPath: string): React.ReactNode {
     if (!node.name) {
@@ -331,6 +349,19 @@ export function FileTreePanel() {
           </label>
           <span>|</span>
           <span>{checkedCount}/{files.length}</span>
+          {logsDirPathStr && (
+            <button
+              className={styles.openDirBtn}
+              title={`在资源管理器中打开 ${logsDirPathStr}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                void openDirInFileManager(logsDirPathStr);
+              }}
+            >
+              <FolderOpen size={12} />
+              <span>打开目录</span>
+            </button>
+          )}
         </div>
       )}
 
