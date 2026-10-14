@@ -9,7 +9,16 @@
     "fs:default",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
-    "opener:allow-open-path",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        { "path": "**" },
+        { "path": "$HOME/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOWNLOAD/**" }
+      ]
+    },
     "fs:allow-stat",
     "fs:allow-write-text-file",
     {
