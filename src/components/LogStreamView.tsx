@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { useLogStore } from '../store/logStore';
+import { hitTsByLine, useLogStore } from '../store/logStore';
+import { LaneHeader } from './LaneHeader';
 import { bisectLeft } from '../timeline/correlation';
 import { formatTime, formatDuration, chooseTickStep } from '../utils/timeFormat';
 import { levelColor as getLevelColor } from '../constants';
@@ -19,6 +20,25 @@ const DENSITY_BUCKET_H = 3; // 全局模式密度桶高度（px）
 const DENSITY_CARD_THRESHOLD = 3; // 桶内事件数超过此值则只显示密度、不显示卡片
 const LINE_TEXT_BATCH = 500; // dbMode 行文本分批拉取批量
 const LINE_TEXT_LRU_MAX = 20_000; // dbMode 行文本缓存上限（防长滚动内存膨胀）
+
+/**
+ * 二分定位选中事件在该列（ts 有序）中的下标：先二分 ts，再在同 ts 的
+ * 少量事件内线性比对 id。避免每列 O(N) 全量扫描（lanes × 百万事件不可接受）。
+ */
+function lanePosOf(evs: LogEvent[], id: number | null, ts: number | null): number {
+  if (id === null || ts === null || evs.length === 0) return -1;
+  let lo = 0;
+  let hi = evs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (evs[mid].ts < ts) lo = mid + 1;
+    else hi = mid;
+  }
+  for (let i = lo; i < evs.length && evs[i].ts === ts; i++) {
+    if (evs[i].id === id) return i;
+  }
+  return -1;
+}
 
 /** hex 颜色 -> [r, g, b] */
 function hexToRgb(hex: string): [number, number, number] {
@@ -239,6 +259,17 @@ export function LogStreamView() {
   const selectEvent = useLogStore((s) => s.selectEvent);
   const setHovered = useLogStore((s) => s.setHovered);
   const resetView = useLogStore((s) => s.resetView);
+  const focusEvent = useLogStore((s) => s.focusEvent);
+  // 全量 filter 索引（序列框前后节点 label 查找，含被隐藏的 filter）
+  const filtersById = useMemo(() => new Map(filters.map((x) => [x.id, x])), [filters]);
+  // 选中事件的时间戳（列头序号二分定位用；dbMode 走行号命中表）
+  const selTs = useMemo(() => {
+    if (selectedEventId === null) return null;
+    const s = useLogStore.getState();
+    return s.dbMode
+      ? hitTsByLine(s, selectedEventId)
+      : (s.events.find((e) => e.id === selectedEventId)?.ts ?? null);
+  }, [selectedEventId]);
   // dbMode（SQLite 驻留）：事件只有骨架（raw=''），需要按视口惰性取行文本
   const dbMode = useLogStore((s) => s.dbMode);
 
@@ -815,15 +846,16 @@ export function LogStreamView() {
           {segments.map((seg) =>
             renderSegmentColumns(
               seg,
-              (f, _li, slot) => (
-                <div
-                  className={styles.laneHeader}
-                  style={{ width: colWidths[slot] ?? MIN_LANE_WIDTH, borderLeftColor: f.color }}
-                >
-                  <span className={styles.laneDot} style={{ background: f.color }} />
-                  <span className={styles.laneTitle}>{f.label}</span>
-                  <span className={styles.lanePattern}>{f.pattern || '（空）'}</span>
-                </div>
+              (f, li, slot) => (
+                <LaneHeader
+                  filter={f}
+                  width={colWidths[slot] ?? MIN_LANE_WIDTH}
+                  events={visibleMatches[li]?.events ?? []}
+                  pos={lanePosOf(visibleMatches[li]?.events ?? [], selectedEventId, selTs)}
+                  onNav={focusEvent}
+                  group={seg.kind === 'group' ? seg.group! : null}
+                  filtersById={filtersById}
+                />
               ),
               true,
             ),

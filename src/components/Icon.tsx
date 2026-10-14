@@ -51,6 +51,9 @@ export function Copy({ size, ...p }: IconProps) {
   );
 }
 
+export function ChevronUp({ size, ...p }: IconProps) {
+  return <Svg size={size} {...p}><path d="m6 15 6-6 6 6" /></Svg>;
+}
 export function ChevronDown({ size, ...p }: IconProps) {
   return <Svg size={size} {...p}><path d="m6 9 6 6 6-6" /></Svg>;
 }

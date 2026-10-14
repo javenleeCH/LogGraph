@@ -126,19 +126,124 @@
 
 .laneHeader {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
   flex-grow: 0;
   flex-shrink: 0;
   /* flex-basis 由 inline style 的 width 设定 */
   min-height: 30px;
-  padding: 0 8px;
   border-left: 3px solid #999;
   border-right: 1px solid var(--border);
   overflow: hidden;
   box-sizing: border-box;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent),
     var(--bg-panel);
+}
+
+/* 标题行（原单行内容） */
+.laneTop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 0;
+  min-width: 0;
+}
+
+/* 控制行：事件导航 + 序列节点框 */
+.laneCtrl {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px 4px;
+  min-width: 0;
+}
+
+.navBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+}
+
+.navBtn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.navBtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.navPos {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+  flex: 0 0 auto;
+}
+
+.navInput {
+  width: 30px;
+  height: 16px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: right;
+  padding: 0 3px;
+  box-sizing: border-box;
+}
+
+.navInput:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.navInput:disabled {
+  opacity: 0.35;
+}
+
+.navTotal {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* 序列节点框：链上位置 + 点击快速编辑 */
+.seqBox {
+  margin-left: auto;
+  max-width: calc(100% - 74px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 1px 5px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.seqBox:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.seqBoxEmpty {
+  color: var(--text-faint);
+  border-style: dashed;
 }
 
 .laneDot {
