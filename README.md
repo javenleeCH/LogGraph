@@ -34,6 +34,56 @@
 - **建边手势**：拖拽 = `seq`，`Shift` = AND，`Alt` = OR，`Ctrl/⌘` = OPT，自环 = periodic。
 - 设计文档见 [`plans/pattern-family-spec.md`](plans/pattern-family-spec.md)、[`plans/epl-cep-spec.md`](plans/epl-cep-spec.md)。
 
+#### 节点条件表达式（字段与语法全集）
+
+节点约束弹窗（画布上**双击节点**）的「条件表达式」在 filter 命中集上做二次过滤：filter 是粗筛（正则），表达式是细筛（事件字段级）。语法为 EPL 事件内部条件的子集，零依赖递归下降实现（[`src/sequence/expr.ts`](src/sequence/expr.ts)）。
+
+**字段**（6 个实际字段，8 个可用名；别名等价）：
+
+| 字段 | 别名 | 类型 | 含义 |
+|---|---|---|---|
+| `raw` | — | string | 原始整行（含时间戳 / 级别等前缀） |
+| `msg` | `message` | string | 正文（剥离时间戳与级别后的消息体） |
+| `thread` | — | string | 线程名；未解析出为空串（用 `thread == ''` 判空） |
+| `level` | — | string | 日志级别；未解析出为空串 |
+| `ts` | — | number | 毫秒级 Unix 时间戳 |
+| `sourceFile` | `file` | string | 来源文件名（多文件合并时区分来源） |
+
+**运算符**（优先级从低到高）：
+
+| 运算符 | 语义 |
+|---|---|
+| `\|\|` | 逻辑或（优先级最低） |
+| `&&` | 逻辑与 |
+| `==` / `!=` | 严格相等 / 不等（字符串精确比较，大小写敏感） |
+| `>` `<` `>=` `<=` | 数值比较（两侧 `Number()` 转换，主要用于 `ts`） |
+| `( ... )` | 括号提升优先级 |
+
+**方法调用**（只能挂在字段上，参数必须是一个字符串字面量）：
+
+| 方法 | 语义 |
+|---|---|
+| `field.includes('x')` | 子串包含（`contains` 为其别名，完全等价） |
+| `field.startsWith('x')` | 前缀匹配 |
+| `field.endsWith('x')` | 后缀匹配 |
+
+**字面量**：`'…'` / `"…"` 字符串（支持 `\` 转义）；`123` / `1.5` 数字。
+
+**求值语义**：
+
+- 表达式为真 → 事件参与序列链；为假 → 从该节点的匹配集中剔除。
+- 求值异常（如未知字段）按 **false** 处理——保守策略：条件错 = 不匹配。
+- 表达式非法时编译返回 null → 该节点按「不过滤」处理；弹窗内实时标红并给出错误原因与命中预览。
+
+**示例**：
+
+```
+level == 'E' && msg.includes('IPC timeout')
+thread != 'pool-4' || msg.startsWith('FATAL')
+ts >= 1760000000000 && raw.contains('handshake')
+level == '' || msg.endsWith('!')
+```
+
 ### 引擎 CLI（无数据库）
 
 - **rg 同内核全家桶**：`ignore`（尊重 `.gitignore` / `.ignore` / `.rgignore` / 全局 gitignore / `info/exclude`，默认跳过隐藏文件）+ `grep-searcher`（mmap + SIMD + memchr）+ `grep-regex`，速度与语义对齐命令行 rg。
