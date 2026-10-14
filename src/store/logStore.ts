@@ -5,6 +5,7 @@
 
 import { create } from 'zustand';
 import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, SavedRange, SequenceConfig, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
+import type { FullParseResult } from '../parser/parseBridge';
 import { FilterEngine } from '../filters/FilterEngine';
 import { runSequenceMatching } from '../sequence/SequenceMatcher';
 import {
@@ -125,6 +126,20 @@ const genEdgeId = () => `e${Date.now()}_${edgeSeq++}`;
 
 // 分块过滤任务的取消句柄（连续编辑时取消旧任务，只保留最新）
 let chunkedCancel: (() => void) | null = null;
+
+/** 取 Tauri 绝对路径的目录部分（统一 / 分隔；根目录返回盘符根） */
+function dirOf(p: string): string {
+  const norm = p.replace(/\\/g, '/');
+  const i = norm.lastIndexOf('/');
+  return i < 0 ? '' : norm.slice(0, i);
+}
+
+/** 取路径末段（文件名或目录名） */
+function baseNameOf(p: string): string {
+  const norm = p.replace(/\\/g, '/');
+  const i = norm.lastIndexOf('/');
+  return i < 0 ? norm : norm.slice(i + 1);
+}
 
 // ---- 工作区持久化（目录即工作区，<日志目录>/.logGraph/filters.json） ----
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -340,6 +355,18 @@ interface LogState {
   /** 启动时调用：从 IndexedDB 恢复日志目录句柄 */
   initLogsDir: () => Promise<void>;
 
+  // --- 单文件独立会话（拖入/打开的文件集） ---
+  /** 当前独立会话已载入的文件清单（文件树展示用） */
+  sessionFiles: { name: string; size: number }[];
+  /** 独立会话目录（Tauri 绝对路径；浏览器拖入无路径 → null，永不追加） */
+  sessionDirPath: string | null;
+  /** 载入单个日志文件：与当前会话同目录（Tauri）则追加合并，
+   *  否则新开独立会话（清空上一会话配置）。返回实际采用的方式 */
+  ingestSingleFile: (
+    loaded: { name: string; size: number; path?: string | null },
+    result: FullParseResult,
+  ) => Promise<'appended' | 'replaced' | 'duplicate'>;
+
   // --- 主区域布局 ---
   /** 时间线/详情 横竖排列：vertical=上下，horizontal=左右 */
   splitOrientation: 'vertical' | 'horizontal';
@@ -351,6 +378,8 @@ export const useLogStore = create<LogState>((set, get) => ({
   rawLines: [],
   meta: null,
   dbMode: false,
+  sessionFiles: [],
+  sessionDirPath: null,
 
   filters: [],
   matches: [],
@@ -1469,7 +1498,64 @@ export const useLogStore = create<LogState>((set, get) => ({
       logsDirHandle: null,
       logsDirName: null,
       dbMode: false,
+      sessionFiles: [],
+      sessionDirPath: null,
     });
+  },
+
+  ingestSingleFile: async (loaded, result) => {
+    const state = get();
+    const dirPath = loaded.path ? dirOf(loaded.path) : null;
+    const sameDir =
+      dirPath !== null &&
+      state.sessionDirPath === dirPath &&
+      state.sessionFiles.length > 0;
+    // 同目录同名文件已在会话中 → 拒绝（防重复追加翻倍）
+    if (sameDir && state.sessionFiles.some((f) => f.name === loaded.name)) {
+      return 'duplicate';
+    }
+    if (sameDir) {
+      // 追加：全局行号重编 + sourceFile 标记 + 按 ts 全局排序（与目录合并规则一致）
+      const firstName =
+        state.sessionFiles[0]?.name ?? state.meta?.fileName ?? loaded.name;
+      const baseId = state.rawLines.length;
+      const mergedEvents = [
+        ...state.events.map((e) =>
+          e.sourceFile ? e : { ...e, sourceFile: firstName },
+        ),
+        ...result.events.map((e) => ({
+          ...e,
+          id: baseId + e.id,
+          sourceFile: loaded.name,
+        })),
+      ].sort((a, b) => a.ts - b.ts);
+      const meta = state.meta;
+      get().setLog(mergedEvents, [...state.rawLines, ...result.rawLines], {
+        fileName: `${baseNameOf(state.sessionDirPath ?? loaded.name)} (${state.sessionFiles.length + 1} 文件)`,
+        fileSize: (meta?.fileSize ?? 0) + loaded.size,
+        totalLines: (meta?.totalLines ?? 0) + result.totalLines,
+        skipped: (meta?.skipped ?? 0) + result.skipped,
+        timestampFormatId: meta?.timestampFormatId ?? result.timestampFormatId,
+      });
+      set({
+        sessionFiles: [...state.sessionFiles, { name: loaded.name, size: loaded.size }],
+      });
+      return 'appended';
+    }
+    // 新开独立会话：清上一会话配置后载入
+    await get().startStandaloneSession();
+    get().setLog(result.events, result.rawLines, {
+      fileName: loaded.name,
+      fileSize: loaded.size,
+      totalLines: result.totalLines,
+      skipped: result.skipped,
+      timestampFormatId: result.timestampFormatId,
+    });
+    set({
+      sessionFiles: [{ name: loaded.name, size: loaded.size }],
+      sessionDirPath: dirPath,
+    });
+    return 'replaced';
   },
 
   // ---- 日志目录 ----

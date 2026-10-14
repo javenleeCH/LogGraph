@@ -73,6 +73,7 @@ export function FileTreePanel() {
   const logsDirHandle = useLogStore((s) => s.logsDirHandle);
   const logsDirName = useLogStore((s) => s.logsDirName);
   const meta = useLogStore((s) => s.meta);
+  const sessionFiles = useLogStore((s) => s.sessionFiles);
   const setLog = useLogStore((s) => s.setLog);
 
   const [files, setFiles] = useState<LogFileInfo[]>([]);
@@ -285,20 +286,27 @@ export function FileTreePanel() {
       )}
 
       <div className={styles['fileTree-body']}>
-        {/* 单文件会话：未绑定目录但已载入日志 → 显示当前文件条目 */}
-        {!logsDirHandle && meta && (
-          <div
-            className={styles['tree-item']}
-            title={`共 ${meta.totalLines.toLocaleString()} 行${meta.skipped > 0 ? `，跳过 ${meta.skipped} 行` : ''}`}
-          >
-            <span className={styles.indent} style={{ width: 0 }} />
-            <span className={styles.chevron + ' ' + styles.spacer}>·</span>
-            <span className={styles.icon}><LogFile size={14} /></span>
-            <span className={styles.name}>{meta.fileName}</span>
-            <span className={styles.size}>{fmtSize(meta.fileSize)}</span>
-          </div>
-        )}
-        {files.length === 0 && !loading && !(meta && !logsDirHandle) && (
+        {/* 独立文件会话：未绑定目录但已载入日志 → 显示会话文件清单
+            （同目录追加的文件都在列表中） */}
+        {!logsDirHandle &&
+          sessionFiles.map((f) => (
+            <div
+              key={f.name}
+              className={styles['tree-item']}
+              title={
+                sessionFiles.length > 1 && meta
+                  ? `会话共 ${meta.totalLines.toLocaleString()} 行${meta.skipped > 0 ? `，跳过 ${meta.skipped} 行` : ''}`
+                  : `${f.name} · 共 ${meta?.totalLines.toLocaleString() ?? '?'} 行`
+              }
+            >
+              <span className={styles.indent} style={{ width: 0 }} />
+              <span className={styles.chevron + ' ' + styles.spacer}>·</span>
+              <span className={styles.icon}><LogFile size={14} /></span>
+              <span className={styles.name}>{f.name}</span>
+              <span className={styles.size}>{fmtSize(f.size)}</span>
+            </div>
+          ))}
+        {files.length === 0 && !loading && !(!logsDirHandle && sessionFiles.length > 0) && (
           <div className={styles['fileTree-empty']}>
             {logsDirHandle
               ? '该目录下没有可识别的日志文件（.log/.txt/.out/.csv/.tsv）'

@@ -13,8 +13,8 @@ import {
   loadTauriPaths,
   getDroppedDirectoryEntry,
   getDroppedDirectoryHandle,
-  type LoadedFile,
 } from './io/fileLoader';
+import { ingestLoadedFile } from './io/openLogFlow';
 import {
   listLogFiles,
   loadMultiple,
@@ -24,7 +24,6 @@ import {
 } from './io/dirLoader';
 import { recordOpenProject } from './io/recentProjects';
 import { setupTauriDragDrop, isTauri } from './lib/tauri';
-import { parseLoadedFile } from './parser/parseBridge';
 import { ensureRegexWasm } from './filters/regexWasm';
 import { ParserDriftBanner } from './components/ParserDriftBanner';
 import { ToastHost, BusyIndicator } from './components/ToastHost';
@@ -153,47 +152,6 @@ export default function App() {
     };
   }, []);
 
-  // 解析并载入一段日志文本（浏览器拖拽 / Tauri 原生拖拽共用）
-  // 双通道：Tauri→Rust parse_log（path 直读）；浏览器/invoke 失败→JS 引擎
-  const handleLoaded = useCallback(
-    async (loaded: LoadedFile | null) => {
-      if (!loaded) return;
-      const endBusy = beginBusy(`解析 ${loaded.name}`);
-      try {
-        const result = await parseLoadedFile(loaded);
-        // 外部单文件 = 独立会话：脱离旧目录工作区并清配置（防上一文件残留）
-        await useLogStore.getState().startStandaloneSession();
-        setLog(result.events, result.rawLines, {
-          fileName: loaded.name,
-          fileSize: loaded.size,
-          totalLines: result.totalLines,
-          skipped: result.skipped,
-          timestampFormatId: result.timestampFormatId,
-        });
-        // Tauri 拖拽的文件有绝对路径，计入最近项目（浏览器拖拽 File 无路径）
-        if (loaded.path) {
-          await recordOpenProject({ name: loaded.name, kind: 'file', path: loaded.path });
-        }
-        toast.success(
-          `已载入 ${loaded.name}`,
-          [
-            `${result.events.length.toLocaleString()} 条有效事件`,
-            result.skipped > 0 ? `跳过 ${result.skipped} 行` : '',
-            result.timestampFormatId ? `时间戳格式 ${result.timestampFormatId}` : '',
-          ]
-            .filter(Boolean)
-            .join(' · '),
-        );
-      } catch (err) {
-        console.error(err);
-        toast.error('解析日志失败', (err as Error).message);
-      } finally {
-        endBusy();
-      }
-    },
-    [setLog],
-  );
-
   // 把目录合并结果写入 store（浏览器拖拽目录 / Tauri 拖拽目录共用展示名）
   const applyDirectoryResult = useCallback(
     (result: MultiLoadResult, dirName: string, count: number) => {
@@ -254,7 +212,8 @@ export default function App() {
             await recordOpenProject({ name: dirHandle.name, kind: 'dir', path: paths[0] });
             return;
           }
-          await handleLoaded(await loadTauriPaths(paths));
+          const loaded = await loadTauriPaths(paths);
+          if (loaded) await ingestLoadedFile(loaded);
         } catch (err) {
           console.error(err);
           toast.error('加载失败', (err as Error).message);
@@ -264,7 +223,7 @@ export default function App() {
       cleanup = fn;
     });
     return () => cleanup?.();
-  }, [handleLoaded, handleDirectory]);
+  }, [handleDirectory]);
 
   const onDrop = useCallback(
     async (e: React.DragEvent) => {
@@ -308,9 +267,9 @@ export default function App() {
       // 单文件拖拽
       const loaded = await loadFromDataTransfer(e.dataTransfer);
       if (!loaded) return;
-      await handleLoaded(loaded);
+      await ingestLoadedFile(loaded);
     },
-    [handleLoaded, applyDirectoryResult],
+    [applyDirectoryResult],
   );
 
   const topFlex = 1 - splitRatio;

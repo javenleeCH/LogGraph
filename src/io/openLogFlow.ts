@@ -21,19 +21,16 @@ export async function ingestLoadedFile(loaded: LoadedFile): Promise<void> {
   const endBusy = beginBusy(`解析 ${loaded.name}`);
   try {
     const result = await parseLoadedFile(loaded);
-    // 外部单文件 = 独立会话：脱离旧目录工作区并清配置（防上一文件残留）
-    await useLogStore.getState().startStandaloneSession();
+    // 与当前独立会话同目录（Tauri 路径可比对）→ 追加合并；否则新开独立会话
+    const mode = await useLogStore.getState().ingestSingleFile(loaded, result);
+    if (mode === 'duplicate') {
+      toast.warn(`${loaded.name} 已在当前文件列表中`, '同目录同名文件不会重复加载');
+      return;
+    }
     // Tauri 路径直读的文件计入最近项目（浏览器 File 无路径，不记录）
     if (loaded.path) {
       await recordOpenProject({ name: loaded.name, kind: 'file', path: loaded.path });
     }
-    useLogStore.getState().setLog(result.events, result.rawLines, {
-      fileName: loaded.name,
-      fileSize: loaded.size,
-      totalLines: result.totalLines,
-      skipped: result.skipped,
-      timestampFormatId: result.timestampFormatId,
-    });
     if (result.events.length === 0) {
       toast.warn(
         `${loaded.name} 中没有解析出带时间戳的事件`,
@@ -42,7 +39,7 @@ export async function ingestLoadedFile(loaded: LoadedFile): Promise<void> {
       return;
     }
     toast.success(
-      `已载入 ${loaded.name}`,
+      mode === 'appended' ? `已追加 ${loaded.name}` : `已载入 ${loaded.name}`,
       [
         `${result.events.length.toLocaleString()} 条事件`,
         result.skipped > 0 ? `跳过 ${result.skipped} 行` : '',
