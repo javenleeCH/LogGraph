@@ -41,10 +41,13 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
 
 // ---- 打开 / 关闭 ----
 
-/** 打开目录缓存库（命中则秒开；重建时经 onProgress 报告逐文件进度） */
+/** 打开目录缓存库（重建时经 onProgress 报告逐文件进度）。
+ *  files：相对路径清单（不传=目录全集）；部分勾选 / 排除规则后
+ *  的可见集都传清单——子集建库，不再落回 loadMultiple 慢路径。 */
 export async function dbOpen(
   dir: string,
   onProgress?: (loaded: number, total: number, current: string) => void,
+  files?: string[],
 ): Promise<DbOpenResult | null> {
   if (!isTauri()) return null;
   let unlisten: (() => void) | null = null;
@@ -56,7 +59,7 @@ export async function dbOpen(
         (e) => onProgress(e.payload.loaded, e.payload.total, e.payload.current),
       );
     }
-    const r = await invoke<DbOpenResult>('db_open', { dir });
+    const r = await invoke<DbOpenResult>('db_open', { dir, files: files ?? null });
     if (
       !r ||
       typeof r.totalLines !== 'number' ||

@@ -161,6 +161,7 @@ function buildPersistData(get: () => LogState): PersistedFilters {
     filters: get().filters.map((f) => ({ ...f })),
     groups: get().groups.map((g) => ({ ...g })),
     graphNodes: { ...get().graphNodes },
+    dirExcludePatterns: [...get().dirExcludePatterns],
     savedAt: Date.now(),
   };
 }
@@ -361,6 +362,10 @@ interface LogState {
   setLogsDir: (handle: any, name: string) => void;
   /** 让用户选择日志目录（弹窗授权） */
   chooseLogsDir: () => Promise<void>;
+  /** 目录排除规则（glob；文件树枚举与 dbMode 建库清单都会应用） */
+  dirExcludePatterns: string[];
+  /** 设置排除规则（每条一行；持久化到工作区） */
+  setDirExcludePatterns: (patterns: string[]) => void;
   /** 启动时调用：从 IndexedDB 恢复日志目录句柄 */
   initLogsDir: () => Promise<void>;
 
@@ -420,6 +425,11 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   logsDirHandle: null,
   logsDirName: null,
+  dirExcludePatterns: [],
+  setDirExcludePatterns: (patterns) => {
+    set({ dirExcludePatterns: patterns });
+    schedulePersist(get);
+  },
 
   splitOrientation: 'vertical',
   setSplitOrientation: (o) => set({ splitOrientation: o }),
@@ -1444,6 +1454,9 @@ export const useLogStore = create<LogState>((set, get) => ({
       groups: restoredGroups,
       collapsedGroups: collapsed,
       graphNodes: restoredGraphNodes,
+      dirExcludePatterns: Array.isArray(saved.dirExcludePatterns)
+        ? saved.dirExcludePatterns.filter((p): p is string => typeof p === 'string')
+        : [],
     });
     // 兜底：无坐标的 filter/group 补缺省坐标
     for (const g of restoredGroups) get().ensureNodePos(g.id, 'group');
@@ -1510,8 +1523,8 @@ export const useLogStore = create<LogState>((set, get) => ({
       editingFilterId: null,
       savedRanges: [],
       workspaceDirName: null,
-      logsDirHandle: null,
-      logsDirName: null,
+  logsDirName: null,
+  dirExcludePatterns: [],
       dbMode: false,
       sessionFiles: [],
       sessionDirPath: null,

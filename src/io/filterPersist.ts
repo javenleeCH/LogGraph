@@ -37,6 +37,8 @@ export interface PersistedFilters {
   groups?: FilterGroup[];
   /** 节点画布坐标表（旧文件无此字段=自动生成缺省布局） */
   graphNodes?: Record<string, NodePos>;
+  /** 目录排除规则（glob，旧文件无此字段=无排除） */
+  dirExcludePatterns?: string[];
   savedAt: number;
 }
 

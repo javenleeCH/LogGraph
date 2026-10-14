@@ -12,7 +12,7 @@ import {
   tauriPathAsDirectory,
   type LogFileInfo,
 } from '../io/dirLoader';
-import { ChevronDown, ChevronRight, Folder, FolderOpen, LogFile } from './Icon';
+import { ChevronDown, ChevronRight, Filter, Folder, FolderOpen, LogFile } from './Icon';
 import { toast } from '../store/uiStore';
 import * as dbStore from '../io/dbStore';
 import { loadOpener } from '../lib/tauri';
@@ -75,13 +75,17 @@ function fmtSize(bytes: number): string {
 export function FileTreePanel() {
   const logsDirHandle = useLogStore((s) => s.logsDirHandle);
   const logsDirName = useLogStore((s) => s.logsDirName);
-  const sessionFiles = useLogStore((s) => s.sessionFiles);
+  const dirExcludePatterns = useLogStore((s) => s.dirExcludePatterns);
+  const setDirExcludePatterns = useLogStore((s) => s.setDirExcludePatterns);
   const toggleSessionFile = useLogStore((s) => s.toggleSessionFile);
   const setLog = useLogStore((s) => s.setLog);
 
   const [files, setFiles] = useState<LogFileInfo[]>([]);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; name: string; path: string } | null>(null);
+  const [excludeOpen, setExcludeOpen] = useState(false);
+  const [excludeDraft, setExcludeDraft] = useState('');
   const [loading, setLoading] = useState(false);
+  const sessionFiles = useLogStore((s) => s.sessionFiles);
   const [progress, setProgress] = useState<string>('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -122,7 +126,10 @@ export function FileTreePanel() {
       setLoading(true);
       setProgress('枚举目录中…');
       try {
-        const list = await listLogFiles(logsDirHandle, { recursive: true });
+        const list = await listLogFiles(logsDirHandle, {
+          recursive: true,
+          excludePatterns: dirExcludePatterns,
+        });
         if (cancelled) return;
         setFiles(list);
         // 默认勾选全部
@@ -137,7 +144,7 @@ export function FileTreePanel() {
       }
     })();
     return () => { cancelled = true; };
-  }, [logsDirHandle]);
+  }, [logsDirHandle, dirExcludePatterns]);
 
   const tree = useMemo(() => buildTree(files), [files]);
 
@@ -170,23 +177,28 @@ export function FileTreePanel() {
     if (names.length === 0) return;
     setLoading(true);
     try {
-      // ---- 快速路径：SQLite 数据驻留（Tauri + 全目录加载时）----
-      // v4：便宜通道建库（读+偏移+计数+范围）；无事件索引——命中 ts 扫描时解析
+      // ---- 快速路径：内存库数据驻留（Tauri 目录）----
+      // 便宜通道建库（读+偏移+计数+范围）；无事件索引——命中 ts 扫描时解析。
+      // 总是传勾选清单：部分勾选 / glob 排除后的可见集都建子集库，
+      // 不再因「少选一个文件」落回 loadMultiple 全量解析合并的慢路径。
       const handle: unknown = logsDirHandle;
       const isTauriDir =
         !!handle && typeof handle === 'object' && '__tauriDir' in handle && handle.__tauriDir === true;
-      const allSelected = names.length === files.length;
-      if (isTauriDir && allSelected) {
+      if (isTauriDir) {
         const dir =
           handle && typeof handle === 'object' && 'path' in handle && typeof handle.path === 'string'
             ? handle.path
             : '';
         const { dbOpen } = dbStore;
-        const opened = await dbOpen(dir, (loaded, total, cur) => {
-          if (mountedRef.current) {
-            setProgress(`索引 ${loaded}/${total} ${cur}`);
-          }
-        });
+        const opened = await dbOpen(
+          dir,
+          (loaded, total, cur) => {
+            if (mountedRef.current) {
+              setProgress(`索引 ${loaded}/${total} ${cur}`);
+            }
+          },
+          names,
+        );
         if (opened) {
           useLogStore.getState().setLogDb(
             { start: opened.rangeStart, end: opened.rangeEnd },
@@ -332,6 +344,19 @@ export function FileTreePanel() {
         {logsDirName && (
           <span className={styles['dir-name']} title={logsDirName}>{logsDirName}</span>
         )}
+        {logsDirHandle && (
+          <button
+            className={styles.excludeBtn}
+            title="排除规则（glob）：命中的文件/目录不参与枚举与加载，持久化到工作区"
+            onClick={() => {
+              setExcludeDraft(dirExcludePatterns.join('\n'));
+              setExcludeOpen(true);
+            }}
+          >
+            <Filter size={12} />
+            {dirExcludePatterns.length > 0 && <span>{dirExcludePatterns.length}</span>}
+          </button>
+        )}
       </div>
 
       {files.length > 0 && (
@@ -453,6 +478,48 @@ export function FileTreePanel() {
           >
             加载所在目录（切换目录模式）
           </button>
+        </div>
+      )}
+      {excludeOpen && (
+        <div className={styles.excludeMask} onClick={() => setExcludeOpen(false)}>
+          <div className={styles.excludePop} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.excludeTitle}>排除规则（glob）</div>
+            <div className={styles.excludeHint}>
+              每行一条。不含 <code>/</code> 对文件名匹配（如 <code>*.gz</code>）；
+              含 <code>/</code> 对相对路径匹配（如 <code>debug/**</code>，<code>**</code> 跨目录）。
+              命中的文件/目录不参与枚举与加载，规则持久化到工作区。
+            </div>
+            <textarea
+              className={styles.excludeArea}
+              value={excludeDraft}
+              onChange={(e) => setExcludeDraft(e.target.value)}
+              placeholder={'*.gz\ndebug/**\nnoise.log'}
+              spellCheck={false}
+              rows={6}
+            />
+            <div className={styles.excludeActions}>
+              <button
+                className="ghost"
+                onClick={() => {
+                  setExcludeDraft('');
+                  setDirExcludePatterns([]);
+                }}
+              >
+                清除全部
+              </button>
+              <button
+                className="primary"
+                onClick={() => {
+                  setDirExcludePatterns(
+                    excludeDraft.split('\n').map((p) => p.trim()).filter((p) => p.length > 0),
+                  );
+                  setExcludeOpen(false);
+                }}
+              >
+                保存
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

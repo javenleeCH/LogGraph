@@ -18,6 +18,7 @@ import type { LogEvent } from '../types';
 import type { LogMeta } from '../store/logStore';
 import { parseLogText, parseLogPath, type FullParseResult } from '../parser/parseBridge';
 import { isLogFileName } from './fileLoader';
+import { compileExcludePatterns } from './excludeGlob';
 import { isTauri, loadDialog, loadFs, basename } from '../lib/tauri';
 import { notify } from '../store/uiStore';
 
@@ -148,12 +149,15 @@ export interface LogFileInfo {
   path: string[];
 }
 
-/** 递归枚举目录下所有日志文件（按扩展名宽松判断） */
+/** 递归枚举目录下所有日志文件（按扩展名宽松判断）。
+ *  excludePatterns：rg 式 glob 排除规则（不含 '/' 对文件名、含 '/' 对相对路径；
+ *  命中目录 → 整棵子树跳过）。见 io/excludeGlob.ts。 */
 export async function listLogFiles(
   dirHandle: any,
-  opts: { recursive?: boolean; maxDepth?: number } = {},
+  opts: { recursive?: boolean; maxDepth?: number; excludePatterns?: string[] } = {},
 ): Promise<LogFileInfo[]> {
   const { recursive = true, maxDepth = 5 } = opts;
+  const excluded = compileExcludePatterns(opts.excludePatterns ?? []);
   const results: LogFileInfo[] = [];
 
   if (isTauriDir(dirHandle)) {
@@ -169,6 +173,8 @@ export async function listLogFiles(
         return; // 无权限/目录不存在则跳过
       }
       for (const entry of entries) {
+        const relPath = pathPrefix.length ? `${pathPrefix.join('/')}/${entry.name}` : entry.name;
+        if (excluded && excluded(relPath, entry.name)) continue;
         if (entry.isDirectory) {
           if (recursive && entry.name !== '.logGraph') {
             await walk(`${dirPath}/${entry.name}`, [...pathPrefix, entry.name], depth + 1);
@@ -181,7 +187,7 @@ export async function listLogFiles(
               size = st.size;
             } catch { /* 忽略读取失败的文件 */ }
             results.push({
-              name: pathPrefix.length ? `${pathPrefix.join('/')}/${entry.name}` : entry.name,
+              name: relPath,
               size,
               path: [...pathPrefix, entry.name],
             });
@@ -199,6 +205,8 @@ export async function listLogFiles(
   async function walk(dir: any, pathPrefix: string[], depth: number) {
     if (depth > maxDepth) return;
     for await (const entry of dir.values()) {
+      const relPath = pathPrefix.length ? `${pathPrefix.join('/')}/${entry.name}` : entry.name;
+      if (excluded && excluded(relPath, entry.name)) continue;
       if (entry.kind === 'file') {
         if (isLogFileName(entry.name)) {
           let size = 0;
@@ -207,7 +215,7 @@ export async function listLogFiles(
             size = file.size;
           } catch { /* 忽略读取失败的文件 */ }
           results.push({
-            name: pathPrefix.length ? `${pathPrefix.join('/')}/${entry.name}` : entry.name,
+            name: relPath,
             size,
             path: [...pathPrefix, entry.name],
           });

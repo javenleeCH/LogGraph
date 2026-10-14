@@ -487,8 +487,15 @@ fn build_mem_db(
 }
 
 /// 打开目录（便宜通道建库：读 + 行偏移 + 计数 + 首/末行 ts；无磁盘缓存）。
+/// `files`：相对路径清单（None=目录全集）。前端是文件清单的唯一权威
+/// （glob 排除 + 勾选都在前端算好），这里只按清单 retain——避免 Rust
+/// 再实现第二套 glob 导致两边语义漂移。
 #[tauri::command]
-pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult, String> {
+pub async fn db_open(
+    app: tauri::AppHandle,
+    dir: String,
+    files: Option<Vec<String>>,
+) -> Result<DbOpenResult, String> {
     use tauri::Emitter;
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -500,8 +507,15 @@ pub async fn db_open(app: tauri::AppHandle, dir: String) -> Result<DbOpenResult,
         let mut names: Vec<String> = Vec::new();
         walk_log_files(&root, "", 0, &mut names);
         names.sort();
+        if let Some(want) = &files {
+            names.retain(|n| want.iter().any(|w| w == n));
+        }
         if names.is_empty() {
-            return Err("该目录下没有可识别的日志文件（.log/.txt/.out/.csv/.tsv）".into());
+            return Err(if files.is_some() {
+                "所选文件不在该目录中（或均不是可识别的日志文件）".into()
+            } else {
+                "该目录下没有可识别的日志文件（.log/.txt/.out/.csv/.tsv）".into()
+            });
         }
         // .logGraph 工作区目录（filters.json 持久化 + perf 日志）
         std::fs::create_dir_all(root.join(".logGraph"))
