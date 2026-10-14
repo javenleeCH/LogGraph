@@ -320,6 +320,10 @@ interface LogState {
   applyPersistedFilters: (saved: PersistedFilters) => void;
   /** 绑定目录的工作区：创建 .logGraph + 恢复存档（或继承当前状态播种） */
   openWorkspace: (dirHandle: any) => Promise<void>;
+  /** 独立会话：脱离目录工作区（外部单文件打开/拖入）。刷盘旧工作区、
+   *  解绑 .logGraph，并清空过滤器/分组/CEP 结果/画布/书签等配置态，
+   *  防止上一个日志文件的配置残留到新文件 */
+  startStandaloneSession: () => Promise<void>;
   /** 立即写入一次当前状态到工作区 */
   saveFiltersNow: () => Promise<void>;
 
@@ -1427,6 +1431,45 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   saveFiltersNow: async () => {
     await persistNow(get);
+  },
+
+  startStandaloneSession: async () => {
+    // 1. 旧工作区最后状态刷盘（防丢编辑），随后解绑
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = 0;
+    }
+    await persistNow(get);
+    workspaceDir = null;
+    // 2. 取消进行中的分块过滤任务（旧 filters 的结果对新会话无意义）
+    if (chunkedCancel) {
+      chunkedCancel();
+      chunkedCancel = null;
+    }
+    // 3. dbMode（目录全量 SQLite 驻留）同样属于旧会话，关闭释放
+    dbClose();
+    // 4. 清配置态：过滤器/分组/CEP/画布/书签全部归零
+    try {
+      localStorage.removeItem(SAVED_RANGES_KEY);
+    } catch {
+      /* 隐私模式等场景忽略 */
+    }
+    set({
+      filters: [],
+      groups: [],
+      collapsedGroups: new Set<string>(),
+      sequenceResults: {},
+      graphNodes: {},
+      graphPan: { x: 0, y: 0 },
+      graphZoom: 1,
+      activeGroupId: null,
+      editingFilterId: null,
+      savedRanges: [],
+      workspaceDirName: null,
+      logsDirHandle: null,
+      logsDirName: null,
+      dbMode: false,
+    });
   },
 
   // ---- 日志目录 ----

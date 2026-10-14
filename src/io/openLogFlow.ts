@@ -21,6 +21,8 @@ export async function ingestLoadedFile(loaded: LoadedFile): Promise<void> {
   const endBusy = beginBusy(`解析 ${loaded.name}`);
   try {
     const result = await parseLoadedFile(loaded);
+    // 外部单文件 = 独立会话：脱离旧目录工作区并清配置（防上一文件残留）
+    await useLogStore.getState().startStandaloneSession();
     // Tauri 路径直读的文件计入最近项目（浏览器 File 无路径，不记录）
     if (loaded.path) {
       await recordOpenProject({ name: loaded.name, kind: 'file', path: loaded.path });

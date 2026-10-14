@@ -161,6 +161,8 @@ export default function App() {
       const endBusy = beginBusy(`解析 ${loaded.name}`);
       try {
         const result = await parseLoadedFile(loaded);
+        // 外部单文件 = 独立会话：脱离旧目录工作区并清配置（防上一文件残留）
+        await useLogStore.getState().startStandaloneSession();
         setLog(result.events, result.rawLines, {
           fileName: loaded.name,
           fileSize: loaded.size,
