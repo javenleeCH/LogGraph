@@ -72,6 +72,7 @@ function fmtSize(bytes: number): string {
 export function FileTreePanel() {
   const logsDirHandle = useLogStore((s) => s.logsDirHandle);
   const logsDirName = useLogStore((s) => s.logsDirName);
+  const meta = useLogStore((s) => s.meta);
   const setLog = useLogStore((s) => s.setLog);
 
   const [files, setFiles] = useState<LogFileInfo[]>([]);
@@ -284,11 +285,24 @@ export function FileTreePanel() {
       )}
 
       <div className={styles['fileTree-body']}>
-        {files.length === 0 && !loading && (
+        {/* 单文件会话：未绑定目录但已载入日志 → 显示当前文件条目 */}
+        {!logsDirHandle && meta && (
+          <div
+            className={styles['tree-item']}
+            title={`共 ${meta.totalLines.toLocaleString()} 行${meta.skipped > 0 ? `，跳过 ${meta.skipped} 行` : ''}`}
+          >
+            <span className={styles.indent} style={{ width: 0 }} />
+            <span className={styles.chevron + ' ' + styles.spacer}>·</span>
+            <span className={styles.icon}><LogFile size={14} /></span>
+            <span className={styles.name}>{meta.fileName}</span>
+            <span className={styles.size}>{fmtSize(meta.fileSize)}</span>
+          </div>
+        )}
+        {files.length === 0 && !loading && !(meta && !logsDirHandle) && (
           <div className={styles['fileTree-empty']}>
             {logsDirHandle
               ? '该目录下没有可识别的日志文件（.log/.txt/.out/.csv/.tsv）'
-              : '点击工具栏「打开目录」选择一个日志文件夹'}
+              : '拖入日志文件，或点击工具栏「打开文件 / 打开目录」'}
           </div>
         )}
         {loading && (
