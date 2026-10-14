@@ -8,7 +8,7 @@
 //! 驻留结构：
 //! - `files`：文件清单 + 每文件首行全局行号 + 每行字节偏移（seek 直读用）
 //! - `range`：时间轴范围（各文件首/末行 ts 的全局 min/max）
-//! - `filter_hits`：filter_id → 升序 (ts, line) 命中（`Mutex<HashMap>`，扫描后写入）
+//! - `filter_hits`：filter_id → 升序 (line, ts) 命中（`Mutex<HashMap>`，扫描后写入）
 //!
 //! 上下文/详情：按行偏移 seek 直读原文件片段（不整文件重读）。
 //! 命中/视口行文本走 `tauri::ipc::Response` 二进制通道（SoA，前端零对象解析）。
@@ -73,7 +73,7 @@ pub(crate) struct FileEntry {
     pub offsets: Arc<Vec<u64>>,
 }
 
-/// filter 命中缓存：filter_id → 升序 (ts, line) 命中 + 定义指纹（命中则免重扫）
+/// filter 命中缓存：filter_id → 升序 (line, ts) 命中 + 定义指纹（命中则免重扫）
 #[derive(Default)]
 struct FilterCache {
     hits: HashMap<String, Arc<Vec<HitEntry>>>,
@@ -138,14 +138,9 @@ fn locate(db: &MemDb, global_line: u32) -> Result<(usize, PathBuf, u32), String>
 
 /// 命中(含 NO_TS) → 有效 (line, ts)[]，按 (ts, line) 升序。无 ts 命中被丢弃
 /// （时间线上无位置，与旧版事件 SoA JOIN 语义一致）。
-/// 输入通常已序（scan_filters_once 尾部即按 (ts,line) 排好，缓存与输出同序），
-/// is_sorted 探测通过则免排序——批量过滤 store+join 曾因每次输出重排
-/// 多耗 ~1s/333 万命中；乱序输入（测试注入等）自动回退排序，行为不变。
 pub(crate) fn hits_with_ts(hits: &[HitEntry]) -> Vec<HitEntry> {
     let mut out: Vec<HitEntry> = hits.iter().filter(|h| h.ts != NO_TS).cloned().collect();
-    if !out.is_sorted_by_key(|h| (h.ts, h.line)) {
-        out.sort_unstable_by_key(|h| (h.ts, h.line));
-    }
+    out.sort_unstable_by_key(|h| (h.ts, h.line));
     out
 }
 
@@ -640,11 +635,9 @@ fn js_trim_bytes(b: &[u8]) -> &[u8] {
 ///   无 ts 行 message 域为空 → 不可能命中。
 /// - ^/$ 以 multi_line 语义锚定行边界；CRLF 行尾 `$` 与 \r 相邻的边缘
 ///   差异不处理。
-/// - 每文件单线程、命中按 (ts,line) 就位（多线程合并后统一排序；msg 候选
-///   跨 expr 需去重）。
+/// - 每文件单线程、行号升序 → 免 sort/dedup（msg 候选除外，跨 expr 需去重）。
 /// - 命中行 ts **内联解析**（`line_ts_of`，仅命中行付费；无逐行事件索引）。
-/// 返回与 queries 同序的命中列表（(ts, line) 升序，NO_TS 块在最前；
-/// ts = NO_TS 表示该行无 ts）。
+/// 返回与 queries 同序的命中列表（line 升序；ts = NO_TS 表示该行无 ts）。
 #[allow(clippy::type_complexity)]
 fn scan_filters_once(
     root: &Path,
@@ -828,15 +821,8 @@ fn scan_filters_once(
                         plen -= 1;
                     }
                     let prefix = String::from_utf8_lossy(&line[..plen]);
-                    // 指定格式直接命中 → ext.ts 即命中 ts（前缀命中 = 整行
-                    // 最左命中，同位置同值），免下方的整行二次解析；
-                    // 仅回退分支（域切分借用了其它格式）才需要整行重算
-                    let mut hit_ts: Option<i64> = None;
                     let ext = match extract_timestamp(&prefix, ts_fmt) {
-                        Some(x) => {
-                            hit_ts = Some(x.ts);
-                            Some(x)
-                        }
+                        Some(x) => Some(x),
                         None if ts_fmt.is_some() => extract_timestamp(&prefix, None),
                         None => None,
                     };
@@ -845,9 +831,9 @@ fn scan_filters_once(
                     };
                     // msg 域 = 原始行 ts 之后（字节级匹配 + 字节级 trim，免整行 str 化）
                     let msg = js_trim_bytes(&line[ext.end..]);
-                    // 命中 ts 语义与旧版 JOIN 一致：fmt-only
-                    // （ext 可能来自全格式回退，只有那时才整行重算）
-                    let hit_ts = hit_ts.unwrap_or_else(|| line_ts_of(&bytes, s, e, ts_fmt));
+                    // 命中 ts 内联解析（fmt-only，与旧版 JOIN 语义一致；
+                    // ext 仅用于域切分——带全格式回退，不可复用）
+                    let hit_ts = line_ts_of(&bytes, s, e, ts_fmt);
                     for (mi, mre) in msg_regexes.iter().enumerate() {
                         if mre.is_match(msg) {
                             for &qi in &msg_slots[mi] {
@@ -903,11 +889,9 @@ fn scan_filters_once(
             per_filter[qi].extend(v);
         }
     }
-    // (ts,line) 升序：多线程 stride 合并后乱序，一次排到位。NO_TS=i64::MIN
-    // 构成头部连续块。缓存/输出（hits_with_ts、序列事件）均需 ts 序，
-    // 下游不再二次排序（此前 store+join 每次输出重排 ~1s/333 万命中）。
+    // 行号升序:多线程 stride 合并后乱序
     for v in per_filter.iter_mut() {
-        v.sort_unstable_by_key(|h| (h.ts, h.line));
+        v.sort_unstable_by_key(|h| h.line);
     }
     // 每文件计时落地(一次写;目录无 .logGraph 时静默跳过——测试用例)
     {
@@ -1174,7 +1158,7 @@ pub async fn db_corr_ids(
             return Ok(Vec::new());
         }
         let db = current_db()?;
-        // 命中并集（各 filter (ts,line) 序无碍——并集自身 sort+dedup；无 ts 命中自然出局）
+        // 命中并集（各 filter line 升序 → 归并后 sort+dedup；无 ts 命中自然出局）
         let mut out: Vec<u32> = Vec::new();
         for fid in &filter_ids {
             if let Some(h) = filter_hits(&db, fid) {
@@ -1400,12 +1384,7 @@ mod tests {
             scope: scope.into(),
         };
         // 多 filter 单遍：raw/message/字面量/正则混合，结果正确分桶
-        // 输出按 (ts,line) 序；断言关注命中集合，先按 line 归一
-        let lines = |v: &Vec<HitEntry>| -> Vec<u32> {
-            let mut xs: Vec<u32> = v.iter().map(|h| h.line).collect();
-            xs.sort_unstable();
-            xs
-        };
+        let lines = |v: &Vec<HitEntry>| -> Vec<u32> { v.iter().map(|h| h.line).collect() };
         let queries = vec![
             q("msg", "hello", false, true, "message"), // msg 域 → 0,2,4
             q("raw", "plain", false, true, "raw"),     // 整行 → 1
