@@ -145,6 +145,8 @@ function baseNameOf(p: string): string {
 interface SessionFile {
   name: string;
   size: number;
+  /** Tauri 绝对路径（右键「打开所在目录/加载目录」用；浏览器拖入为 null） */
+  path: string | null;
   enabled: boolean;
 }
 
@@ -1543,7 +1545,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       const meta = state.meta;
       const nextFiles: SessionFile[] = [
         ...state.sessionFiles,
-        { name: loaded.name, size: loaded.size, enabled: true },
+        { name: loaded.name, size: loaded.size, path: loaded.path ?? null, enabled: true },
       ];
       const enabledNames = new Set(
         nextFiles.filter((f) => f.enabled).map((f) => f.name),
@@ -1574,7 +1576,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       timestampFormatId: result.timestampFormatId,
     });
     set({
-      sessionFiles: [{ name: loaded.name, size: loaded.size, enabled: true }],
+      sessionFiles: [{ name: loaded.name, size: loaded.size, path: loaded.path ?? null, enabled: true }],
       sessionDirPath: dirPath,
       sessionEvents: events,
     });

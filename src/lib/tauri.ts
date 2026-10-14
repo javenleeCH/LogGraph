@@ -26,6 +26,11 @@ export function loadDialog() {
   return import('@tauri-apps/plugin-dialog');
 }
 
+/** 动态加载 @tauri-apps/plugin-opener（资源管理器定位文件），避免浏览器环境报错 */
+export function loadOpener() {
+  return import('@tauri-apps/plugin-opener');
+}
+
 // ---- Tauri 原生拖拽 ----
 
 export interface DragDropHandlers {

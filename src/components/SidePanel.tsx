@@ -164,6 +164,11 @@ export function SidePanel() {
                     dropActive={dragOverGroup === g.id}
                     onToggleExpanded={() => toggleExpanded(g.id)}
                     onOpen={() => setActiveGroup(g.id)}
+                    onAddFilter={() => {
+                      const fid = addFilter({});
+                      addFilterToGroup(fid, g.id);
+                      setEditingFilterId(fid);
+                    }}
                     onRename={(label) => updateGroup(g.id, { label })}
                     onRemove={() => removeGroupWithUndo(g.id)}
                     onToggleVisible={() => toggleGroupVisible(g.id)}
@@ -213,6 +218,7 @@ function GroupRow({
   dropActive,
   onToggleExpanded,
   onOpen,
+  onAddFilter,
   onRename,
   onRemove,
   onToggleVisible,
@@ -225,6 +231,7 @@ function GroupRow({
   dropActive: boolean;
   onToggleExpanded: () => void;
   onOpen: () => void;
+  onAddFilter: () => void;
   onRename: (label: string) => void;
   onRemove: () => void;
   onToggleVisible: () => void;
@@ -294,6 +301,13 @@ function GroupRow({
       )}
       <span className={styles.rowCount}>{group.filterIds.length}</span>
       <div className={styles.rowActions} onClick={(e) => e.stopPropagation()}>
+        <button
+          className={styles.miniBtn}
+          title="在此分组新建过滤器"
+          onClick={(e) => { e.stopPropagation(); onAddFilter(); }}
+        >
+          <NewFile size={12} />
+        </button>
         <button
           className={styles.editBtn}
           title="编辑分组（节点与序列编排）"

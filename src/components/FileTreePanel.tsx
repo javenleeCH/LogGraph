@@ -9,11 +9,14 @@ import { useLogStore } from '../store/logStore';
 import {
   listLogFiles,
   loadMultiple,
+  tauriPathAsDirectory,
   type LogFileInfo,
 } from '../io/dirLoader';
 import { ChevronDown, ChevronRight, Folder, LogFile } from './Icon';
 import { toast } from '../store/uiStore';
 import * as dbStore from '../io/dbStore';
+import { loadOpener } from '../lib/tauri';
+import { recordOpenProject } from '../io/recentProjects';
 import styles from './FileTreePanel.module.css';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -77,6 +80,7 @@ export function FileTreePanel() {
   const setLog = useLogStore((s) => s.setLog);
 
   const [files, setFiles] = useState<LogFileInfo[]>([]);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; name: string; path: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<string>('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -88,6 +92,18 @@ export function FileTreePanel() {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+
+  // 右键菜单打开时：点任意处 / Escape 关闭
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    window.addEventListener('mousedown', close);
+    window.addEventListener('keydown', close);
+    return () => {
+      window.removeEventListener('mousedown', close);
+      window.removeEventListener('keydown', close);
+    };
+  }, [ctxMenu]);
 
   useEffect(() => {
     if (!logsDirHandle) {
@@ -202,6 +218,39 @@ export function FileTreePanel() {
     }
   }
 
+  /** 右键菜单：资源管理器中显示该文件（Tauri opener 插件） */
+  async function revealInFileManager(path: string) {
+    try {
+      const opener = await loadOpener();
+      await opener.revealItemInDir(path);
+    } catch (e) {
+      console.error('打开所在目录失败', e);
+      toast.error('打开所在目录失败', (e as Error).message);
+    }
+  }
+
+  /** 右键菜单：以该文件所在目录为工作区切换到目录模式（文件树变目录树） */
+  async function loadSessionDirAsWorkspace(path: string) {
+    const norm = path.replace(/\\/g, '/');
+    const i = norm.lastIndexOf('/');
+    if (i < 0) return;
+    const dirPath = norm.slice(0, i);
+    try {
+      const handle = await tauriPathAsDirectory(dirPath);
+      if (!handle) {
+        toast.error('目录不存在或无法访问', dirPath);
+        return;
+      }
+      useLogStore.getState().setLogsDir(handle, handle.name);
+      await useLogStore.getState().openWorkspace(handle);
+      await recordOpenProject({ name: handle.name, kind: 'dir', path: dirPath });
+      toast.success(`已打开工作区 ${handle.name}`, '左侧文件树可浏览目录内日志');
+    } catch (e) {
+      console.error('加载目录失败', e);
+      toast.error('加载目录失败', (e as Error).message);
+    }
+  }
+
   // 渲染树（递归）
   function renderNode(node: TreeNode, depth: number, parentPath: string): React.ReactNode {
     if (!node.name) {
@@ -299,6 +348,12 @@ export function FileTreePanel() {
                   ? `${f.name} · 参与分析中，取消勾选使其失效`
                   : `${f.name} · 已失效，勾选恢复参与分析`
               }
+              onContextMenu={(e) => {
+                // Tauri 拖入的文件带绝对路径，才提供定位/目录模式能力
+                if (!f.path) return;
+                e.preventDefault();
+                setCtxMenu({ x: e.clientX, y: e.clientY, name: f.name, path: f.path });
+              }}
             >
               <span className={styles.indent} style={{ width: 0 }} />
               <span className={styles.chevron + ' ' + styles.spacer}>·</span>
@@ -339,6 +394,33 @@ export function FileTreePanel() {
             title="合并勾选的文件并解析"
           >
             {loading ? '加载中…' : `加载 ${checkedCount > 0 ? `(${checkedCount})` : ''}`}
+          </button>
+        </div>
+      )}
+      {ctxMenu && (
+        <div
+          className={styles.ctxMenu}
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className={styles.ctxTitle} title={ctxMenu.path}>{ctxMenu.name}</div>
+          <button
+            className={styles.ctxItem}
+            onClick={() => {
+              setCtxMenu(null);
+              void revealInFileManager(ctxMenu.path);
+            }}
+          >
+            打开文件所在目录
+          </button>
+          <button
+            className={styles.ctxItem}
+            onClick={() => {
+              setCtxMenu(null);
+              void loadSessionDirAsWorkspace(ctxMenu.path);
+            }}
+          >
+            加载所在目录（切换目录模式）
           </button>
         </div>
       )}

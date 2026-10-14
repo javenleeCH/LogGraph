@@ -8,6 +8,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_opener::init())
         // Rust 原生日志解析引擎（双通道架构，浏览器端不受影响；
         // 详见 plans/rust-parser-design.md）
         .invoke_handler(tauri::generate_handler![
