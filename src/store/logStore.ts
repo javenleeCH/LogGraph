@@ -141,6 +141,13 @@ function baseNameOf(p: string): string {
   return i < 0 ? norm : norm.slice(i + 1);
 }
 
+/** 独立会话中的单个日志文件（enabled 控制是否参与分析） */
+interface SessionFile {
+  name: string;
+  size: number;
+  enabled: boolean;
+}
+
 // ---- 工作区持久化（目录即工作区，<日志目录>/.logGraph/filters.json） ----
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let workspaceDir: any = null; // 当前工作区句柄（.logGraph 子目录）
@@ -356,16 +363,21 @@ interface LogState {
   initLogsDir: () => Promise<void>;
 
   // --- 单文件独立会话（拖入/打开的文件集） ---
-  /** 当前独立会话已载入的文件清单（文件树展示用） */
-  sessionFiles: { name: string; size: number }[];
+  /** 当前独立会话已载入的文件清单（enabled=参与分析；文件树勾选控制） */
+  sessionFiles: SessionFile[];
   /** 独立会话目录（Tauri 绝对路径；浏览器拖入无路径 → null，永不追加） */
   sessionDirPath: string | null;
+  /** 会话全量事件（含已失效文件的；勾选切换时按 sourceFile 过滤重建） */
+  sessionEvents: LogEvent[];
   /** 载入单个日志文件：与当前会话同目录（Tauri）则追加合并，
    *  否则新开独立会话（清空上一会话配置）。返回实际采用的方式 */
   ingestSingleFile: (
     loaded: { name: string; size: number; path?: string | null },
     result: FullParseResult,
   ) => Promise<'appended' | 'replaced' | 'duplicate'>;
+  /** 勾选切换会话内某文件的启用状态：失效文件的事件从分析中剔除，
+   *  重新勾选恢复（时间窗尽量保持，CEP 结果同步重算） */
+  toggleSessionFile: (name: string) => void;
 
   // --- 主区域布局 ---
   /** 时间线/详情 横竖排列：vertical=上下，horizontal=左右 */
@@ -380,6 +392,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   dbMode: false,
   sessionFiles: [],
   sessionDirPath: null,
+  sessionEvents: [],
 
   filters: [],
   matches: [],
@@ -1500,6 +1513,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       dbMode: false,
       sessionFiles: [],
       sessionDirPath: null,
+      sessionEvents: [],
     });
   },
 
@@ -1515,14 +1529,11 @@ export const useLogStore = create<LogState>((set, get) => ({
       return 'duplicate';
     }
     if (sameDir) {
-      // 追加：全局行号重编 + sourceFile 标记 + 按 ts 全局排序（与目录合并规则一致）
-      const firstName =
-        state.sessionFiles[0]?.name ?? state.meta?.fileName ?? loaded.name;
+      // 追加：基于会话全量事件合并（禁用文件的事件也在全量里），
+      // 全局行号重编 + sourceFile 标记 + 按 ts 全局排序（与目录合并规则一致）
       const baseId = state.rawLines.length;
       const mergedEvents = [
-        ...state.events.map((e) =>
-          e.sourceFile ? e : { ...e, sourceFile: firstName },
-        ),
+        ...state.sessionEvents,
         ...result.events.map((e) => ({
           ...e,
           id: baseId + e.id,
@@ -1530,21 +1541,32 @@ export const useLogStore = create<LogState>((set, get) => ({
         })),
       ].sort((a, b) => a.ts - b.ts);
       const meta = state.meta;
-      get().setLog(mergedEvents, [...state.rawLines, ...result.rawLines], {
-        fileName: `${baseNameOf(state.sessionDirPath ?? loaded.name)} (${state.sessionFiles.length + 1} 文件)`,
-        fileSize: (meta?.fileSize ?? 0) + loaded.size,
-        totalLines: (meta?.totalLines ?? 0) + result.totalLines,
-        skipped: (meta?.skipped ?? 0) + result.skipped,
-        timestampFormatId: meta?.timestampFormatId ?? result.timestampFormatId,
-      });
-      set({
-        sessionFiles: [...state.sessionFiles, { name: loaded.name, size: loaded.size }],
-      });
+      const nextFiles: SessionFile[] = [
+        ...state.sessionFiles,
+        { name: loaded.name, size: loaded.size, enabled: true },
+      ];
+      const enabledNames = new Set(
+        nextFiles.filter((f) => f.enabled).map((f) => f.name),
+      );
+      get().setLog(
+        mergedEvents.filter((e) => enabledNames.has(e.sourceFile ?? '')),
+        [...state.rawLines, ...result.rawLines],
+        {
+          fileName: `${baseNameOf(state.sessionDirPath ?? loaded.name)} (${nextFiles.length} 文件)`,
+          fileSize: (meta?.fileSize ?? 0) + loaded.size,
+          totalLines: (meta?.totalLines ?? 0) + result.totalLines,
+          skipped: (meta?.skipped ?? 0) + result.skipped,
+          timestampFormatId: meta?.timestampFormatId ?? result.timestampFormatId,
+        },
+      );
+      set({ sessionFiles: nextFiles, sessionEvents: mergedEvents });
       return 'appended';
     }
-    // 新开独立会话：清上一会话配置后载入
+    // 新开独立会话：清上一会话配置后载入（事件直接标记 sourceFile，
+    // 供后续按文件启用/禁用过滤）
     await get().startStandaloneSession();
-    get().setLog(result.events, result.rawLines, {
+    const events = result.events.map((e) => ({ ...e, sourceFile: loaded.name }));
+    get().setLog(events, result.rawLines, {
       fileName: loaded.name,
       fileSize: loaded.size,
       totalLines: result.totalLines,
@@ -1552,10 +1574,40 @@ export const useLogStore = create<LogState>((set, get) => ({
       timestampFormatId: result.timestampFormatId,
     });
     set({
-      sessionFiles: [{ name: loaded.name, size: loaded.size }],
+      sessionFiles: [{ name: loaded.name, size: loaded.size, enabled: true }],
       sessionDirPath: dirPath,
+      sessionEvents: events,
     });
     return 'replaced';
+  },
+
+  toggleSessionFile: (name) => {
+    const state = get();
+    const target = state.sessionFiles.find((f) => f.name === name);
+    if (!target || !state.meta) return;
+    const nextFiles = state.sessionFiles.map((f) =>
+      f.name === name ? { ...f, enabled: !f.enabled } : f,
+    );
+    const enabledNames = new Set(
+      nextFiles.filter((f) => f.enabled).map((f) => f.name),
+    );
+    const prevView = state.viewRange;
+    // 用启用过滤后的事件重建（rawLines 保留全量：事件 id 按行号寻址上下文）
+    get().setLog(
+      state.sessionEvents.filter((e) => enabledNames.has(e.sourceFile ?? '')),
+      state.rawLines,
+      state.meta,
+    );
+    // 时间窗尽量保持（clamp 到新范围；变空则跟随新全量）
+    const fr = get().fullRange;
+    if (prevView && fr && prevView.start < fr.end && prevView.end > fr.start) {
+      const start = Math.max(prevView.start, fr.start);
+      const end = Math.min(prevView.end, fr.end);
+      if (start < end) set({ viewRange: { start, end } });
+    }
+    set({ sessionFiles: nextFiles });
+    // CEP 结果含事件集合，需同步重算（setLog 只重算过滤器匹配）
+    get().recomputeSequences();
   },
 
   // ---- 日志目录 ----

@@ -72,8 +72,8 @@ function fmtSize(bytes: number): string {
 export function FileTreePanel() {
   const logsDirHandle = useLogStore((s) => s.logsDirHandle);
   const logsDirName = useLogStore((s) => s.logsDirName);
-  const meta = useLogStore((s) => s.meta);
   const sessionFiles = useLogStore((s) => s.sessionFiles);
+  const toggleSessionFile = useLogStore((s) => s.toggleSessionFile);
   const setLog = useLogStore((s) => s.setLog);
 
   const [files, setFiles] = useState<LogFileInfo[]>([]);
@@ -287,16 +287,17 @@ export function FileTreePanel() {
 
       <div className={styles['fileTree-body']}>
         {/* 独立文件会话：未绑定目录但已载入日志 → 显示会话文件清单
-            （同目录追加的文件都在列表中） */}
+            （右侧勾选控制该文件是否参与分析，取消失效） */}
         {!logsDirHandle &&
           sessionFiles.map((f) => (
             <div
               key={f.name}
               className={styles['tree-item']}
+              style={{ opacity: f.enabled ? 1 : 0.5 }}
               title={
-                sessionFiles.length > 1 && meta
-                  ? `会话共 ${meta.totalLines.toLocaleString()} 行${meta.skipped > 0 ? `，跳过 ${meta.skipped} 行` : ''}`
-                  : `${f.name} · 共 ${meta?.totalLines.toLocaleString() ?? '?'} 行`
+                f.enabled
+                  ? `${f.name} · 参与分析中，取消勾选使其失效`
+                  : `${f.name} · 已失效，勾选恢复参与分析`
               }
             >
               <span className={styles.indent} style={{ width: 0 }} />
@@ -304,6 +305,13 @@ export function FileTreePanel() {
               <span className={styles.icon}><LogFile size={14} /></span>
               <span className={styles.name}>{f.name}</span>
               <span className={styles.size}>{fmtSize(f.size)}</span>
+              <input
+                type="checkbox"
+                checked={f.enabled}
+                onChange={() => toggleSessionFile(f.name)}
+                onClick={(e) => e.stopPropagation()}
+                title="启用 / 失效该文件"
+              />
             </div>
           ))}
         {files.length === 0 && !loading && !(!logsDirHandle && sessionFiles.length > 0) && (
