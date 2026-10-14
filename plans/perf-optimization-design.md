@@ -49,3 +49,29 @@
 - P0：时间线从「每帧全量」→「静止 0 CPU、交互单帧 O(可见)」，卡死消除
 - P1：新增/编辑过滤器从全量 O(N×M) 同步阻塞 → 单 filter O(N) 分块异步 + 进度
 - P2：加载从 141×(IPC+JSON.parse) → 1 次 IPC + Rust 合并排序；内存峰值降约 1/3~1/2
+
+## 遗留问题（2026-10）：dbMode 冷扫描 4.9s
+
+**场景**：720MB / 637 万行 / 命中 333.7 万（52% 行命中），单 filter（pattern 合并后 K=1）。
+对照：rg 纯 pattern 368ms、CLI 同正则 3s、GUI `db_filters_batch` 冷扫描（指纹 miss）4.9s（大小写敏感）/
+6.37s（默认不敏感）。
+
+**归因已闭合**（perf.log 分解 + rg 对照实验）：
+- 正则扫描本身仅 ~0.4s（rg 368ms 同规模佐证）；差距全在正则之外。
+- `(?i:)` 大小写不敏感贡献 ~1.5s（实测 6.37→4.9）：filter 默认 `caseSensitive:false`，
+  db 路径包 `(?i:{body})` 后 prefilter 退化（字面量变体超限）；rg 的 grep-regex 有独立
+  prefilter 管线故 `-i` 无感。
+- 其余 ~4s 为命中驱动后处理：ts 内联解析 ×333 万（captures+7 组 parse+历法，估 1.5~2.5s）、
+  `fs::read` 720MB 进堆（~0.3s）、HitEntry 收集+排序（~0.3s）、store+join 1.33s、encode 40MB（~0.1s）。
+
+**已试并回退**（`d493faa` → revert `cb1c336`）：scan 尾排序键改 (ts,line) + `hits_with_ts`
+is_sorted 免排 + message 精筛 ts 复用。**实测无差异**。事后解释：`sort_unstable`（pdqsort）
+对近有序输入自适应 O(n)——时间序日志 ts 与 line 高度相关，原「二次排序」本就近乎线性，
+1.33s 大头疑为 333 万条 clone（53MB）+ filter 遍历 + Vec 分配，排序只占小头（clone 未动）。
+
+**后续候选方向**（按性价比，未排期）：
+1. `(?i:)` 字面量大小写变体预展开（构建时展开成显式交替，恢复 prefilter；~1.5s，已实锤）
+2. 输出零 clone：`encode_filter_batch` 直接遍历缓存 `Arc<Vec<HitEntry>>` + NO_TS
+   `partition_point` 定位有效段，`FilterBatchOut` 不再持有 clone 的 Vec（预计吃掉 store+join 大头）
+3. `fs::read` → mmap（~0.3s，改动面较大）
+4. ts 解析惰性化/输出协议改造（大动作：时间轴若只需密度不需要逐点 ts，可砍最大头）
