@@ -46,6 +46,7 @@ export default function App() {
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const workspaceDirName = useLogStore((s) => s.workspaceDirName);
   const eventCount = useLogStore(selectEventCount);
+  const sessionFiles = useLogStore((s) => s.sessionFiles);
   const fullRange = useLogStore((s) => s.fullRange);
 
   // 左侧文件树 / 主区域 可拖拽分隔：treeRatio = 文件树占比 [0, 0.4]
@@ -274,9 +275,9 @@ export default function App() {
 
   const topFlex = 1 - splitRatio;
   // 侧栏（文件树 / 分组 / 过滤器）可见条件：
-  // 原先仅绑了日志目录才渲染，导致「只打开单个日志文件」时用户完全没有入口
-  // 去新建过滤器——而过滤器正是本应用的核心能力。这里补上「已载入日志」的条件。
-  const hasContent = !!logsDirHandle || eventCount > 0;
+  // 绑了目录 / 有事件 / 独立会话有文件清单（文件全部失效时
+  // events 为 0，但勾选框必须在侧栏里才能恢复——不能把侧栏藏掉）
+  const hasContent = !!logsDirHandle || eventCount > 0 || sessionFiles.length > 0;
 
   return (
     <div
