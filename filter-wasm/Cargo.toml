@@ -9,7 +9,7 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# 标准 regex crate —— 与桌面端 db.rs / raw_search.rs 使用的引擎完全一致。
+# 标准 regex crate —— 与桌面端 engine（parser/line.rs、parser/timestamp.rs）使用的引擎完全一致。
 # 默认特性（含 unicode）与桌面 regex::Regex::new 行为对齐。
 regex = "1"
 # 必须与已安装的 wasm-bindgen-cli 版本一致（schema 校验）
