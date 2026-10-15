@@ -444,14 +444,18 @@ impl Session {
             let locals: Vec<u32> = sorted[i..j].iter().map(|&l| l - fe.first_line).collect();
             let segs = merge_line_segments(&locals, 64);
             for (lo, hi) in segs {
-                if let Ok(texts) = read_line_range(
-                    &root.join(&fe.name),
-                    &self.ensure_offsets(fi)?,
-                    lo,
-                    hi,
-                ) {
-                    for (k, text) in texts.into_iter().enumerate() {
-                        rows.push((fe.first_line + lo + k as u32, text));
+                // 偏移懒建失败（文件自建库后被删/不可读）→ 跳过该段行，
+                // 与 read_line_range 失败同策略：缺行不炸，尽力返回
+                if let Ok(offsets) = self.ensure_offsets(fi) {
+                    if let Ok(texts) = read_line_range(
+                        &root.join(&fe.name),
+                        &offsets,
+                        lo,
+                        hi,
+                    ) {
+                        for (k, text) in texts.into_iter().enumerate() {
+                            rows.push((fe.first_line + lo + k as u32, text));
+                        }
                     }
                 }
             }
@@ -817,6 +821,7 @@ fn build_session(
         });
     }
 
+    let ctx_sig = files_sig(root, &files);
     Ok(Session {
         root: root.to_path_buf(),
         files,
@@ -826,7 +831,7 @@ fn build_session(
         range,
         fmt,
         filters: Mutex::new(FilterCache::default()),
-        ctx_sig: files_sig(root, &files),
+        ctx_sig,
         persist: Mutex::new(Vec::new()),
     })
 }
@@ -1169,6 +1174,8 @@ fn scan_filters_once(
                         .map(|fe| FileEntry {
                             name: fe.name.clone(),
                             first_line: fe.first_line,
+                            line_count: fe.line_count,
+                            size: fe.size,
                             offsets: Arc::clone(&fe.offsets),
                         })
                         .collect();
@@ -1304,8 +1311,8 @@ fn load_offsets_cache(root: &Path, path: &Path, fe: &FileEntry) -> Option<Vec<u6
     Some((0..count).map(|i| rd(32 + i * 8)).collect())
 }
 
-/// `.bin` 布局：`"LGFB001"` + count u32 + pad u32 + {line u32, ts i64}×n（LE）
-const HITS_MAGIC: &[u8; 8] = b"LGFB001";
+/// `.bin` 布局：`"LGFB001\0"` + count u32 + pad u32 + {line u32, ts i64}×n（LE）
+const HITS_MAGIC: &[u8; 8] = b"LGFB001\0";
 
 fn encode_hits_cache(hits: &[HitEntry]) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 + hits.len() * 12);
