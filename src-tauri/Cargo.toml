@@ -16,13 +16,16 @@ name = "loggraph-app"
 path = "src/main.rs"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+# 版本对齐说明：@tauri-apps/cli 在 build/dev 时校验「cargo crate 与 npm 包同名成对
+# 版本的 major/minor 必须相等」（patch 可漂移）。本表须与 package.json / package-lock.json
+# 的 @tauri-apps/* 实装版本按 minor 对齐，升级任何一侧都要同步另一侧。
+tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-opener = "2"
+tauri = { version = "2.12", features = [] }
+tauri-plugin-dialog = "2.8"
+tauri-plugin-fs = "2.7"
+tauri-plugin-opener = "2.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 引擎 crate（engine_* IPC 命令，契约 §6；零数据库直扫 + CEP + 规则校验）
