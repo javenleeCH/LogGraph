@@ -1,9 +1,10 @@
 /**
- * v4 数据层桥接：便宜通道建库 + 命中缓存。
+ * v4 数据层桥接（REST 化）：ws_* 无状态命令 + 命中缓存。
  *
- * - 打开目录：db_open（读 + 行偏移 + 计数 + 首/末行 ts，带进度；无逐行事件索引）
- * - 过滤：db_filters_batch（单遍批量扫描，命中行 ts 内联解析）→ 二进制 (line, ts)[]
- * - 详情/上下文：db_lines_by_ids / db_line（行偏移 seek 直读原文件）
+ * - 打开目录：ws_info（读 + 行偏移 + 计数 + 首/末行 ts，带进度）→ 返回 WsCtx，
+ *   由客户端持有、后续请求回传（服务端无会话状态）
+ * - 过滤：ws_filters（单遍批量扫描，命中行 ts 内联解析）→ 二进制 (line, ts)[]
+ * - 详情/上下文：ws_lines / ws_line（行偏移 seek 直读原文件）
  */
 
 import { splitSubConditions } from '../filters/FilterEngine';
@@ -12,8 +13,17 @@ import { toast } from '../store/uiStore';
 
 // ---- DTO（Rust serde camelCase）----
 
-export interface DbOpenResult {
-  cacheHit: boolean;
+/** ctx 文件表条目（firstLine 升序；客户端不透明持有、原样回传） */
+export interface WsCtxFile {
+  name: string;
+  firstLine: number;
+  lineCount: number;
+  size: number;
+}
+
+/** 工作区上下文：ws_info 产出，客户端持有回传；引擎按 ctx 零 I/O 重建请求级工作视图 */
+export interface WsCtx {
+  files: WsCtxFile[];
   totalLines: number;
   skipped: number;
   fileCount: number;
@@ -23,8 +33,28 @@ export interface DbOpenResult {
   rangeEnd: number | null;
 }
 
+// ---- 客户端状态（REST：服务端无状态，dir + ctx 由客户端携带）----
 
-/** 文件清单条目（db_files：firstLine 升序） */
+/** 当前工作区（ws_info 成功时写入；替代 Rust 侧已删除的会话状态） */
+let currentDir: string | null = null;
+let currentCtx: WsCtx | null = null;
+
+/** 无工作区时抛错（语义同旧「目录未打开」） */
+function requireWs(): { dir: string; ctx: WsCtx } {
+  if (!currentDir || !currentCtx) {
+    throw new Error('目录未打开');
+  }
+  return { dir: currentDir, ctx: currentCtx };
+}
+
+/** dir 去尾部斜杠 + '/' + name（getDbFiles 拼绝对路径用） */
+function joinDirFile(dir: string, name: string): string {
+  return `${dir.replace(/[\\/]+$/, '')}/${name}`;
+}
+
+
+
+/** 文件清单条目（firstLine 升序；由 ctx 推导） */
 export interface DbFileInfo {
   /** 该文件首行的全局行号 */
   firstLine: number;
@@ -41,49 +71,54 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
 
 // ---- 打开 / 关闭 ----
 
-/** 打开目录缓存库（重建时经 onProgress 报告逐文件进度）。
- *  files：相对路径清单（不传=目录全集）；部分勾选 / 排除规则后
- *  的可见集都传清单——子集建库，不再落回 loadMultiple 慢路径。 */
+/** 建工作区上下文（ws_info：REST 化后唯一付整读价的入口；重建时经
+ *  onProgress 报告逐文件进度）。成功后 dir + ctx 存入模块状态，后续
+ *  ws_* 请求自动携带。files：相对路径清单（不传=目录全集）；部分勾选 /
+ *  排除规则后的可见集都传清单——子集建库，不再落回 loadMultiple 慢路径。 */
 export async function dbOpen(
   dir: string,
   onProgress?: (loaded: number, total: number, current: string) => void,
   files?: string[],
-): Promise<DbOpenResult | null> {
+): Promise<WsCtx | null> {
   if (!isTauri()) return null;
   let unlisten: (() => void) | null = null;
   try {
     if (onProgress) {
       const { listen } = await import('@tauri-apps/api/event');
       unlisten = await listen<{ loaded: number; total: number; current: string }>(
-        'db_build_progress',
+        'ws_build_progress',
         (e) => onProgress(e.payload.loaded, e.payload.total, e.payload.current),
       );
     }
-    const r = await invoke<DbOpenResult>('db_open', { dir, files: files ?? null });
+    const r = await invoke<WsCtx>('ws_info', { dir, files: files ?? null });
     if (
       !r ||
       typeof r.totalLines !== 'number' ||
+      !Array.isArray(r.files) ||
       (r.rangeStart !== null && typeof r.rangeStart !== 'number')
     ) {
-      console.warn('[dbStore] db_open 返回形状异常', r);
+      console.warn('[dbStore] ws_info 返回形状异常', r);
       return null;
     }
+    currentDir = dir;
+    currentCtx = r;
     return r;
   } catch (err) {
-    console.warn('[dbStore] db_open 失败:', err);
+    console.warn('[dbStore] ws_info 失败:', err);
     return null;
   } finally {
     unlisten?.();
   }
 }
 
+/** 关闭工作区：清客户端 dir/ctx 状态（服务端本就无状态，无需 invoke） */
 export function dbClose(): void {
-  if (!isTauri()) return;
-  invoke('db_close').catch(() => {});
+  currentDir = null;
+  currentCtx = null;
 }
 
 
-// ---- 过滤下推（v2：rg 引擎 + filter_hits 落库）----
+// ---- 过滤下推（rg 引擎 + 命中缓存）----
 
 export interface DbFilterQuery {
   /** 前端 filter id（filter_hits 表主键之一；编辑覆盖重写） */
@@ -100,7 +135,7 @@ export interface DbFilterHits {
   ts: Float64Array;
 }
 
-/** 多行 filter 子条件的下推 id 分隔符（fid \0 i；db_filter_drop 按 fid 前缀一并清理缓存） */
+/** 多行 filter 子条件的下推 id 分隔符（fid \0 i；引擎命中缓存按子条件独立存） */
 const SUB_ID_SEP = '\u0000';
 
 /** 升序行号数组的二分包含判断 */
@@ -191,7 +226,8 @@ export async function runDbFiltersBatch(
     }
     return out;
   }
-  const buf = await invoke<ArrayBuffer>('db_filters_batch', { queries: expanded });
+  const { dir, ctx } = requireWs();
+  const buf = await invoke<ArrayBuffer>('ws_filters', { dir, ctx, queries: expanded });
   const raw = new Map<string, DbFilterHits>();
   const v = new DataView(buf);
   const dec = new TextDecoder();
@@ -241,11 +277,7 @@ export async function runDbFiltersBatch(
   return out;
 }
 
-/** 删除 filter 的命中记录（filter 被删时调用） */
-export function dropDbFilter(filterId: string): void {
-  if (!isTauri()) return;
-  invoke('db_filter_drop', { filterId }).catch(() => {});
-}
+
 
 /**
  * 视口行文本：按全局行号集合批量取（任意顺序；Rust 侧排序去重 + 分段 seek）。
@@ -254,7 +286,7 @@ export function dropDbFilter(filterId: string): void {
 export async function fetchLinesByIds(ids: number[]): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   if (ids.length === 0) return out;
-  const buf = (await invoke('db_lines_by_ids', { ids })) as ArrayBuffer;
+  const buf = (await invoke('ws_lines', { ...requireWs(), ids })) as ArrayBuffer;
   if (!(buf instanceof ArrayBuffer) || buf.byteLength < 8) return out;
   const view = new DataView(buf);
   const count = view.getUint32(0, true);
@@ -270,37 +302,31 @@ export async function fetchLinesByIds(ids: number[]): Promise<Map<number, string
   return out;
 }
 
-/** 关联窗口下推：filter_ids 任一命中且 ts∈[start,end] 的去重全局行号（SQL 侧完成） */
-export async function fetchCorrIds(
-  filterIds: string[],
-  start: number,
-  end: number,
-): Promise<number[]> {
-  if (filterIds.length === 0) return [];
-  const r = await invoke<number[]>('db_corr_ids', { filterIds, start, end });
-  return Array.isArray(r) ? r : [];
-}
-
-
-/** 文件清单（firstLine 升序；详情无限上下文的行号→文件定位 + 右键打开用） */
-export async function fetchDbFiles(): Promise<DbFileInfo[]> {
-  const r = await invoke<DbFileInfo[]>('db_files');
-  return Array.isArray(r) ? r : [];
+/** 文件清单（firstLine 升序；详情无限上下文的行号→文件定位 + 右键打开用）。
+ *  db_files IPC 已删除：由客户端持有的 ctx 推导（dir + ctx 是唯一权威）。 */
+export function getDbFiles(): DbFileInfo[] {
+  if (!currentDir || !currentCtx) return [];
+  const dir = currentDir;
+  return currentCtx.files.map((f) => ({
+    firstLine: f.firstLine,
+    name: f.name,
+    path: joinDirFile(dir, f.name),
+  }));
 }
 
 /** 在系统文件管理器中定位该文件（Windows 选中显示）。失败 toast 由调用方处理。 */
 export function revealInDir(path: string): Promise<void> {
-  return invoke('db_reveal_path', { path });
+  return invoke('ws_reveal_path', { path });
 }
 
 /** 用系统默认应用打开该文件。失败 toast 由调用方处理。 */
 export function openFileExternally(path: string): Promise<void> {
-  return invoke('db_open_path', { path });
+  return invoke('ws_open_path', { path });
 }
 
 /** 单行文本 */
 export async function fetchLine(no: number): Promise<string> {
-  return invoke<string>('db_line', { no });
+  return invoke<string>('ws_line', { ...requireWs(), no });
 }
 
 // ---- 序列匹配 SQL 加速路径（PR-4：CEP 下推，dbMode 大数据加速）----
@@ -332,11 +358,14 @@ export interface DbRunSeqResponse {
 }
 
 /**
- * 把序列匹配下推到 Rust（从 filter_hits JOIN line_ts 取事件，贪心链匹配）。
- * 仅支持 global 作用域 + seq/and/or/not 边；其它特性由 Rust 端标记 fallback。
+ * 把序列匹配下推到 Rust（queries 先 warm 命中缓存，再以 (line, ts) 命中
+ * 作为事件流贪心链匹配）。queries 必须覆盖 groups 引用到的全部 filter，
+ * 否则对应事件缺失。仅支持 global 作用域 + seq/and/or/not 边；其它特性由
+ * Rust 端标记 fallback。
  */
 export async function runDbSequences(
   groups: DbRunSeqGroup[],
+  queries: DbFilterQuery[],
 ): Promise<DbRunSeqResponse> {
   if (!isTauri()) return { fallback: true, results: {} };
   const specs = groups
@@ -359,10 +388,10 @@ export async function runDbSequences(
     }));
   if (specs.length === 0) return { fallback: true, results: {} };
   try {
-    const r = await invoke<DbRunSeqResponse>('db_run_sequences', { groups: specs });
+    const r = await invoke<DbRunSeqResponse>('ws_sequences', { ...requireWs(), queries, groups: specs });
     return r ?? { fallback: true, results: {} };
   } catch (err) {
-    console.warn('[dbStore] db_run_sequences 失败，回退 TS:', err);
+    console.warn('[dbStore] ws_sequences 失败，回退 TS:', err);
     return { fallback: true, results: {} };
   }
 }

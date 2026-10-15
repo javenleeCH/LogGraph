@@ -1,4 +1,4 @@
-# logGraph 引擎 / CLI / Tauri / Web 接口契约（v1.2 = v1.1 + §11 附录，已确认）
+# logGraph 引擎 / CLI / Tauri / Web 接口契约（v1.3 = v1.2 + §11 REST 化重写，已确认）
 
 > 目的：冻结四层架构下引擎 Rust API、CLI 命令面、
 >
@@ -1050,8 +1050,8 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
 
 ## 6. Tauri IPC 命令面（`engine_*`，src-tauri）
 
-> 现有 `db_*` / `parser::*` / `sequence::db_run_sequences` 命令**本版不动**
-> （§6.4 迁移策略）；`engine_*` 是新增平行面，UI 逐屏切换。
+> 数据层命令面为 `ws_*`（v1.3 REST 化，无会话状态，§11）与 `parser::*`；
+> `engine_*` 是直扫族平行面。三条命令族并存。
 
 ### 6.1 命令清单（v1 全集）
 
@@ -1203,38 +1203,72 @@ v1 无流式进度 / 取消命令（引擎单次调用同步完成；大目录�
 
 ---
 
-## 11. v1.2 附录（2026-10-15：会话 API 下沉 + IPC⇄CLI 1:1）
+## 11. v1.2 附录 → v1.3 REST 化重写（2026-10-15）
 
-> v1.1 主体条款不变；本附录新增引擎 `session`/`parser` 模块、CLI
-> `db`/`parse` 子命令组，并确立 **IPC⇄CLI 1:1 原则**。
+> v1.2 将会话 API 下沉引擎并确立 IPC⇄CLI 1:1；v1.3 在此基础上做
+> **REST 化重构**：命令无状态自描述，客户端携带上下文（ctx），
+> 服务端（Tauri / CLI）零跨请求状态。本节为当前有效版本。
 
-### 11.1 会话 API（`engine::session`，自 src-tauri 壳层下沉）
+### 11.0 REST 原则（v1.3 确立）
 
-`Session` 为纯 Rust 库类型（引擎不依赖 tauri、不写文件、可独立
-`cargo test`），壳层持有 `Arc<Session>` 句柄管理生命周期：
+* **请求自描述**：每个命令携带完整定位信息（`dir` + `ctx` + 业务参数），
+  服务端不持有任何跨请求状态（无会话句柄、无 `MEM_DB`、无隐式 current）。
+* **ctx 客户端持有**：`ws_info`（唯一付整读价的入口）返回 `WsCtx`
+  （文件表 + 行数/范围/格式 id 的快照），客户端保存并在后续请求回传。
+  引擎信任回传布局（快照语义：活日志追加不炸、不做 mtime 校验拒绝）；
+  结构性损坏（空文件表 / first_line 非升序 / 未知格式 id）→ `E_USAGE`。
+* **大产物走透明内容寻址磁盘缓存**（`.logGraph/` 下，可删、只影响延迟）：
+  +- 行偏移表 `index/<fnv64(name)>.off`：单文件懒建（`ws_line`/`ws_lines`
+    seek 直读用），头部 size/mtime/行数三验防陈旧；
+  +- filter 命中集 `cache/filters/<hex(fnv(ctx_sig+定义指纹))>.bin`：
+    键即校验，miss 重扫；`ctx_sig = fnv(root + Σ(name,firstLine,lineCount,size))`。
+  +- 引擎零写副作用：产物经 `Session::take_persistable()` 以数据返回，
+    壳层尽力落盘（建父目录 + 临时文件 + 原子改名；失败只降速不变错）。
+* 删除的命令（v1.2 存在，v1.3 移除）：`db_open`/`db_close`/`db_filter_drop`
+  （指纹寻址缓存免清理）/`db_corr_ids`（前端本地按窗口过滤命中集）。
+  `db_files` 同步移除：文件清单由 ctx.files 客户端推导（firstLine/name
+  已在 ctx，path = dir + name 拼接）。
 
-| 方法 | 语义 | 壳层对应 |
-| --- | --- | --- |
-| `Session::open(root, files, emit)` | 便宜通道建库（并行读 + 行偏移 + 首/末行 ts；排除 `.logGraph`）；`files=None` 全集；`emit(loaded,total,current)` 逐文件进度 | `db_open`（壳层额外创建 `.logGraph/` 并推送 `db_build_progress` 事件） |
-| `info()` | 行数/skipped/文件数/格式 id/时间轴范围 | `DbOpenResult` |
-| `filters_batch(&queries)` | 指纹缓存 → miss 单遍批量直扫 → `(out, cached, miss, scan_perf)` | `db_filters_batch`（二进制 SoA 编码 + perf.log 落盘在壳层） |
-| `drop_filter(fid)` | 清理命中缓存（含 `fid\u{0}` sub 前缀） | `db_filter_drop` |
-| `line(no)` / `lines_by_ids(&ids)` | 行偏移 seek 直读（后者排序去重 + gap≤64 段合并） | `db_line` / `db_lines_by_ids` |
-| `corr_ids(&fids, start, end)` | 命中并集按 ts 窗口过滤 | `db_corr_ids` |
-| `file_infos()` | 文件清单（firstLine/name/path） | `db_files` |
-| `run_sequences(&groups)` | filter 命中 → `SeqEvent` 流 → `cep::run_sequences` | `db_run_sequences` |
+### 11.1 引擎会话 API（`engine::session`，v1.3 形状）
+
+`Session` 为纯 Rust 库类型（无 tauri 依赖、零文件写副作用、可独立
+`cargo test`），是**请求级工作视图**（非跨请求句柄）：
+
+| 方法 | 语义 |
+| --- | --- |
+| `Session::build_ctx(root, files, emit)` | 便宜通道建库（并行读 + 计数 + 首/末行 ts；排除 `.logGraph`）→ `WsCtx`；`files=None` 全集；`emit(loaded,total,current)` 逐文件进度。行偏移不驻留（统一懒建） |
+| `Session::from_ctx(root, &ctx)` | 按回传 ctx 零 I/O 重建请求级视图（快照语义，结构损坏报错） |
+| `ctx()` | 导出 ctx（`build_ctx` 内部即由它产出） |
+| `filters_batch(&queries)` | RAM 指纹 → `.logGraph` 命中盘缓存 → miss 单遍批量直扫；`(out, cached, miss, scan_perf)`；扫描结果入待落盘队列 |
+| `line(no)` / `lines_by_ids(&ids)` | 行偏移 seek 直读；偏移懒建（盘缓存三验 → 现读现建并入队） |
+| `corr_ids(&fids, start, end)` | 命中并集按 ts 窗口过滤（引擎保留；IPC 已删，CLI 用） |
+| `file_infos()` | 文件清单（firstLine/name/path）；CLI `ws files` 用 |
+| `run_sequences(&groups)` | filter 命中 → `SeqEvent` 流 → `cep::run_sequences` |
+| `take_persistable()` | 取走待落盘缓存工件（绝对路径 → 字节），壳层 drain 后写 |
+| `skeleton_bytes()` | 骨架内存基准（行数 × 8，懒建口径） |
+
+`WsCtx`（camelCase serde，客户端不透明持有、原样回传）：
+
+```json
+{
+  "files": [{ "name": "app.log", "firstLine": 0, "lineCount": 12345, "size": 987654 }],
+  "totalLines": 12345, "skipped": 1, "fileCount": 1,
+  "timestampFormatId": "iso-local-ms",
+  "rangeStart": 1704103200000, "rangeEnd": 1704103201000
+}
+```
 
 * `FilterQuery`（camelCase Deserialize）：`filterId` / `pattern` / `isRegex`
   / `caseSensitive` / `scope`（`raw`|`message`）。注意 scope 语义与 `.cep`
   规则文件不同（§3.3 规则文件 raw-only）；会话路径两种 scope 均支持。
 * `NO_TS = i64::MIN`：无时间戳命中哨兵；`filters_batch` 返回的命中流中
   无 ts 命中被丢弃（IPC 二进制编码同理）。
-* 引擎不产生文件系统副作用：perf 诊断行由 `filters_batch` 返回
-  （`scan_perf`），壳层负责写 `<root>/.logGraph/perf.log`。
-* 错误：行号越界 / 目录不存在 / 清单为空等 → `E_USAGE`；会话扫描正则
-  编译失败 → `E_PATTERN`（`PatternBuild`）。
+* perf 诊断行由 `filters_batch` 返回（`scan_perf`），壳层负责写
+  `<root>/.logGraph/perf.log`。
+* 错误：行号越界 / 目录不存在 / 清单为空 / ctx 损坏 → `E_USAGE`；
+  会话扫描正则编译失败 → `E_PATTERN`（`PatternBuild`）。
 
-### 11.2 解析 API（`engine::parser`，自壳层下沉）
+### 11.2 解析 API（`engine::parser`，自壳层下沉；v1.2 起不变）
 
 `parse_log` / `parse_dir` 的解析核心全部在引擎：`js_trim` /
 `parse_rest`（thread/level/message，`parser/line.rs`）/ 时间戳探测提取
@@ -1243,43 +1277,43 @@ v1 无流式进度 / 取消命令（引擎单次调用同步完成；大目录�
 **统一排除 `.logGraph`**，与 session 建库一致）。壳层 `parser` 模块仅剩
 命令转发 + prepare/chunk 分块缓存。
 
-### 11.3 IPC⇄CLI 1:1 原则
+### 11.3 IPC⇄CLI 1:1 原则（v1.3 REST 形状）
 
 **每个 UI→Tauri IPC 请求都有 1:1 的 CLI 等价命令**（DevTools→curl 模型）：
 Tauri 与 CLI 是同一引擎 API 的两种传输层，任何 UI 动作都可从命令行复现
-（可测试性优先）。映射表：
+（可测试性优先）。两侧同为无状态请求（客户端携带 dir + ctx）。映射表：
 
 | Tauri IPC | CLI 等价 | 说明 |
 | --- | --- | --- |
-| `db_open` | `loggraph db open <DIR> [--file <REL>]...` | 回 SessionInfo JSON |
-| `db_filters_batch` | `loggraph db filters <DIR> -q <FILE\|-> [--file...]` | 回 `{"filters":[{filterId,hits:[{line,ts}]}]}`；总命中 0 → 退出码 1 |
-| `db_run_sequences` | `loggraph db sequences <DIR> -q <Q> -g <G> [--file...]` | 内部先跑 filters 填充命中（= IPC 两命令组合）；回 RunSeqResponse |
-| `db_line` | `loggraph db line <DIR> --no <N>` | 回行文本 |
-| `db_lines_by_ids` | `loggraph db lines <DIR> --ids 3,17,42` | 回 `[{line,text}]` |
-| `db_corr_ids` | `loggraph db corr <DIR> -q <Q> -f <IDS> --start <MS> --end <MS>` | 回行号数组；空 → 退出码 1 |
-| `db_files` | `loggraph db files <DIR>` | 回文件清单 JSON |
+| `ws_info {dir, files?}` | `loggraph ws info <DIR> [--file <REL>]...` | 回 WsCtx JSON（唯一付整读价入口；进度事件 `ws_build_progress` 仅 IPC 有） |
+| `ws_filters {dir, ctx, queries}` | `loggraph ws filters <DIR> -q <FILE\|-> [--ctx <FILE\|->]` | 回 `{"filters":[{filterId,hits:[{line,ts}]}]}`；总命中 0 → 退出码 1；二进制 SoA 编码是 IPC 专属输出格式化，CLI 输出 JSON |
+| `ws_sequences {dir, ctx, queries, groups}` | `loggraph ws sequences <DIR> -q <Q> -g <G> [--ctx]` | queries 先行 warm 命中缓存再跑 CEP；回 RunSeqResponse |
+| `ws_line {dir, ctx, no}` | `loggraph ws line <DIR> --no <N> [--ctx]` | 回行文本 |
+| `ws_lines {dir, ctx, ids}` | `loggraph ws lines <DIR> --ids 3,17,42 [--ctx]` | 回 `[{line,text}]` |
+| （已删 `db_corr_ids`） | `loggraph ws corr <DIR> -q <Q> -f <IDS> --start <MS> --end <MS> [--ctx]` | 引擎 `corr_ids` 保留供 CLI；回行号数组，空 → 退出码 1 |
+| （已删 `db_files`） | `loggraph ws files <DIR>` | CLI 便利命令（内部 build_ctx）；IPC 侧由前端从 ctx.files 推导 |
 | `parse_log` | `loggraph parse file <PATH> [--format-id <ID>]` | 回 ParseResult JSON |
 | `parse_dir` | `loggraph parse dir <DIR> [--full]` | 回 DirMeta（--full 附 events+rawLines） |
-| `db_filter_drop` / `db_close` | — | 进程内缓存生命周期操作，一次性 CLI 无对应物 |
-| `db_reveal_path` / `db_open_path` | — | 纯 OS 进程边界（explorer/open） |
+| `ws_reveal_path {path}` / `ws_open_path {path}` | — | 纯 OS 进程边界（explorer/open） |
 | `dir_lines_chunk` / `dir_events_chunk` / `dir_cache_drop` | `parse dir --full` | 分块传输协议（防 WebView OOM）是 IPC 专属；CLI 单进程直接全量输出 |
 
-* `db`/`parse` 子命令一次一进程：每条命令重建会话（便宜通道实测
-  ~0.3s/GB），无跨命令驻留状态——UI 的有状态流（建库→过滤→取行）映射为
-  CLI 上按目录参数重放。
-* `-q`/`-g` JSON 输入：`FilterQuery` 数组 / `GroupSpec` 数组（与 IPC 载荷
-  同形状，camelCase；GroupSpec 走 §3.7 schema 的 `deny_unknown_fields`），
-  `-` = stdin。
-* 二进制 SoA 编码（`db_filters_batch` / `db_lines_by_ids` 的 ArrayBuffer
-  协议）是 IPC 专属输出格式化，CLI 输出 JSON（人类可管道）。
+* CLI `--ctx` 可选：提供 → 零 I/O 按 ctx 重建（**建议管道复用**：
+  `ws info DIR > ctx.json` 后各命令免整读）；缺省 → 内部 build_ctx 重建
+  （付整读价，行为与旧 v1.2 CLI 等价但每命令都付一次）。
+  `--file` 子集过滤仅在 `ws info` 上（子集属于 ctx 内容，先 info 后复用）。
+* `-q`/`-g`/`--ctx` JSON 输入：`FilterQuery` 数组 / `GroupSpec` 数组 /
+  `WsCtx`（与 IPC 载荷同形状，camelCase；GroupSpec 走 §3.7 schema 的
+  `deny_unknown_fields`），`-` = stdin。
+* **CLI 不再"每命令重建会话即重扫"**：命中集盘缓存跨进程复用——
+  首次 `ws filters` 扫描落盘后，后续同 ctx 同定义（含不同 filter_id，
+  指纹不含 id）直接命中，`ws filters` 计时 ≈ UI 首搜。
 
-### 11.4 §6.4 废弃计划的替代
+### 11.4 §6.4 废弃计划的替代（v1.2 → v1.3 演进）
 
-§6.4 原计划将 `db_*`/`parser::*` 命令废弃、UI 全面切 `engine_*`。
-**v1.2 起该计划作废**：`db_*`/`parser::*`/`db_run_sequences` 不再废弃，
-而是按 11.1–11.3 下沉为引擎 API 的薄转发（业务逻辑零残留），
-与 `engine_*` 直扫族并存——dbMode（目录工作区会话）与无库直扫
-（search/cep）是两种互补工作流，UI 不迁移。
+§6.4 原计划（v1.1）将 `db_*`/`parser::*` 命令废弃、UI 全面切 `engine_*`。
+v1.2 作废该计划改为下沉薄转发；v1.3 进一步 REST 化：`db_*` → `ws_*`
+（无状态 + ctx），与 `engine_*` 直扫族、`parser::*` 解析族并存——
+dbMode（目录工作区）与无库直扫（search/cep）是两种互补工作流。
 
 ### 11.5 v1.2 新增错误码
 

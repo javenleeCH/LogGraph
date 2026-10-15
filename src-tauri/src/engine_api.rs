@@ -2,8 +2,7 @@
 //!
 //! 壳层零业务逻辑：参数转发给 loggraph-engine，错误统一 `to_dto()` 后
 //! 走 Tauri reject（`{ code, message, details? }`，§6.3）。
-//! 旧 `db_*` / `parser::*` / `sequence::db_run_sequences` 命令保持不动，
-//! UI 逐屏迁移（§6.4）。
+//! 数据层 `ws_*`（REST 式无状态）与 `parser::*` 命令另见各模块。
 
 use loggraph_engine::cep::RunSeqResponse;
 use loggraph_engine::error::EngineResult;

@@ -1,23 +1,27 @@
-//! 目录工作区会话：便宜通道建库 + 过滤命中缓存 + 行偏移 seek 直读 + 序列匹配事件源。
+//! 目录工作区：便宜通道建库 + REST 式请求（无会话状态）。
 //!
-//! v1.2 自 src-tauri 壳层下沉：会话是业务语义（建库/扫描/缓存/定位规则），
-//! 壳层（Tauri/CLI）只持有句柄与做输出格式化。纯内存、无磁盘缓存、无 tauri 依赖，
-//! 可从纯输入（目录 + 文件清单）完全重建。
+//! v1.2 自 src-tauri 壳层下沉；REST 化后接口无状态自描述：
+//! - [`Session::build_ctx`]：付唯一一次整读价（并行读 + 行偏移 + 计数 + 首/末行 ts），
+//!   产出 [`WsCtx`]（文件表 + 行数/范围/格式 id）——客户端持有、每请求回传。
+//! - [`Session::from_ctx`]：按回传 ctx 零 I/O 重建工作视图（快照语义：信任
+//!   ctx 记录的行号布局，活日志追加不炸、不做 mtime 校验拒绝）。
 //!
-//! 原始文件是唯一事实源。打开目录只做**便宜通道**（并行读 + 行偏移 + 行数/
-//! 空行统计 + 首/末行 ts → 时间轴范围），不做逐行 ts 提取/排序/直查表——
-//! 过滤扫描本就重读原文件，命中行的 ts 在扫描时内联解析（`line_ts_of`）。
+//! 原始文件是唯一事实源。ctx 只描述「行号 → 文件/行」布局；两种大产物不做
+//! 请求参数，走 `.logGraph` 透明内容寻址磁盘缓存（可删、只影响延迟）：
+//! - 行偏移表 `index/<fnv64(name)>.off`：单文件懒建（line/lines seek 直读用），
+//!   头部 size/mtime/行数三验防陈旧；
+//! - filter 命中集 `cache/filters/<hex(fnv(ctx_sig+定义指纹))>.bin`：miss 重扫。
+//! 引擎零写副作用：产物经 [`Session::take_persistable`] 以数据返回，
+//! 壳层（Tauri/CLI）尽力落盘（写失败只降速不变错）。
 //!
-//! 驻留结构：
-//! - `files`：文件清单 + 每文件首行全局行号 + 每行字节偏移（seek 直读用）
-//! - `range`：时间轴范围（各文件首/末行 ts 的全局 min/max）
-//! - `filters`：filter_id → 升序 (line, ts) 命中 + 定义指纹（`Mutex`，扫描后写入）
-//!
-//! 上下文/详情：按行偏移 seek 直读原文件片段（不整文件重读）。
+//! 过滤扫描本就重读原文件，命中行的 ts 在扫描时内联解析（`line_ts_of`），
+//! 不做逐行 ts 提取/排序/直查表。
 
 use crate::cep::{self, GroupSpec, RunSeqResponse, SeqEvent};
 use crate::error::{EngineError, EngineResult};
-use crate::parser::timestamp::{detect_timestamp_format, extract_timestamp, TsFormat};
+use crate::parser::timestamp::{
+    detect_timestamp_format, extract_timestamp, find_format, TsFormat,
+};
 use crate::parser::{js_trim, walk_log_files};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -49,13 +53,34 @@ pub struct FilterQuery {
     pub scope: String,
 }
 
-/// 会话概要（db_open / CLI `db open` 返回）
-#[derive(Serialize, Debug, Clone)]
+/// ctx 文件表条目：行号 → 文件定位的最小描述（客户端不透明持有、原样回传）
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionInfo {
+pub struct CtxFile {
+    /// 相对路径
+    pub name: String,
+    /// 该文件首行的全局行号
+    pub first_line: u32,
+    /// 行数（split('\n') 分段语义，含尾空段）
+    pub line_count: u32,
+    /// 内容字节数（磁盘缓存内容寻址成分）
+    pub size: u64,
+}
+
+/// 工作区上下文（`ws_info` 返回，客户端持有、后续请求回传）。
+/// 快照语义：引擎信任回传布局（活日志追加不炸、不做 mtime 校验拒绝）；
+/// 行为等价旧会话的「骨架」——`total_lines`/`skipped`/`file_count`/范围/格式 id
+/// 字段名与前端 `DbOpenResult` 完全一致。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WsCtx {
+    /// 文件表（first_line 升序）
+    pub files: Vec<CtxFile>,
     pub total_lines: u32,
     pub skipped: u32,
+    /// 打开时的文件数（含读取失败被跳过的——与历史 IPC 语义一致）
     pub file_count: u32,
+    /// 时间戳格式 id（探测失败 → None；回传未知 id 视为损坏 ctx）
     pub timestamp_format_id: Option<String>,
     /// 时间轴范围（epoch ms）；目录无任何 ts → None（前端退回非 dbMode）
     pub range_start: Option<i64>,
@@ -99,7 +124,12 @@ pub(crate) struct FileEntry {
     pub name: String,
     /// 该文件首行的全局行号
     pub first_line: u32,
-    /// 每行起始字节偏移；行 i 字节区间 = [off[i], off[i+1] 或文件尾)
+    /// 行数（split('\n') 分段语义；ctx 往返 + .off 缓存三验成分）
+    pub line_count: u32,
+    /// 内容字节数（磁盘缓存内容寻址成分）
+    pub size: u64,
+    /// 每行起始字节偏移；行 i 字节区间 = [off[i], off[i+1] 或文件尾)。
+    /// 建库路径自带；from_ctx 路径恒空（懒建：`Session::ensure_offsets`）
     pub offsets: Arc<Vec<u64>>,
 }
 
@@ -110,8 +140,9 @@ struct FilterCache {
     fps: HashMap<String, String>,
 }
 
-/// 打开目录后的会话。骨架（files/行偏移/行数）建库后不可变；
-/// filter 命中缓存在内层 Mutex 中增删。壳层持有 `Arc<Session>` 句柄。
+/// 请求级工作视图：`build_ctx`（建库路径，自带偏移）或 `from_ctx`（ctx 路径，
+/// 偏移懒建）构造。骨架（files/行偏移/行数）构造后不可变；filter 命中缓存在
+/// 内层 Mutex 中累积；待落盘缓存工件在 `persist` 中累积（引擎不写盘）。
 pub struct Session {
     root: PathBuf,
     /// first_line 升序
@@ -124,19 +155,26 @@ pub struct Session {
     pub(crate) range: Option<(i64, i64)>,
     pub(crate) fmt: Option<&'static TsFormat>,
     filters: Mutex<FilterCache>,
+    /// 工作区内容指纹（= 旧会话身份）：fnv(root + Σ(name, first_line, line_count, size))。
+    /// filter 命中盘缓存的键成分——布局/内容变化自然换键，免清理。
+    pub(crate) ctx_sig: String,
+    /// 待落盘工件（.logGraph 相对路径 → 字节），壳层 take_persistable 后尽力写
+    pub(crate) persist: Mutex<Vec<(String, Vec<u8>)>>,
 }
 
 impl Session {
-    /// 打开目录（便宜通道建库：读 + 行偏移 + 计数 + 首/末行 ts；无磁盘缓存）。
+    /// 建工作区上下文（`ws_info` 背后；REST 化后唯一付整读价的入口）。
+    /// 便宜通道建库：并行读 + 行偏移 + 计数 + 首/末行 ts，产出客户端持有的
+    /// [`WsCtx`]（建库会话本身即弃——偏移随其丢弃，后续请求按需懒建）。
     /// `files`：相对路径清单（None=目录全集）。前端是文件清单的唯一权威
     /// （glob 排除 + 勾选都在前端算好），这里只按清单 retain——避免引擎
     /// 再实现第二套 glob 导致两边语义漂移。emit(loaded, total, current)
     /// 报告逐文件进度（建库内部并行，emit 已串行化）。
-    pub fn open(
+    pub fn build_ctx(
         root: &Path,
         files: Option<&[String]>,
         mut emit: impl FnMut(usize, usize, &str) + Send,
-    ) -> EngineResult<Session> {
+    ) -> EngineResult<WsCtx> {
         if !root.is_dir() {
             return Err(EngineError::Usage {
                 message: format!("目录不存在: {}", root.display()),
@@ -158,19 +196,83 @@ impl Session {
             });
         }
         let file_count = names.len() as u32;
-        build_session(root, &names, emit).map(|mut s| {
-            s.file_count = file_count;
-            s
+        let mut s = build_session(root, &names, emit)?;
+        s.file_count = file_count;
+        Ok(s.ctx())
+    }
+
+    /// 按客户端回传 ctx 重建请求级工作视图（零 I/O、快照语义）。
+    /// 信任回传的行号布局——活日志追加不炸、不做 mtime 校验拒绝；
+    /// 但结构性损坏（空文件表 / first_line 非升序 / 未知格式 id）直接报错，
+    /// 避免定位二分与 ts 解析静默错乱。
+    pub fn from_ctx(root: &Path, ctx: &WsCtx) -> EngineResult<Session> {
+        if ctx.files.is_empty() {
+            return Err(EngineError::Usage {
+                message: "ctx 损坏: 文件表为空".into(),
+            });
+        }
+        let mut prev_first = None;
+        for f in &ctx.files {
+            match prev_first {
+                Some(p) if f.first_line < p => {
+                    return Err(EngineError::Usage {
+                        message: format!("ctx 损坏: first_line 非升序（{}）", f.name),
+                    });
+                }
+                _ => prev_first = Some(f.first_line),
+            }
+        }
+        let fmt = match &ctx.timestamp_format_id {
+            Some(id) => Some(find_format(id).ok_or_else(|| EngineError::Usage {
+                message: format!("ctx 损坏: 未知时间戳格式 {id}"),
+            })?),
+            None => None,
+        };
+        let files: Vec<FileEntry> = ctx
+            .files
+            .iter()
+            .map(|f| FileEntry {
+                name: f.name.clone(),
+                first_line: f.first_line,
+                line_count: f.line_count,
+                size: f.size,
+                offsets: Arc::new(Vec::new()),
+            })
+            .collect();
+        Ok(Session {
+            root: root.to_path_buf(),
+            ctx_sig: files_sig(root, &files),
+            files,
+            total_lines: ctx.total_lines,
+            skipped: ctx.skipped,
+            file_count: ctx.file_count,
+            range: match (ctx.range_start, ctx.range_end) {
+                (Some(s), Some(e)) => Some((s, e)),
+                _ => None,
+            },
+            fmt,
+            filters: Mutex::new(FilterCache::default()),
+            persist: Mutex::new(Vec::new()),
         })
     }
 
-    /// 会话概要
-    pub fn info(&self) -> SessionInfo {
+    /// 导出 ctx（建库路径返回给客户端；`build_ctx`/CLI 也可用于快照落盘）
+    pub fn ctx(&self) -> WsCtx {
         let (range_start, range_end) = match self.range {
             Some((s, e)) => (Some(s), Some(e)),
             None => (None, None),
         };
-        SessionInfo {
+        WsCtx {
+            files: self
+                .files
+                .iter()
+                .map(|fe| CtxFile {
+                    name: fe.name.clone(),
+                    first_line: fe.first_line,
+                    line_count: fe.line_count,
+                    size: fe.size,
+                })
+                .collect(),
             total_lines: self.total_lines,
             skipped: self.skipped,
             file_count: self.file_count,
@@ -185,15 +287,27 @@ impl Session {
         &self.root
     }
 
-    /// 骨架内存基准：Σ 每文件行偏移表字节数（offsets.len() * 8）
+    /// 骨架内存基准：Σ 每文件行偏移表字节数（行数 × 8；from_ctx 懒建口径一致）
     pub fn skeleton_bytes(&self) -> usize {
-        self.files.iter().map(|f| f.offsets.len() * 8).sum()
+        self.files.iter().map(|f| f.line_count as usize * 8).sum()
+    }
+
+
+    /// 取走待落盘缓存工件（`.logGraph` 相对路径 → 字节），壳层尽力写
+    /// （建父目录 + 写临时文件 + 原子改名；写失败只降速不变错）。
+    pub fn take_persistable(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        self.persist
+            .lock()
+            .drain(..)
+            .map(|(rel, bytes)| (self.root.join(".logGraph").join(rel), bytes))
+            .collect()
     }
 
     /// 批量运行过滤器（recomputeMatches / 单 filter 编辑共用）：
     /// 1. 逐个比对定义指纹——命中的直接取内存命中（不扫描）；
-    /// 2. miss 的单遍批量直扫原文件，结果写入内存命中缓存；
-    /// 3. 返回 (filter_id, (line, ts)[] 按 ts 升序，无 ts 命中被丢弃)。
+    /// 2. miss 查 `.logGraph` 命中盘缓存（键 = ctx_sig + 定义指纹，内容寻址）；
+    /// 3. 仍 miss 的单遍批量直扫原文件，结果写入内存命中 + 待落盘队列；
+    /// 4. 返回 (filter_id, (line, ts)[] 按 ts 升序，无 ts 命中被丢弃)。
     pub fn filters_batch(&self, queries: &[FilterQuery]) -> EngineResult<FiltersBatchOutcome> {
         let mut out: FilterBatchOut = Vec::new();
         let mut miss: Vec<FilterQuery> = Vec::new();
@@ -213,44 +327,79 @@ impl Session {
                 }
             }
         }
+        let cached = queries.len() - miss.len();
+        let mut miss = miss; // 盘缓存命中出队后的剩余（真正要扫的）
         let mut scan_perf = Vec::new();
+        // ---- 盘缓存层：RAM miss → `.logGraph/cache/filters/<hex(key)>.bin` ----
+        // 键即校验（内容寻址）：ctx_sig 保证工作区布局/内容相同，定义指纹保证
+        // filter 定义相同 → 同键同结果，无需版本协商。
+        {
+            let mut fc = self.filters.lock();
+            miss.retain(|q| {
+                let key = hits_cache_key(&self.ctx_sig, q);
+                match load_hits_cache(&self.root, &key) {
+                    Some(hits) => {
+                        fc.fps.insert(q.filter_id.clone(), filter_def_fp(q));
+                        fc.hits.insert(q.filter_id.clone(), Arc::new(hits.clone()));
+                        out.push((q.filter_id.clone(), hits_with_ts(&hits)));
+                        false
+                    }
+                    None => true,
+                }
+            });
+        }
+        let disk_cached = cached + (queries.len() - cached - miss.len());
         if !miss.is_empty() {
             let (mut per_filter, perf) =
                 scan_filters_once(&self.root, &self.files, &miss, self.fmt)?;
             scan_perf = perf;
             let mut fc = self.filters.lock();
+            let mut pend = self.persist.lock();
             for (qi, q) in miss.iter().enumerate() {
                 let hits = Arc::new(std::mem::take(&mut per_filter[qi]));
+                let key = hits_cache_key(&self.ctx_sig, q);
+                pend.push((format!("cache/filters/{key}.bin"), encode_hits_cache(&hits)));
                 fc.fps.insert(q.filter_id.clone(), filter_def_fp(q));
                 fc.hits.insert(q.filter_id.clone(), Arc::clone(&hits));
                 out.push((q.filter_id.clone(), hits_with_ts(&hits)));
             }
         }
-        let cached = queries.len() - miss.len();
         Ok(FiltersBatchOutcome {
             out,
-            cached,
-            miss: miss.len(),
+            cached: disk_cached,
+            miss: queries.len() - disk_cached,
             scan_perf,
         })
     }
 
-    /// 删除一个 filter 的命中（filter 被删时调用）。
-    /// 多行子条件下推的 sub 缓存（fid\u{0}i）一并清理，避免编辑/删除后残留累积。
-    pub fn drop_filter(&self, filter_id: &str) {
-        let mut fc = self.filters.lock();
-        fc.hits.remove(filter_id);
-        fc.fps.remove(filter_id);
-        let prefix = format!("{filter_id}\u{0}");
-        fc.hits.retain(|k, _| !k.starts_with(&prefix));
-        fc.fps.retain(|k, _| !k.starts_with(&prefix));
+    /// 懒取行偏移表：建库路径（`build_ctx` 内部会话）自带偏移直接复用；
+    /// ctx 路径恒空 → 读 `.logGraph/index/<fnv64(name)>.off`（头部
+    /// size/mtime/行数三验，防陈旧误用），盘 miss 则现读现建并入待落盘队列。
+    fn ensure_offsets(&self, fi: usize) -> EngineResult<Arc<Vec<u64>>> {
+        let fe = &self.files[fi];
+        if !fe.offsets.is_empty() {
+            return Ok(Arc::clone(&fe.offsets));
+        }
+        let path = self.root.join(&fe.name);
+        if let Some(offs) = load_offsets_cache(&self.root, &path, fe) {
+            return Ok(Arc::new(offs));
+        }
+        let bytes = std::fs::read(&path).map_err(|e| EngineError::Usage {
+            message: e.to_string(),
+        })?;
+        let (offsets, _) = line_spans(&bytes);
+        self.persist.lock().push((
+            format!("index/{}.off", off_key(&fe.name)),
+            encode_offsets_cache(&path, &offsets),
+        ));
+        Ok(Arc::new(offsets))
     }
 
     /// 单行文本（tooltip/复制用）：行偏移 seek 直读，不整文件重读
     pub fn line(&self, no: u32) -> EngineResult<String> {
         let (fi, path, local) = locate(self, no)?;
-        let offsets = &self.files[fi].offsets;
-        read_line_range(&path, offsets, local, local)?
+        let offsets = self.ensure_offsets(fi)?;
+        read_line_range(&path, &offsets, local, local)?
             .into_iter()
             .next()
             .ok_or_else(|| EngineError::Usage {
@@ -295,9 +444,12 @@ impl Session {
             let locals: Vec<u32> = sorted[i..j].iter().map(|&l| l - fe.first_line).collect();
             let segs = merge_line_segments(&locals, 64);
             for (lo, hi) in segs {
-                if let Ok(texts) =
-                    read_line_range(&root.join(&fe.name), &fe.offsets, lo, hi)
-                {
+                if let Ok(texts) = read_line_range(
+                    &root.join(&fe.name),
+                    &self.ensure_offsets(fi)?,
+                    lo,
+                    hi,
+                ) {
                     for (k, text) in texts.into_iter().enumerate() {
                         rows.push((fe.first_line + lo + k as u32, text));
                     }
@@ -525,10 +677,12 @@ fn build_session(
 ) -> EngineResult<Session> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// 单文件扫描产物
+    /// 单文件扫描产物（偏移只做首/末行 ts 的中转，不入骨架——统一懒建）
     struct FileOut {
         name: String,
-        offsets: Vec<u64>,
+        line_count: u32,
+        /// 内容字节数（ctx/盘缓存内容寻址成分）
+        size: u64,
         skipped: u32,
         first_ts: Option<i64>,
         last_ts: Option<i64>,
@@ -572,27 +726,8 @@ fn build_session(
                         let Ok(bytes) = std::fs::read(root.join(rel)) else {
                             continue; // 读取失败跳过（建库/扫描同语义）
                         };
-                        // 单趟行扫描：行起始偏移（与 split('\n') 分段语义一致，
-                        // 尾部换行会产生一个末尾空行段）+ 空行计数
-                        let mut offsets: Vec<u64> =
-                            Vec::with_capacity(64 + bytes.len() / 16 * 8);
-                        let mut skipped: u32 = 0;
-                        let mut pos = 0usize;
-                        loop {
-                            let start = pos;
-                            let end = match bytes[pos..].iter().position(|&b| b == b'\n') {
-                                Some(k) => pos + k,
-                                None => bytes.len(),
-                            };
-                            offsets.push(start as u64);
-                            if js_trim_bytes(&bytes[start..end]).is_empty() {
-                                skipped += 1;
-                            }
-                            if end == bytes.len() {
-                                break;
-                            }
-                            pos = end + 1;
-                        }
+                        // 单趟行扫描：行起始偏移 + 空行计数（split('\n') 分段语义）
+                        let (offsets, skipped) = line_spans(&bytes);
                         // 首/末行 ts（时间轴范围）：首行 + 尾部回找首个有 ts 的
                         // 非空行（≤8 行，尾空段跳过）
                         let line_span = |li: usize| -> (usize, usize) {
@@ -625,7 +760,8 @@ fn build_session(
                             i,
                             FileOut {
                                 name: rel.clone(),
-                                offsets,
+                                line_count: offsets.len() as u32,
+                                size: bytes.len() as u64,
                                 skipped,
                                 first_ts,
                                 last_ts,
@@ -664,7 +800,7 @@ fn build_session(
     };
     for out in slots.into_iter().flatten() {
         let first_line = total_lines;
-        total_lines += out.offsets.len() as u32;
+        total_lines += out.line_count;
         skipped += out.skipped;
         if let Some(ts) = out.first_ts {
             fold(ts, &mut range);
@@ -675,7 +811,9 @@ fn build_session(
         files.push(FileEntry {
             name: out.name,
             first_line,
-            offsets: Arc::new(out.offsets),
+            line_count: out.line_count,
+            size: out.size,
+            offsets: Arc::new(Vec::new()),
         });
     }
 
@@ -688,7 +826,33 @@ fn build_session(
         range,
         fmt,
         filters: Mutex::new(FilterCache::default()),
+        ctx_sig: files_sig(root, &files),
+        persist: Mutex::new(Vec::new()),
     })
+}
+
+/// 单趟行扫描：行起始偏移（与 split('\n') 分段语义一致，尾部换行会产生一个
+/// 末尾空行段）+ 空行计数。建库 worker 与 ctx 路径的偏移懒建共用。
+fn line_spans(bytes: &[u8]) -> (Vec<u64>, u32) {
+    let mut offsets: Vec<u64> = Vec::with_capacity(64 + bytes.len() / 16 * 8);
+    let mut skipped: u32 = 0;
+    let mut pos = 0usize;
+    loop {
+        let start = pos;
+        let end = match bytes[pos..].iter().position(|&b| b == b'\n') {
+            Some(k) => pos + k,
+            None => bytes.len(),
+        };
+        offsets.push(start as u64);
+        if js_trim_bytes(&bytes[start..end]).is_empty() {
+            skipped += 1;
+        }
+        if end == bytes.len() {
+            break;
+        }
+        pos = end + 1;
+    }
+    (offsets, skipped)
 }
 
 // ---- 过滤：批量直扫 + 内存命中缓存 ----
@@ -1045,6 +1209,137 @@ fn filter_def_fp(q: &FilterQuery) -> String {
     format!("{h:016x}")
 }
 
+// ---- `.logGraph` 透明磁盘缓存（内容寻址；引擎只读，写入由壳层落地） ----
+
+/// FNV-1a 64 位（与 filter_def_fp 同参数）
+fn fnv64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 1469598103934665603;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
+}
+
+/// 工作区内容指纹：fnv(root + Σ(name, first_line, line_count, size))。
+/// 含 root 路径——防「同布局不同内容」的两个目录共用命中缓存；
+/// 含布局/行数/字节数——内容或清单变化自然换键，免清理。
+fn files_sig(root: &Path, files: &[FileEntry]) -> String {
+    let mut buf = String::with_capacity(64 + files.len() * 40);
+    buf.push_str(&root.to_string_lossy());
+    for f in files {
+        buf.push_str(&format!(
+            "\u{0}{}\u{1}{}\u{1}{}\u{1}{}",
+            f.name, f.first_line, f.line_count, f.size
+        ));
+    }
+    format!("{:016x}", fnv64(buf.as_bytes()))
+}
+
+/// 行偏移盘缓存文件名（`index/` 下的相对名）：fnv64(相对路径) hex
+fn off_key(name: &str) -> String {
+    format!("{:016x}", fnv64(name.as_bytes()))
+}
+
+/// filter 命中盘缓存键：hex(fnv(ctx_sig + ":" + 定义指纹))——两层指纹拼接，
+/// 内容寻址即校验。
+fn hits_cache_key(ctx_sig: &str, q: &FilterQuery) -> String {
+    format!("{:016x}", fnv64(format!("{}:{}", ctx_sig, filter_def_fp(q)).as_bytes()))
+}
+
+/// 文件 mtime（unix ms；盘缓存头部三验成分）
+fn mtime_ms(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 读 `.logGraph/<rel>` 缓存文件（缺失/不可读 → None，调用方走重建路径）
+fn load_ws_bytes(root: &Path, rel: &str) -> Option<Vec<u8>> {
+    std::fs::read(root.join(".logGraph").join(rel)).ok()
+}
+
+/// `.off` 布局：`"LGOFF001"` + size u64 + mtime_ms u64 + line_count u32 + pad u32 + u64×n
+const OFF_MAGIC: &[u8; 8] = b"LGOFF001";
+
+/// 编码行偏移盘缓存（现读现建路径调用；头部记录 stat 时刻的文件身份）
+fn encode_offsets_cache(path: &Path, offsets: &[u64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32 + offsets.len() * 8);
+    out.extend_from_slice(OFF_MAGIC);
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&mtime_ms(path).to_le_bytes());
+    out.extend_from_slice(&(offsets.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for &o in offsets {
+        out.extend_from_slice(&o.to_le_bytes());
+    }
+    out
+}
+
+/// 读 `.off` 盘缓存：头部 size/mtime/行数与当前 fs 元数据及 ctx 行数三验，
+/// 任一不符（文件已改/截断/陈旧）→ None（懒建路径兜底，不报错）。
+fn load_offsets_cache(root: &Path, path: &Path, fe: &FileEntry) -> Option<Vec<u64>> {
+    let bytes = load_ws_bytes(root, &format!("index/{}.off", off_key(&fe.name)))?;
+    if bytes.len() < 32 || &bytes[..8] != OFF_MAGIC {
+        return None;
+    }
+    let mut rd = |o: usize| -> u64 {
+        u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap())
+    };
+    let size = rd(8);
+    let mt = rd(16);
+    let count = u32::from_le_bytes(bytes[24..28].try_into().unwrap()) as usize;
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() != size
+        || mtime_ms(path) != mt
+        || count != fe.line_count as usize
+        || bytes.len() != 32 + count * 8
+    {
+        return None;
+    }
+    Some((0..count).map(|i| rd(32 + i * 8)).collect())
+}
+
+/// `.bin` 布局：`"LGFB001"` + count u32 + pad u32 + {line u32, ts i64}×n（LE）
+const HITS_MAGIC: &[u8; 8] = b"LGFB001";
+
+fn encode_hits_cache(hits: &[HitEntry]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + hits.len() * 12);
+    out.extend_from_slice(HITS_MAGIC);
+    out.extend_from_slice(&(hits.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for h in hits {
+        out.extend_from_slice(&h.line.to_le_bytes());
+        out.extend_from_slice(&h.ts.to_le_bytes());
+    }
+    out
+}
+
+/// 读 `.bin` 命中盘缓存（损坏 → None，调用方重扫）
+fn load_hits_cache(root: &Path, key: &str) -> Option<Vec<HitEntry>> {
+    let bytes = load_ws_bytes(root, &format!("cache/filters/{key}.bin"))?;
+    if bytes.len() < 16 || &bytes[..8] != HITS_MAGIC {
+        return None;
+    }
+    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    if bytes.len() != 16 + count * 12 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let o = 16 + i * 12;
+        out.push(HitEntry {
+            line: u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap()),
+            ts: i64::from_le_bytes(bytes[o + 4..o + 12].try_into().unwrap()),
+        });
+    }
+    Some(out)
+}
+
 // ---- 测试 fixture ----
 
 /// 测试 fixture：最小会话（无文件骨架，命中由 set_filter_hits 注入）
@@ -1059,6 +1354,8 @@ pub(crate) fn test_session() -> Session {
         range: None,
         fmt: None,
         filters: Mutex::new(FilterCache::default()),
+        ctx_sig: String::new(),
+        persist: Mutex::new(Vec::new()),
     }
 }
 
@@ -1115,6 +1412,8 @@ mod tests {
         FileEntry {
             name: name.into(),
             first_line,
+            line_count: scan_offsets(text).len() as u32,
+            size: text.len() as u64,
             offsets: Arc::new(scan_offsets(text)),
         }
     }
@@ -1297,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn session_open_excludes_loggraph_and_builds_range() {
+    fn build_ctx_excludes_loggraph_and_builds_range() {
         let dir = tmp_dir("open");
         std::fs::create_dir_all(dir.join(".logGraph")).unwrap();
         std::fs::write(
@@ -1311,40 +1610,48 @@ mod tests {
         )
         .unwrap();
 
-        let s = Session::open(&dir, None, |_, _, _| {}).unwrap();
-        assert_eq!(s.files.len(), 1); // .logGraph 被排除
-        assert_eq!(s.total_lines, 4); // 3 行 + 尾空段
-        assert_eq!(s.skipped, 1); // 尾空段为空行
-        assert_eq!(
-            s.range,
-            Some((1704103200000, 1704103201000)) // 首行/末行 ts（Date.UTC 无时区修正）
-        );
-        // 偏移：split('\n') 分段语义（与串行版一致）
-        assert_eq!(s.files[0].offsets.len(), 4);
-        assert_eq!(s.files[0].offsets[0], 0);
-        // info 概要
-        let info = s.info();
-        assert_eq!(info.total_lines, 4);
-        assert_eq!(info.skipped, 1);
-        assert_eq!(info.file_count, 1);
-        assert_eq!(info.timestamp_format_id.as_deref(), Some("iso-local-ms"));
-        assert_eq!(info.range_start, Some(1704103200000));
-        assert_eq!(info.range_end, Some(1704103201000));
+        let ctx = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap();
+        assert_eq!(ctx.files.len(), 1); // .logGraph 被排除
+        assert_eq!(ctx.total_lines, 4); // 3 行 + 尾空段
+        assert_eq!(ctx.skipped, 1); // 尾空段为空行
+        assert_eq!(ctx.file_count, 1);
+        assert_eq!(ctx.files[0].name, "a.log");
+        assert_eq!(ctx.files[0].first_line, 0);
+        assert_eq!(ctx.files[0].line_count, 4);
+        assert_eq!(ctx.files[0].size, 68);
+        assert_eq!(ctx.timestamp_format_id.as_deref(), Some("iso-local-ms"));
+        assert_eq!(ctx.range_start, Some(1704103200000));
+        assert_eq!(ctx.range_end, Some(1704103201000));
+        // ctx JSON 往返（客户端持有的正是这个形状）+ from_ctx 重建等价
+        let json = serde_json::to_string(&ctx).unwrap();
+        let ctx2: WsCtx = serde_json::from_str(&json).unwrap();
+        assert_eq!(ctx, ctx2);
+        let s = Session::from_ctx(&dir, &ctx2).unwrap();
+        assert_eq!(s.total_lines, 4);
+        assert_eq!(s.range, Some((1704103200000, 1704103201000)));
+        assert_eq!(s.ctx_sig, files_sig(&dir, &s.files));
+        // from_ctx 拒收损坏 ctx：空文件表 / 未知格式 id
+        assert!(Session::from_ctx(&dir, &WsCtx { files: vec![], ..ctx2.clone() }).is_err());
+        let mut bad = ctx2.clone();
+        bad.timestamp_format_id = Some("no-such-format".into());
+        assert!(Session::from_ctx(&dir, &bad).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn session_open_dir_missing_and_files_subset_errors() {
+    fn build_ctx_dir_missing_and_files_subset_errors() {
         // 目录不存在 → E_USAGE
-        let e = Session::open(Path::new("Z:/loggraph-no-such-dir"), None, |_, _, _| {})
-            .unwrap_err();
+        let e =
+            Session::build_ctx(Path::new("Z:/loggraph-no-such-dir"), None, |_, _, _| {})
+                .unwrap_err();
         assert!(matches!(e, EngineError::Usage { .. }));
         // 空目录（无日志文件）→ E_USAGE
         let dir = tmp_dir("empty");
-        let e = Session::open(&dir, None, |_, _, _| {}).unwrap_err();
+        let e = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap_err();
         assert!(matches!(e, EngineError::Usage { .. }));
         // 子集不含任何日志文件 → E_USAGE
-        let e = Session::open(&dir, Some(&["x.log".to_string()]), |_, _, _| {}).unwrap_err();
+        let e =
+            Session::build_ctx(&dir, Some(&["x.log".to_string()]), |_, _, _| {}).unwrap_err();
         assert!(matches!(e, EngineError::Usage { .. }));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1357,7 +1664,8 @@ mod tests {
             "2024-01-01 10:00:00.000 alpha\nplain line\n2024-01-01 10:00:01.000 beta alpha\n",
         )
         .unwrap();
-        let s = Session::open(&dir, None, |_, _, _| {}).unwrap();
+        let ctx = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap();
+        let s = Session::from_ctx(&dir, &ctx).unwrap();
         let q = |id: &str, pattern: &str, scope: &str| FilterQuery {
             filter_id: id.into(),
             pattern: pattern.into(),
@@ -1365,7 +1673,7 @@ mod tests {
             case_sensitive: false,
             scope: scope.into(),
         };
-        // 首次：miss → 扫描 → 缓存
+        // 首次：miss → 扫描 → 缓存 + 待落盘工件
         let o1 = s.filters_batch(&[q("f1", "alpha", "raw")]).unwrap();
         assert_eq!(o1.out.len(), 1);
         assert_eq!(
@@ -1373,7 +1681,9 @@ mod tests {
             vec![(0, 1704103200000), (2, 1704103201000)]
         );
         assert!(!o1.scan_perf.is_empty());
-        // 二次同定义：指纹命中 → 免扫描（无 scan_perf 行）
+        let pend = s.take_persistable();
+        assert_eq!(pend.len(), 1, "扫描结果应入待落盘队列");
+        // 二次同定义：RAM 指纹命中 → 免扫描（无 scan_perf 行）
         let o2 = s.filters_batch(&[q("f1", "alpha", "raw")]).unwrap();
         assert_eq!(o2.out.len(), 1);
         assert_eq!(o2.out[0].1.len(), 2);
@@ -1381,11 +1691,18 @@ mod tests {
         // 定义变化（pattern）→ 缓存失效重扫
         let o3 = s.filters_batch(&[q("f1", "beta", "raw")]).unwrap();
         assert_eq!(o3.out[0].1.iter().map(|h| h.line).collect::<Vec<_>>(), vec![2]);
-        // drop_filter 后再查 → 重扫（缓存已清）
-        s.drop_filter("f1");
-        let o4 = s.filters_batch(&[q("f1", "alpha", "raw")]).unwrap();
+        // 壳层落盘后：新会话（新 RAM）同定义（filter_id 不同也行——指纹不含 id）
+        // → 盘缓存命中，免重扫
+        for (path, bytes) in &pend {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let s2 = Session::from_ctx(&dir, &ctx).unwrap();
+        let o4 = s2.filters_batch(&[q("other", "alpha", "raw")]).unwrap();
+        assert_eq!(o4.out.len(), 1);
         assert_eq!(o4.out[0].1.len(), 2);
-        assert!(!o4.scan_perf.is_empty());
+        assert!(o4.scan_perf.is_empty(), "盘缓存命中应免重扫");
+        assert!(s2.take_persistable().is_empty(), "盘命中不应再排队落盘");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1394,14 +1711,25 @@ mod tests {
         let dir = tmp_dir("lines");
         std::fs::write(dir.join("a.log"), "l0\nl1\nl2\n").unwrap();
         std::fs::write(dir.join("b.log"), "m0\nm1\n").unwrap();
-        let s = Session::open(&dir, None, |_, _, _| {}).unwrap();
+        let ctx = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap();
+        let s = Session::from_ctx(&dir, &ctx).unwrap();
         // a.log 4 段（含尾空段）→ 全局行 0..=3；b.log 行 4..=5
+        // from_ctx 偏移懒建：首访现读现建并入队，壳层落盘后二次会话走盘缓存
         assert_eq!(s.line(0).unwrap(), "l0");
         assert_eq!(s.line(4).unwrap(), "m0");
         assert_eq!(s.line(5).unwrap(), "m1");
         assert!(s.line(6).is_err()); // 越界
+        let pend = s.take_persistable();
+        assert_eq!(pend.len(), 2, "两文件各一份 .off 工件");
+        for (path, bytes) in &pend {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let s2 = Session::from_ctx(&dir, &ctx).unwrap();
+        assert_eq!(s2.line(2).unwrap(), "l2");
+        assert!(s2.take_persistable().is_empty(), "盘缓存命中不再重建");
         // 任意顺序 ids → 排序去重 + 段读取
-        let rows = s.lines_by_ids(&[5, 0, 2]);
+        let rows = s2.lines_by_ids(&[5, 0, 2]);
         assert_eq!(
             rows,
             vec![
@@ -1411,7 +1739,28 @@ mod tests {
             ]
         );
         // 空集合 → 空
-        assert!(s.lines_by_ids(&[]).is_empty());
+        assert!(s2.lines_by_ids(&[]).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stale_offsets_cache_is_rejected() {
+        // .off 三验失败（文件已被改写：size/mtime 不符）→ 弃缓存重建
+        let dir = tmp_dir("stale");
+        std::fs::write(dir.join("a.log"), "l0\nl1\n").unwrap();
+        let ctx = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap();
+        let s = Session::from_ctx(&dir, &ctx).unwrap();
+        assert_eq!(s.line(1).unwrap(), "l1");
+        for (path, bytes) in &s.take_persistable() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        // 改写文件（内容变长）→ 旧 .off 头部 size/mtime 失配
+        std::fs::write(dir.join("a.log"), "l0\nl1\nl2 EXTRA\n").unwrap();
+        let ctx2 = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap();
+        let s2 = Session::from_ctx(&dir, &ctx2).unwrap();
+        assert_eq!(s2.line(2).unwrap(), "l2 EXTRA");
+        assert_eq!(s2.take_persistable().len(), 1, "失配应重建并入队新工件");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1419,7 +1768,8 @@ mod tests {
     fn session_corr_ids_and_file_infos() {
         let dir = tmp_dir("corr");
         std::fs::write(dir.join("a.log"), "2024-01-01 10:00:00.000 x\n2024-01-01 10:00:05.000 y\n").unwrap();
-        let s = Session::open(&dir, None, |_, _, _| {}).unwrap();
+        let ctx = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap();
+        let s = Session::from_ctx(&dir, &ctx).unwrap();
         s.filters_batch(&[FilterQuery {
             filter_id: "f1".into(),
             pattern: "x".into(),
@@ -1492,11 +1842,11 @@ mod tests {
         assert!(r2.results.get("g2").unwrap().chains.is_empty());
     }
 
-    /// 大规模基准(用户实测复现):`cargo test --release bench_db_filters_scale -- --ignored --nocapture`
+    /// 大规模基准(用户实测复现):`cargo test --release bench_ws_filters_scale -- --ignored --nocapture`
     /// 复刻 filters_batch 全链路(建库→scan→join)，分阶段计时。
     #[test]
     #[ignore]
-    fn bench_db_filters_scale() {
+    fn bench_ws_filters_scale() {
         use std::time::Instant;
         let dir = std::env::temp_dir().join("loggraph_bench_scale");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1531,16 +1881,17 @@ mod tests {
         }
         println!("[bench] 生成 640 万行/600MB: {:?}", t0.elapsed());
 
-        // ---- 建库 ----
+        // ---- 建库（REST: build_ctx → from_ctx） ----
         let t1 = Instant::now();
-        let s = Session::open(&dir, None, |_, _, _| {}).unwrap();
+        let ctx = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap();
+        let s = Session::from_ctx(&dir, &ctx).unwrap();
         println!(
-            "[bench] 建库(便宜通道: 读+偏移+计数 {} 万行): {:?}",
+            "[bench] 建库(便宜通道: 读+计数 {} 万行): {:?}",
             s.total_lines / 10000,
             t1.elapsed()
         );
-        let offsets_b: usize = s.files.iter().map(|f| f.offsets.len() * 8).sum();
-        println!("[bench] 驻留: offsets {} MB, range {:?}", offsets_b / 1048576, s.range);
+        let offsets_b: usize = s.files.iter().map(|f| f.line_count as usize * 8).sum();
+        println!("[bench] 骨架(虚拟): offsets {} MB, range {:?}", offsets_b / 1048576, s.range);
 
         // ---- filters_batch 复刻 ----
         let queries = vec![

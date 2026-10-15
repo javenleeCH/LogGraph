@@ -1,7 +1,6 @@
-mod db;
 mod engine_api;
 mod parser;
-mod sequence;
+mod ws;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -17,17 +16,13 @@ pub fn run() {
             parser::dir_lines_chunk,
             parser::dir_events_chunk,
             parser::dir_cache_drop,
-            db::db_open,
-            db::db_filters_batch,
-            db::db_filter_drop,
-            db::db_lines_by_ids,
-            db::db_line,
-            db::db_corr_ids,
-            db::db_files,
-            db::db_reveal_path,
-            db::db_open_path,
-            db::db_close,
-            sequence::db_run_sequences,
+            ws::ws_info,
+            ws::ws_filters,
+            ws::ws_lines,
+            ws::ws_line,
+            ws::ws_sequences,
+            ws::ws_reveal_path,
+            ws::ws_open_path,
             engine_api::engine_search,
             engine_api::engine_run_cep,
             engine_api::engine_validate_rules,

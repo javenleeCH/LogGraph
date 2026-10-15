@@ -7,7 +7,7 @@ import { levelStyle } from '../constants';
 import { FileText, Copy } from './Icon';
 import { GroupMatchesTab } from './GroupMatchesTab';
 import { ContextStream } from './ContextStream';
-import { fetchDbFiles, type DbFileInfo } from '../io/dbStore';
+import { getDbFiles, type DbFileInfo } from '../io/dbStore';
 import styles from './DetailPanel.module.css';
 
 /** dbMode 下关联集仅用于 web 模式 ctxLines 高亮；恒定空集避免缩放期间
@@ -111,25 +111,9 @@ export function DetailPanel() {
     });
   }, [selected, dbMode]);
 
-  // dbMode：拉文件清单一次（目录切换 = dbMode 翻转时重拉；ContextStream 定位/右键用）
+  // dbMode：文件清单由 ctx 推导（本地；目录切换 = dbMode 翻转时重取；ContextStream 定位/右键用）
   useEffect(() => {
-    if (!dbMode) {
-      setDbFiles([]);
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const files = await fetchDbFiles();
-        if (!cancelled) setDbFiles(files);
-      } catch (err) {
-        console.warn('[DetailPanel] 文件清单拉取失败:', err);
-        if (!cancelled) setDbFiles([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    setDbFiles(dbMode ? getDbFiles() : []);
   }, [dbMode]);
 
   const owningFilters = useMemo(() => {

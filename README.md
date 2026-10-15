@@ -230,7 +230,7 @@ thread/level 提取、行分割、稳定排序、skipped 统计）：
   升序驻留，指纹命中免重扫。真实数据（3.3% 命中率）扫描与 v3 无 ts 版持平。
 - **上下文按需读**：选中事件 → 按行偏移 seek 直读原文件上下文（默认 ±8 行），毫秒级，
   文本永不驻留。
-- **序列下推**：`db_run_sequences` 直接从命中缓存取 (line, ts) 事件流跑贪心链匹配
+- **序列下推**：`ws_sequences` 直接从命中缓存取 (line, ts) 事件流跑贪心链匹配
   （global + seq/and/or/not 边）；复杂条件自动回退前端 TS 引擎。
 - **命中/视口行文本走二进制通道**（`tauri::ipc::Response`，SoA 布局，前端零对象解析）。
 - **dbMode 下双视图可用**：表格流惰性取行文本，时间线视口裁剪，不强制单一视图。
@@ -239,12 +239,12 @@ thread/level 提取、行分割、稳定排序、skipped 统计）：
 
 | 操作 | v3（逐行事件索引） | v4（便宜通道 + 内联 ts） |
 |---|---|---|
-| 打开目录（Rust `db_open`） | 4.18s（提取+排序全量 ts） | **0.21s**（20×） |
+| 打开目录（Rust `ws_info`） | 4.18s（提取+排序全量 ts） | **0.21s**（20×） |
 | 点击「加载」→ 命中显示（含渲染） | ~9s（索引 IPC + JS 物化） | **1.73s**（5.2×） |
 | 首轮过滤扫描（2 过滤器，33.9 万命中） | ~0.31s | 0.32s（持平） |
 | 常驻内存（数据层） | ~145MB（事件 SoA+直查表） | **~48MB**（行偏移，-67%） |
 
-bench（600MB / 640 万行，`cargo test --release -- --ignored bench_db_filters_scale`）：
+bench（600MB / 640 万行，`cargo test --release -- --ignored bench_ws_filters_scale`）：
 建库 2.79s（串行）→ 1.26s（文件级并行）→ **0.167s**（便宜通道）；命中数逐字节不变。
 
 ### Web / Desktop 引擎一致性
@@ -307,7 +307,7 @@ src/
     fileLoader.ts               # 文件加载（浏览器/Tauri 双后端）
     dirLoader.ts                # 目录枚举 + 多文件合并（双后端）
     filterPersist.ts            # 工作区持久化 .logGraph（双后端）
-    dbStore.ts                  # dbMode 桥接（db_open / db_filter / 按需上下文）
+    dbStore.ts                  # dbMode 桥接（ws_info / ws_filters / 按需上下文；REST 客户端持有 ctx）
   timeline/
     TimelineCanvas.tsx          # Canvas 宿主 + 交互（脏标记渲染）
     renderers.ts                # 轴/lane/事件/minimap/连线绘制
@@ -328,20 +328,22 @@ src/
     ToastHost.tsx               # Toast 通知 + 忙碌指示
     ParserDriftBanner.tsx       # 双引擎解析漂移告警横幅
     ManualCopyDialog.tsx        # 复制兜底（剪贴板不可用手动复制）
-engine/                         # 纯 Rust 引擎（无 tauri、第一版无数据库）
+engine/                         # 纯 Rust 引擎（无 tauri、零数据库、零文件写副作用）
   src/
     search.rs                   # rg 直扫（grep-searcher + grep-regex）+ ignore 遍历
-    parser/timestamp.rs         # 时间戳探测/提取（5 格式）
+    parser/                     # 时间戳探测/提取（5 格式）+ 行解析 + 目录流水线
+    session.rs                  # 目录工作区：ctx 快照（build_ctx/from_ctx）+ 过滤扫描
+                                 # + `.logGraph` 透明内容寻址缓存 + 行偏移懒建 + CEP 事件源
     cep.rs                      # CEP 序列匹配纯算法（seq/not/and/or…）
     pipeline.rs                 # 无数据库流水线：扫描→时间戳→CEP
-  examples/                     # rg_scan / walk_list 实测
-cli/                            # 引擎 CLI（loggraph 命令，clap v4）
+    rules.rs                    # .cep 规则文件装载与三层校验
+cli/                            # 引擎 CLI（loggraph 命令，clap v4；ws 子命令与 IPC 1:1）
 src-tauri/
   src/
-    parser/                     # Rust 解析引擎（parse_log / parse_dir，语义对齐 JS）
-    raw_search.rs               # rg 直扫引擎（grep-searcher 封装）
-    db.rs                       # 内存数据层（便宜通道建库 / 命中缓存 / seek 直读 / 按需取数）
-    sequence.rs                 # 序列下推（db_run_sequences，待改为转发 engine）
+    parser/                     # 解析命令转发（parse_log / parse_dir，语义对齐 JS）
+    ws.rs                       # 数据层 REST 命令（ws_info / ws_filters / ws_lines / …，
+                                 # 无状态：dir+ctx 自描述；缓存工件落盘 + perf 日志）
+    engine_api.rs               # engine_* 直扫命令转发（search / cep / rules / walk）
   tauri.conf.json               # 窗口 / 构建 / 打包配置
   capabilities/default.json     # 对话框 + 文件系统权限
 filter-wasm/                    # wasm crate：Rust regex 编译给浏览器端

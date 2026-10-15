@@ -74,17 +74,20 @@ src/      React UI         桌面模式走 IPC；浏览器模式走 TS 降级实
   src-tauri 合法依赖：tauri 系、serde、loggraph-engine。
 - engine 可独立 `cargo test`；提交前跑 `cargo test --workspace`。
 - 注释/文档用中文；性能敏感路径的注释（教训类）不可删。
-- 布局：db 会话能力在 `engine/src/session.rs`；解析在 `engine/src/parser/`
-  （timestamp + line + 流水线）；CEP 在 `engine/src/cep.rs`；rg 直扫在
-  `engine/src/search.rs`；规则装载校验在 `engine/src/rules.rs`。
+- 布局：工作区（ctx 快照 + 过滤扫描 + `.logGraph` 缓存）在
+  `engine/src/session.rs`；解析在 `engine/src/parser/`（timestamp + line +
+  流水线）；CEP 在 `engine/src/cep.rs`；rg 直扫在 `engine/src/search.rs`；
+  规则装载校验在 `engine/src/rules.rs`；数据层 IPC/CLI 共用面在
+  `src-tauri/src/ws.rs`（REST：请求自描述携带 dir+ctx，无服务端会话状态）。
 
 ## 6. 验证清单（改动的最小证明）
 
 1. `cargo test --workspace` 全绿（engine 单测是语义对齐的守卫，勿删断言）。
-2. CLI 冒烟：`loggraph db open/filters/sequences/lines/corr/files <dir>` +
-   `loggraph parse file/dir` 在真实目录上跑通（1:1 的意义就在这里）。
-3. UI 表面（IPC 命令名/参数/返回形状）**不许破坏**——前端 `src/io/dbStore.ts`、
-   `src/parser/parseBridge.ts` 依赖冻结的形状；改形状必须同步前端并说明。
+2. CLI 冒烟：`loggraph ws info/filters/sequences/line/lines/corr/files <dir>` +
+   `loggraph parse file/dir` 在真实目录上跑通（1:1 的意义就在这里；
+   `ws info > ctx.json` 后其余命令 `--ctx ctx.json` 复用免整读）。
+3. UI 表面（IPC 命令名/参数/返回形状）改动必须同步前端并说明——v1.3 REST 化
+   （`db_*`→`ws_*` + ctx 回传）已按此执行；二进制 SoA 解码形状冻结不动。
 4. 涉及跨层接口：契约文档同步更新（见 §3）。
 
 ## 7. 历史教训（为什么有这些规定）

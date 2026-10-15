@@ -1,12 +1,13 @@
-//! logGraph 引擎 CLI（契约 plans/engine-cli-api-contract.md §4，v1.2 扩展）。
+//! logGraph 引擎 CLI（契约 plans/engine-cli-api-contract.md §4，v1.3 REST 化）。
 //!
 //! 用法：
 //!   loggraph search   <PATH> <PATTERN> [-i] [-F] [--json]
 //!   loggraph cep      <PATH> --rules <RULES.cep.json> [--json]
 //!   loggraph validate <RULES_FILE> [--json]
 //!   loggraph schema   [cep]
-//!   loggraph db <open|filters|sequences|line|lines|corr|files> ...（会话 API，
-//!                Tauri db_* IPC 命令的 1:1 等价，v1.2）
+//!   loggraph ws <info|filters|sequences|line|lines|corr|files> ...（工作区 API，
+//!                Tauri ws_* IPC 命令的 1:1 等价，无状态：请求自描述，
+//!                ctx 由 `ws info` 产出、`--ctx` 回传复用）
 //!   loggraph parse <file|dir> ...（解析 API，parse_log/parse_dir 1:1 等价）
 //!
 //! 退出码（§4.6）：0 成功；1 无命中/校验失败/违规门禁；2 错误（E_*）；
@@ -20,8 +21,7 @@ use loggraph_engine::parser::{
 };
 use loggraph_engine::pipeline::{run_cep, PipelineStats};
 use loggraph_engine::rules::{self, RuleIssue};
-use loggraph_engine::search::{self, Pattern, WalkOptions};
-use loggraph_engine::session::{FilterQuery, Session};
+use loggraph_engine::session::{FilterQuery, Session, WsCtx};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{BufWriter, Read, Write};
@@ -51,10 +51,11 @@ enum Command {
     Validate(ValidateArgs),
     /// 打印 JSON Schema（当前仅 cep 规则文件 schema）
     Schema(SchemaArgs),
-    /// 会话 API：目录工作区（建库 + 过滤命中 + 行读取 + 序列匹配）。
-    /// Tauri `db_*` IPC 命令的 1:1 CLI 等价（v1.2）；一次一进程，
-    /// 每条命令重建会话（便宜通道 ~0.3s/GB）
-    Db(DbArgs),
+    /// 工作区 API：目录工作区（ctx 快照 + 过滤命中 + 行读取 + 序列匹配）。
+    /// Tauri `ws_*` IPC 命令的 1:1 CLI 等价（v1.3 REST 化）；无会话状态——
+    /// `ws info` 产出 ctx（唯一付整读价的入口），其余命令 `--ctx` 复用
+    /// （缺省内部重建，付整读价）
+    Ws(WsArgs),
     /// 解析 API：单文件/目录解析。`parse_log` / `parse_dir` IPC 的 1:1 等价
     Parse(ParseArgs),
 }
@@ -138,34 +139,35 @@ struct SchemaArgs {
     kind: String,
 }
 
-// ---- 会话 API（db_* IPC 的 1:1 CLI 等价，契约 v1.2 §4.8）----
+// ---- 工作区 API（ws_* IPC 的 1:1 CLI 等价，契约 v1.3 §4.8）----
 
 #[derive(clap::Args)]
-struct DbArgs {
+struct WsArgs {
     #[command(subcommand)]
-    cmd: DbCommand,
+    cmd: WsCommand,
 }
 
 #[derive(Subcommand)]
-enum DbCommand {
-    /// 建库（便宜通道），回 SessionInfo（= db_open）
-    Open(DbOpenArgs),
-    /// 批量过滤扫描（= db_filters_batch）；--queries 为 FilterQuery JSON 数组
-    Filters(DbFiltersArgs),
-    /// 过滤 + 序列匹配（= db_filters_batch + db_run_sequences）
-    Sequences(DbSequencesArgs),
-    /// 单行文本（= db_line）
-    Line(DbLineArgs),
-    /// 批量行文本（= db_lines_by_ids）；--ids 为逗号分隔全局行号
-    Lines(DbLinesArgs),
-    /// 关联窗口行号（= db_corr_ids）
-    Corr(DbCorrArgs),
-    /// 文件清单（= db_files）
-    Files(DbFilesArgs),
+enum WsCommand {
+    /// 建工作区上下文（= ws_info；唯一付整读价的入口），打印 ctx JSON。
+    /// 管道保存后供其余命令 `--ctx` 复用
+    Info(WsInfoArgs),
+    /// 批量过滤扫描（= ws_filters）；--queries 为 FilterQuery JSON 数组
+    Filters(WsFiltersArgs),
+    /// 过滤 + 序列匹配（= ws_sequences；queries 先行 warm 命中缓存）
+    Sequences(WsSequencesArgs),
+    /// 单行文本（= ws_line）
+    Line(WsLineArgs),
+    /// 批量行文本（= ws_lines）；--ids 为逗号分隔全局行号
+    Lines(WsLinesArgs),
+    /// 关联窗口行号（= 引擎 corr_ids；IPC 已删，CLI 保留）
+    Corr(WsCorrArgs),
+    /// 文件清单（first_line 升序；CLI 便利命令）
+    Files(WsFilesArgs),
 }
 
 #[derive(clap::Args)]
-struct DbOpenArgs {
+struct WsInfoArgs {
     /// 日志目录
     dir: PathBuf,
     /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
@@ -173,20 +175,27 @@ struct DbOpenArgs {
     files: Vec<String>,
 }
 
+/// --ctx 公共参数（WsCtx JSON 文件或 `-`=stdin；缺省 = 内部重建 ctx）
 #[derive(clap::Args)]
-struct DbFiltersArgs {
+struct CtxArgs {
+    /// `ws info` 产出的 ctx JSON（`-` = stdin）；缺省内部重建（付整读价）
+    #[arg(long)]
+    ctx: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct WsFiltersArgs {
     /// 日志目录
     dir: PathBuf,
     /// FilterQuery JSON 数组文件（`-` = stdin）
     #[arg(short = 'q', long)]
     queries: String,
-    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
-    #[arg(long = "file")]
-    files: Vec<String>,
+    #[command(flatten)]
+    ctx: CtxArgs,
 }
 
 #[derive(clap::Args)]
-struct DbSequencesArgs {
+struct WsSequencesArgs {
     /// 日志目录
     dir: PathBuf,
     /// FilterQuery JSON 数组文件（`-` = stdin；须含 group 引用的全部 filter）
@@ -195,37 +204,34 @@ struct DbSequencesArgs {
     /// GroupSpec JSON 数组文件（`-` = stdin）
     #[arg(short = 'g', long)]
     groups: String,
-    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
-    #[arg(long = "file")]
-    files: Vec<String>,
+    #[command(flatten)]
+    ctx: CtxArgs,
 }
 
 #[derive(clap::Args)]
-struct DbLineArgs {
+struct WsLineArgs {
     /// 日志目录
     dir: PathBuf,
     /// 全局行号
     #[arg(long)]
     no: u32,
-    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
-    #[arg(long = "file")]
-    files: Vec<String>,
+    #[command(flatten)]
+    ctx: CtxArgs,
 }
 
 #[derive(clap::Args)]
-struct DbLinesArgs {
+struct WsLinesArgs {
     /// 日志目录
     dir: PathBuf,
     /// 全局行号，逗号分隔（如 3,17,42）
     #[arg(long)]
     ids: String,
-    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
-    #[arg(long = "file")]
-    files: Vec<String>,
+    #[command(flatten)]
+    ctx: CtxArgs,
 }
 
 #[derive(clap::Args)]
-struct DbCorrArgs {
+struct WsCorrArgs {
     /// 日志目录
     dir: PathBuf,
     /// FilterQuery JSON 数组文件（`-` = stdin；须含 --filters 引用的全部 filter）
@@ -240,13 +246,12 @@ struct DbCorrArgs {
     /// 窗口终点（epoch ms，含）
     #[arg(long)]
     end: i64,
-    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
-    #[arg(long = "file")]
-    files: Vec<String>,
+    #[command(flatten)]
+    ctx: CtxArgs,
 }
 
 #[derive(clap::Args)]
-struct DbFilesArgs {
+struct WsFilesArgs {
     /// 日志目录
     dir: PathBuf,
 }
@@ -287,7 +292,7 @@ struct ParseDirArgs {
 
 // ---- 会话/解析实现 ----
 
-/// `--file` 清单 → Session::open 的 files 参数（空 = 全集）
+/// `--file` 清单 → build_ctx 的 files 参数（空 = 全集；仅 `ws info` 支持）
 fn files_opt(files: &[String]) -> Option<&[String]> {
     if files.is_empty() {
         None
@@ -325,22 +330,49 @@ fn print_json<T: Serialize>(v: &T) {
     let _ = out.flush();
 }
 
-fn do_db(args: DbArgs) -> ExitCode {
+/// 工作区会话装载：--ctx 提供 → 零 I/O 按 ctx 重建；缺省 → 内部 build_ctx
+/// （付整读价）。`ws info` 是唯一应该付整读价的入口，其余命令建议管道传 ctx。
+fn load_ws(dir: &Path, ctx_spec: Option<&str>) -> EngineResult<Session> {
+    match ctx_spec {
+        Some(spec) => {
+            let ctx: WsCtx = parse_json_input(spec)?;
+            Session::from_ctx(dir, &ctx)
+        }
+        None => Session::from_ctx(dir, &Session::build_ctx(dir, None, |_, _, _| {})?),
+    }
+}
+
+/// 落盘引擎缓存工件（.off 偏移表 / .bin 命中集）：建父目录 + 临时文件 +
+/// 原子改名；失败静默（只影响下次延迟，不影响正确性）。与壳层 ws.rs 同语义。
+fn persist_cache(items: Vec<(PathBuf, Vec<u8>)>) {
+    for (path, bytes) in items {
+        let Some(parent) = path.parent() else { continue };
+        if std::fs::create_dir_all(parent).is_err() {
+            continue;
+        }
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+fn do_ws(args: WsArgs) -> ExitCode {
     match args.cmd {
-        DbCommand::Open(a) => {
-            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
-                Ok(s) => s,
+        WsCommand::Info(a) => {
+            let ctx = match Session::build_ctx(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+                Ok(v) => v,
                 Err(e) => return fail(e),
             };
-            print_json(&session.info());
+            print_json(&ctx);
             ExitCode::SUCCESS
         }
-        DbCommand::Filters(a) => {
+        WsCommand::Filters(a) => {
             let queries: Vec<FilterQuery> = match parse_json_input(&a.queries) {
                 Ok(v) => v,
                 Err(e) => return fail(e),
             };
-            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+            let session = match load_ws(&a.dir, a.ctx.ctx.as_deref()) {
                 Ok(s) => s,
                 Err(e) => return fail(e),
             };
@@ -348,6 +380,7 @@ fn do_db(args: DbArgs) -> ExitCode {
                 Ok(v) => v,
                 Err(e) => return fail(e),
             };
+            persist_cache(session.take_persistable());
             let total_hits: usize = outcome.out.iter().map(|(_, h)| h.len()).sum();
             print_json(&CliFiltersEnvelope {
                 filters: outcome
@@ -362,7 +395,7 @@ fn do_db(args: DbArgs) -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        DbCommand::Sequences(a) => {
+        WsCommand::Sequences(a) => {
             let queries: Vec<FilterQuery> = match parse_json_input(&a.queries) {
                 Ok(v) => v,
                 Err(e) => return fail(e),
@@ -371,31 +404,35 @@ fn do_db(args: DbArgs) -> ExitCode {
                 Ok(v) => v,
                 Err(e) => return fail(e),
             };
-            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+            let session = match load_ws(&a.dir, a.ctx.ctx.as_deref()) {
                 Ok(s) => s,
                 Err(e) => return fail(e),
             };
-            // 先填充命中缓存（IPC 两命令的组合语义）
+            // 先填充命中缓存（= IPC ws_sequences 的 warm 语义）
             if let Err(e) = session.filters_batch(&queries) {
                 return fail(e);
             }
+            persist_cache(session.take_persistable());
             print_json(&session.run_sequences(&groups));
             ExitCode::SUCCESS
         }
-        DbCommand::Line(a) => {
-            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+        WsCommand::Line(a) => {
+            let session = match load_ws(&a.dir, a.ctx.ctx.as_deref()) {
                 Ok(s) => s,
                 Err(e) => return fail(e),
             };
-            match session.line(a.no) {
-                Ok(text) => {
-                    println!("{text}");
-                    ExitCode::SUCCESS
+            let text = match session.line(a.no) {
+                Ok(t) => t,
+                Err(e) => {
+                    persist_cache(session.take_persistable());
+                    return fail(e);
                 }
-                Err(e) => fail(e),
-            }
+            };
+            persist_cache(session.take_persistable());
+            println!("{text}");
+            ExitCode::SUCCESS
         }
-        DbCommand::Lines(a) => {
+        WsCommand::Lines(a) => {
             let ids: Vec<u32> = match a
                 .ids
                 .split(',')
@@ -411,7 +448,7 @@ fn do_db(args: DbArgs) -> ExitCode {
                 Ok(v) => v,
                 Err(e) => return fail(e),
             };
-            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+            let session = match load_ws(&a.dir, a.ctx.ctx.as_deref()) {
                 Ok(s) => s,
                 Err(e) => return fail(e),
             };
@@ -420,10 +457,11 @@ fn do_db(args: DbArgs) -> ExitCode {
                 .into_iter()
                 .map(|(line, text)| CliLineRow { line, text })
                 .collect();
+            persist_cache(session.take_persistable());
             print_json(&rows);
             ExitCode::SUCCESS
         }
-        DbCommand::Corr(a) => {
+        WsCommand::Corr(a) => {
             let queries: Vec<FilterQuery> = match parse_json_input(&a.queries) {
                 Ok(v) => v,
                 Err(e) => return fail(e),
@@ -435,13 +473,14 @@ fn do_db(args: DbArgs) -> ExitCode {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect();
-            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+            let session = match load_ws(&a.dir, a.ctx.ctx.as_deref()) {
                 Ok(s) => s,
                 Err(e) => return fail(e),
             };
             if let Err(e) = session.filters_batch(&queries) {
                 return fail(e);
             }
+            persist_cache(session.take_persistable());
             let ids = session.corr_ids(&fids, a.start, a.end);
             print_json(&ids);
             if ids.is_empty() {
@@ -450,8 +489,8 @@ fn do_db(args: DbArgs) -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        DbCommand::Files(a) => {
-            let session = match Session::open(&a.dir, None, |_, _, _| {}) {
+        WsCommand::Files(a) => {
+            let session = match load_ws(&a.dir, None) {
                 Ok(s) => s,
                 Err(e) => return fail(e),
             };
@@ -534,7 +573,7 @@ fn main() -> ExitCode {
         Command::Cep(a) => do_cep(a),
         Command::Validate(a) => do_validate(a),
         Command::Schema(a) => do_schema(a),
-        Command::Db(a) => do_db(a),
+        Command::Ws(a) => do_ws(a),
         Command::Parse(a) => do_parse(a),
     }
 }

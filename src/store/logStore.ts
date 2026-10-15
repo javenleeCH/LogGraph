@@ -28,12 +28,12 @@ import {
   dbClose,
   runDbFiltersBatch,
   runDbSequences,
-  fetchCorrIds,
+  type DbFilterQuery,
   type DbFilterHits,
 } from '../io/dbStore';
 
 let corrRaf = 0;
-let corrSeq = 0; // dbMode 关联下推的响应序号（过期丢弃）
+
 
 // ---- 已保存时间范围（localStorage 持久化，跨会话/跨目录共享） ----
 
@@ -665,7 +665,7 @@ export const useLogStore = create<LogState>((set, get) => ({
             }]);
             events = skelEvents(res.get(id));
           } catch (err) {
-            console.warn('[dbMode] db_filters_batch 失败，该 filter 置空:', id, err);
+            console.warn('[dbMode] ws_filters 失败，该 filter 置空:', id, err);
           }
         }
         const match: FilterMatch = { filterId: id, events };
@@ -825,6 +825,19 @@ export const useLogStore = create<LogState>((set, get) => ({
         let results: Record<string, SequenceMatchResult> = {};
         if (rustGroups.length > 0) {
           try {
+            // REST 化：ws_sequences 需携带 groups 引用到的全部 filter 的
+            // FilterQuery（先 warm 命中缓存再跑 CEP）；rustGroups 已排除
+            // 含多行 filter 的组，故引用集均为单行 filter
+            const refIds = new Set(rustGroups.flatMap((g) => g.filterIds));
+            const seqQueries: DbFilterQuery[] = filters
+              .filter((f) => refIds.has(f.id) && f.pattern)
+              .map((f) => ({
+                filterId: f.id,
+                pattern: f.pattern,
+                isRegex: f.isRegex,
+                caseSensitive: f.caseSensitive,
+                scope: f.scope,
+              }));
             const resp = await runDbSequences(
               rustGroups.map((g) => ({
                 groupId: g.id,
@@ -842,6 +855,7 @@ export const useLogStore = create<LogState>((set, get) => ({
                 nodeConditions: g.sequence!.nodeConditions,
                 nodeCounts: g.sequence!.nodeCounts,
               })),
+              seqQueries,
             );
             if (resp.fallback) {
               results = runSequenceMatching(rustGroups, matches);
@@ -1012,7 +1026,7 @@ export const useLogStore = create<LogState>((set, get) => ({
               scope: f.scope,
             })));
           } catch (err) {
-            console.warn('[dbMode] db_filters_batch 失败，全部置空:', err);
+            console.warn('[dbMode] ws_filters 失败，全部置空:', err);
           }
         }
         const out: FilterMatch[] = filters.map((f) => ({
@@ -1257,38 +1271,9 @@ export const useLogStore = create<LogState>((set, get) => ({
       correlationHalfWindow ??
       (viewRange ? (viewRange.end - viewRange.start) * 0.02 : 1000);
 
-    if (s.dbMode) {
-      // v3：关联窗口下推 SQL（line_ts 覆盖索引范围扫 × filter_hits 点查），
-      // 替代 JS 全量扫 matches（每次视图变化 O(总命中数)）。
-      // 多行 filter 的命中聚合只在前端（Rust 缓存无原 fid 条目）→ 下推集合之外前端补
-      const seq = ++corrSeq; // 视图快速变化时丢弃过期响应
-      const multiFids = new Set(
-        s.filters.filter((f) => f.pattern.includes('\n')).map((f) => f.id),
-      );
-      const pushIds = filterIds.filter((fid) => !multiFids.has(fid));
-      const lo = centerTs - half;
-      const hi = centerTs + half;
-      const localIds: number[] = [];
-      for (const m of matches) {
-        if (!multiFids.has(m.filterId)) continue;
-        for (const ev of m.events) {
-          if (ev.ts >= lo && ev.ts <= hi) localIds.push(ev.id);
-        }
-      }
-      const apply = (ids: number[]) => {
-        if (seq !== corrSeq) return;
-        set({ correlatedEventIds: new Set([...ids, ...localIds]) });
-      };
-      if (pushIds.length === 0) {
-        apply([]);
-        return;
-      }
-      void fetchCorrIds(pushIds, lo, hi)
-        .then(apply)
-        .catch(() => apply([]));
-      return;
-    }
-
+    // db_corr_ids IPC 已删除：关联窗口本地计算——matches 即 SoA 解码产物组装的
+    // 骨架事件（id=全局行号、ts 内联；无 ts 命中的 ts=NO_TS 极大负数，永不落入
+    // 窗口），与通用路径同构，直接走通用路径。
     const ids = new Set<number>();
     const lo = centerTs - half;
     const hi = centerTs + half;
