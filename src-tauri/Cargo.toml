@@ -22,7 +22,8 @@ path = "src/main.rs"
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2.12", features = [] }
+# devtools：release 构建也启用 DevTools（debug 构建默认自带；性能基准需在 release 下看网络请求计时）
+tauri = { version = "2.12", features = ["devtools"] }
 tauri-plugin-dialog = "2.8"
 tauri-plugin-fs = "2.7"
 tauri-plugin-opener = "2.7"
