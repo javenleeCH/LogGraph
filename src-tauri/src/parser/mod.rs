@@ -64,7 +64,7 @@ struct DirParseCache {
 fn dir_cache() -> &'static Mutex<Option<DirParseCache>> {
     static CACHE: LazyLock<Mutex<Option<DirParseCache>>> =
         LazyLock::new(|| Mutex::new(None));
-    CACHE
+    &CACHE
 }
 
 /// 批量解析目录（prepare 阶段）：引擎枚举 + 逐文件解析 + 全局 id 重编 +
