@@ -36,7 +36,7 @@ pub struct DbOpenResult {
 static MEM_DB: LazyLock<RwLock<Option<Arc<Session>>>> = LazyLock::new(|| RwLock::new(None));
 
 /// 取当前会话的 Arc 快照：读锁瞬时持有，命令执行期间不阻塞其它命令
-fn current_db() -> Result<Arc<Session>, String> {
+pub(crate) fn current_db() -> Result<Arc<Session>, String> {
     MEM_DB.read().clone().ok_or_else(|| "目录未打开".into())
 }
 
