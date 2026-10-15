@@ -15,3 +15,5 @@ regex = "1"
 grep-searcher = "0.1"
 grep-regex = "0.1"
 ignore = "0.4.33"
+# 会话命中缓存内层锁（无中毒错误路径）
+parking_lot = "0.12"

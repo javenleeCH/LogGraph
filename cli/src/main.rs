@@ -1,23 +1,30 @@
-//! logGraph 引擎 CLI（契约 plans/engine-cli-api-contract.md §4）。
+//! logGraph 引擎 CLI（契约 plans/engine-cli-api-contract.md §4，v1.2 扩展）。
 //!
 //! 用法：
 //!   loggraph search   <PATH> <PATTERN> [-i] [-F] [--json]
 //!   loggraph cep      <PATH> --rules <RULES.cep.json> [--json]
 //!   loggraph validate <RULES_FILE> [--json]
 //!   loggraph schema   [cep]
+//!   loggraph db <open|filters|sequences|line|lines|corr|files> ...（会话 API，
+//!                Tauri db_* IPC 命令的 1:1 等价，v1.2）
+//!   loggraph parse <file|dir> ...（解析 API，parse_log/parse_dir 1:1 等价）
 //!
 //! 退出码（§4.6）：0 成功；1 无命中/校验失败/违规门禁；2 错误（E_*）；
 //! 3 fallback 门禁。stdout 只承载结果，错误一律 stderr。
 
 use clap::{Parser, Subcommand};
-use loggraph_engine::cep::RunSeqResponse;
+use loggraph_engine::cep::{GroupSpec, RunSeqResponse};
 use loggraph_engine::error::{EngineError, EngineResult};
+use loggraph_engine::parser::{
+    find_format, parse_dir_files, parse_text_full, read_file_lossy, DirMeta, LogEvent,
+};
 use loggraph_engine::pipeline::{run_cep, PipelineStats};
 use loggraph_engine::rules::{self, RuleIssue};
 use loggraph_engine::search::{self, Pattern, WalkOptions};
+use loggraph_engine::session::{FilterQuery, Session};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -44,6 +51,12 @@ enum Command {
     Validate(ValidateArgs),
     /// 打印 JSON Schema（当前仅 cep 规则文件 schema）
     Schema(SchemaArgs),
+    /// 会话 API：目录工作区（建库 + 过滤命中 + 行读取 + 序列匹配）。
+    /// Tauri `db_*` IPC 命令的 1:1 CLI 等价（v1.2）；一次一进程，
+    /// 每条命令重建会话（便宜通道 ~0.3s/GB）
+    Db(DbArgs),
+    /// 解析 API：单文件/目录解析。`parse_log` / `parse_dir` IPC 的 1:1 等价
+    Parse(ParseArgs),
 }
 
 /// 目录遍历公共开关（rg 同款）
@@ -125,6 +138,395 @@ struct SchemaArgs {
     kind: String,
 }
 
+// ---- 会话 API（db_* IPC 的 1:1 CLI 等价，契约 v1.2 §4.8）----
+
+#[derive(clap::Args)]
+struct DbArgs {
+    #[command(subcommand)]
+    cmd: DbCommand,
+}
+
+#[derive(Subcommand)]
+enum DbCommand {
+    /// 建库（便宜通道），回 SessionInfo（= db_open）
+    Open(DbOpenArgs),
+    /// 批量过滤扫描（= db_filters_batch）；--queries 为 FilterQuery JSON 数组
+    Filters(DbFiltersArgs),
+    /// 过滤 + 序列匹配（= db_filters_batch + db_run_sequences）
+    Sequences(DbSequencesArgs),
+    /// 单行文本（= db_line）
+    Line(DbLineArgs),
+    /// 批量行文本（= db_lines_by_ids）；--ids 为逗号分隔全局行号
+    Lines(DbLinesArgs),
+    /// 关联窗口行号（= db_corr_ids）
+    Corr(DbCorrArgs),
+    /// 文件清单（= db_files）
+    Files(DbFilesArgs),
+}
+
+#[derive(clap::Args)]
+struct DbOpenArgs {
+    /// 日志目录
+    dir: PathBuf,
+    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
+    #[arg(long = "file")]
+    files: Vec<String>,
+}
+
+#[derive(clap::Args)]
+struct DbFiltersArgs {
+    /// 日志目录
+    dir: PathBuf,
+    /// FilterQuery JSON 数组文件（`-` = stdin）
+    #[arg(short = 'q', long)]
+    queries: String,
+    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
+    #[arg(long = "file")]
+    files: Vec<String>,
+}
+
+#[derive(clap::Args)]
+struct DbSequencesArgs {
+    /// 日志目录
+    dir: PathBuf,
+    /// FilterQuery JSON 数组文件（`-` = stdin；须含 group 引用的全部 filter）
+    #[arg(short = 'q', long)]
+    queries: String,
+    /// GroupSpec JSON 数组文件（`-` = stdin）
+    #[arg(short = 'g', long)]
+    groups: String,
+    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
+    #[arg(long = "file")]
+    files: Vec<String>,
+}
+
+#[derive(clap::Args)]
+struct DbLineArgs {
+    /// 日志目录
+    dir: PathBuf,
+    /// 全局行号
+    #[arg(long)]
+    no: u32,
+    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
+    #[arg(long = "file")]
+    files: Vec<String>,
+}
+
+#[derive(clap::Args)]
+struct DbLinesArgs {
+    /// 日志目录
+    dir: PathBuf,
+    /// 全局行号，逗号分隔（如 3,17,42）
+    #[arg(long)]
+    ids: String,
+    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
+    #[arg(long = "file")]
+    files: Vec<String>,
+}
+
+#[derive(clap::Args)]
+struct DbCorrArgs {
+    /// 日志目录
+    dir: PathBuf,
+    /// FilterQuery JSON 数组文件（`-` = stdin；须含 --filters 引用的全部 filter）
+    #[arg(short = 'q', long)]
+    queries: String,
+    /// filter id 清单，逗号分隔
+    #[arg(short = 'f', long)]
+    filters: String,
+    /// 窗口起点（epoch ms）
+    #[arg(long)]
+    start: i64,
+    /// 窗口终点（epoch ms，含）
+    #[arg(long)]
+    end: i64,
+    /// 仅用这些相对路径文件（可多次；缺省 = 目录全集）
+    #[arg(long = "file")]
+    files: Vec<String>,
+}
+
+#[derive(clap::Args)]
+struct DbFilesArgs {
+    /// 日志目录
+    dir: PathBuf,
+}
+
+// ---- 解析 API（parse_* IPC 的 1:1 CLI 等价，契约 v1.2 §4.9）----
+
+#[derive(clap::Args)]
+struct ParseArgs {
+    #[command(subcommand)]
+    cmd: ParseCommand,
+}
+
+#[derive(Subcommand)]
+enum ParseCommand {
+    /// 解析单个日志文件（= parse_log）
+    File(ParseFileArgs),
+    /// 批量解析目录（= parse_dir；默认只回 DirMeta，--full 带事件与原文）
+    Dir(ParseDirArgs),
+}
+
+#[derive(clap::Args)]
+struct ParseFileArgs {
+    /// 日志文件路径
+    path: PathBuf,
+    /// 强制时间戳格式 id（缺省 = 自动探测）
+    #[arg(long = "format-id")]
+    format_id: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct ParseDirArgs {
+    /// 日志目录
+    dir: PathBuf,
+    /// 输出全量事件 + 原始行（大数据集慎用）
+    #[arg(long)]
+    full: bool,
+}
+
+// ---- 会话/解析实现 ----
+
+/// `--file` 清单 → Session::open 的 files 参数（空 = 全集）
+fn files_opt(files: &[String]) -> Option<&[String]> {
+    if files.is_empty() {
+        None
+    } else {
+        Some(files)
+    }
+}
+
+/// 读取 JSON 输入（`-` = stdin）
+fn read_json_input(spec: &str) -> EngineResult<String> {
+    if spec == "-" {
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .map_err(|source| EngineError::Io { path: PathBuf::from("<stdin>"), source })?;
+        Ok(s)
+    } else {
+        let p = PathBuf::from(spec);
+        std::fs::read_to_string(&p).map_err(|source| EngineError::Io { path: p, source })
+    }
+}
+
+/// 读取并反序列化 JSON 输入（`-` = stdin）
+fn parse_json_input<T: serde::de::DeserializeOwned>(spec: &str) -> EngineResult<T> {
+    let text = read_json_input(spec)?;
+    serde_json::from_str(&text)
+        .map_err(|source| EngineError::Usage { message: format!("JSON 输入解析失败（{spec}）: {source}") })
+}
+
+fn print_json<T: Serialize>(v: &T) {
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    let _ = serde_json::to_writer(&mut out, v);
+    let _ = writeln!(out);
+    let _ = out.flush();
+}
+
+fn do_db(args: DbArgs) -> ExitCode {
+    match args.cmd {
+        DbCommand::Open(a) => {
+            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            print_json(&session.info());
+            ExitCode::SUCCESS
+        }
+        DbCommand::Filters(a) => {
+            let queries: Vec<FilterQuery> = match parse_json_input(&a.queries) {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let outcome = match session.filters_batch(&queries) {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            let total_hits: usize = outcome.out.iter().map(|(_, h)| h.len()).sum();
+            print_json(&CliFiltersEnvelope {
+                filters: outcome
+                    .out
+                    .iter()
+                    .map(|(id, hits)| CliFilterOut { filter_id: id, hits })
+                    .collect(),
+            });
+            if total_hits == 0 {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        DbCommand::Sequences(a) => {
+            let queries: Vec<FilterQuery> = match parse_json_input(&a.queries) {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            let groups: Vec<GroupSpec> = match parse_json_input(&a.groups) {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            // 先填充命中缓存（IPC 两命令的组合语义）
+            if let Err(e) = session.filters_batch(&queries) {
+                return fail(e);
+            }
+            print_json(&session.run_sequences(&groups));
+            ExitCode::SUCCESS
+        }
+        DbCommand::Line(a) => {
+            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            match session.line(a.no) {
+                Ok(text) => {
+                    println!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        DbCommand::Lines(a) => {
+            let ids: Vec<u32> = match a
+                .ids
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    s.parse::<u32>().map_err(|_| EngineError::Usage {
+                        message: format!("行号解析失败: {s:?}（--ids 应为逗号分隔的非负整数）"),
+                    })
+                })
+                .collect::<Result<_, _>>()
+            {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let rows: Vec<CliLineRow> = session
+                .lines_by_ids(&ids)
+                .into_iter()
+                .map(|(line, text)| CliLineRow { line, text })
+                .collect();
+            print_json(&rows);
+            ExitCode::SUCCESS
+        }
+        DbCommand::Corr(a) => {
+            let queries: Vec<FilterQuery> = match parse_json_input(&a.queries) {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            let fids: Vec<String> = a
+                .filters
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            let session = match Session::open(&a.dir, files_opt(&a.files), |_, _, _| {}) {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            if let Err(e) = session.filters_batch(&queries) {
+                return fail(e);
+            }
+            let ids = session.corr_ids(&fids, a.start, a.end);
+            print_json(&ids);
+            if ids.is_empty() {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        DbCommand::Files(a) => {
+            let session = match Session::open(&a.dir, None, |_, _, _| {}) {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            print_json(&session.file_infos());
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CliFilterOut<'a> {
+    #[serde(rename = "filterId")]
+    filter_id: &'a str,
+    hits: &'a [loggraph_engine::session::HitEntry],
+}
+
+#[derive(Serialize)]
+struct CliFiltersEnvelope<'a> {
+    filters: Vec<CliFilterOut<'a>>,
+}
+
+#[derive(Serialize)]
+struct CliLineRow {
+    line: u32,
+    text: String,
+}
+
+fn do_parse(args: ParseArgs) -> ExitCode {
+    match args.cmd {
+        ParseCommand::File(a) => {
+            let forced = match a.format_id.as_deref() {
+                None => None,
+                Some(id) => match find_format(id) {
+                    Some(f) => Some(f),
+                    None => {
+                        return fail(EngineError::Usage {
+                            message: format!("未知时间戳格式 id: {id}"),
+                        })
+                    }
+                },
+            };
+            let text = match read_file_lossy(&a.path) {
+                Ok(t) => t,
+                Err(source) => return fail(EngineError::Io { path: a.path, source }),
+            };
+            print_json(&parse_text_full(&text, forced));
+            ExitCode::SUCCESS
+        }
+        ParseCommand::Dir(a) => {
+            let r = match parse_dir_files(&a.dir, |_, _, _| {}) {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            if a.full {
+                print_json(&CliParseDirFull {
+                    meta: &r.meta,
+                    events: &r.events,
+                    raw_lines: &r.raw_lines,
+                });
+            } else {
+                print_json(&r.meta);
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliParseDirFull<'a> {
+    meta: &'a DirMeta,
+    events: &'a [LogEvent],
+    raw_lines: &'a [String],
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.cmd {
@@ -132,6 +534,8 @@ fn main() -> ExitCode {
         Command::Cep(a) => do_cep(a),
         Command::Validate(a) => do_validate(a),
         Command::Schema(a) => do_schema(a),
+        Command::Db(a) => do_db(a),
+        Command::Parse(a) => do_parse(a),
     }
 }
 

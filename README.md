@@ -205,7 +205,7 @@ loggraph schema cep
 
 ### Rust 解析引擎（双通道架构）
 
-桌面端的日志解析在 Rust（`src-tauri/src/parser/`），与 JS 引擎语义逐条对齐（时间戳格式探测、
+桌面端的日志解析在 Rust（loggraph-engine `parser` 模块，v1.2 自壳层下沉；壳层仅转发），与 JS 引擎语义逐条对齐（时间戳格式探测、
 thread/level 提取、行分割、稳定排序、skipped 统计）：
 
 - 前端统一入口 `src/parser/parseBridge.ts`：Tauri 下 `invoke('parse_log' | 'parse_dir')`
@@ -217,7 +217,8 @@ thread/level 提取、行分割、稳定排序、skipped 统计）：
 
 ### 大数据架构：原始文件即数据库（dbMode）
 
-> 设计与实施记录见 [`plans/v2-rg-sql-architecture.md`](plans/v2-rg-sql-architecture.md)。
+> 设计与实施记录见 [`plans/engine-cli-api-contract.md`](plans/engine-cli-api-contract.md)（v1.2：
+> 引擎会话/解析下沉 + IPC⇄CLI 1:1）与 [`plans/rust-parser-design.md`](plans/rust-parser-design.md)。
 > 演进：v1「SQL 存全量文本」建库膨胀 3GB+、数分钟（已废弃）→ v2 瘦 SQL 索引 →
 > v3 纯内存驻留 → **v4 无逐行索引**——打开只做便宜通道，索引里没有的信息扫描时顺手就有。
 

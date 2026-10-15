@@ -1,9 +1,10 @@
 //! 行后段解析：thread / level / message 提取。
 //! 逐条对齐 `src/parser/LogParser.ts` 的 `parseRest()`（含 LEVELS 集合与两段式 level 判定）。
+//! （v1.2 自 src-tauri 壳层下沉——行解析属业务语义，壳层不得自有实现。）
 
 use crate::parser::timestamp::build_re;
 use regex::Regex;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 /// JS `String.prototype.trim` 的字符集 = Unicode White_Space + U+FEFF。
 /// Rust `char::is_whitespace` 即 White_Space 属性但不含 U+FEFF，此处补齐。
@@ -13,33 +14,19 @@ pub fn js_trim(s: &str) -> &str {
 
 /// 对齐 LogParser.LEVELS（裸写比较大小写敏感；括号形式比较 upper 后的值）
 const LEVELS: &[&str] = &[
-    "VERBOSE", "TRACE", "DEBUG", "INFO", "NOTICE",
-    "WARN", "WARNING", "ERROR", "FATAL", "CRIT", "CRITICAL",
-    "EMERG", "EMERGENCY", "ALERT", "I", "D", "W", "E", "F",
+    "TRACE", "DEBUG", "INFO", "NOTICE", "WARN", "WARNING", "ERROR", "ERR", "FATAL", "CRITICAL",
+    "CRIT", "ALERT", "EMERG", "PANIC",
 ];
 
-/// 词是否属于 LEVELS（db.rs 偏移版 parse_rest 复用）
-pub fn is_level_word(word: &str) -> bool {
-    LEVELS.contains(&word)
-}
-
 // JS: /^\[([^\]]+)\]\s*/ —— 锚定行首的 [Thread] 段
-fn thread_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| build_re(r"^\[([^\]]+)\]\s*"))
-}
+static THREAD_RE: LazyLock<Regex> = LazyLock::new(|| build_re(r"^\[([^\]]+)\]\s*"));
 
 // JS: /^([A-Z]+)\s+/ —— 锚定行首的裸写级别词（后随至少一个空白）
-fn bare_level_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| build_re(r"^([A-Z]+)\s+"))
-}
+static BARE_LEVEL_RE: LazyLock<Regex> = LazyLock::new(|| build_re(r"^([A-Z]+)\s+"));
 
 // JS: /(?:\[|\()([A-Za-z]+)(?:\]|\))\s*/ —— 无锚点，取最左匹配（[INFO] / (WARN)）
-fn bracket_level_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| build_re(r"(?:\[|\()([A-Za-z]+)(?:\]|\))\s*"))
-}
+static BRACKET_LEVEL_RE: LazyLock<Regex> =
+    LazyLock::new(|| build_re(r"(?:\[|\()([A-Za-z]+)(?:\]|\))\s*"));
 
 pub struct RestParsed {
     pub thread: Option<String>,
@@ -60,7 +47,7 @@ pub fn parse_rest(rest: &str) -> RestParsed {
     let mut level: Option<String> = None;
 
     // 1. [Thread1] 开头
-    if let Some(caps) = thread_re().captures(&msg) {
+    if let Some(caps) = THREAD_RE.captures(&msg) {
         thread = Some(caps[1].to_string());
         let whole = caps.get(0).unwrap();
         msg = js_trim(&msg[whole.end()..]).to_string();
@@ -68,7 +55,7 @@ pub fn parse_rest(rest: &str) -> RestParsed {
 
     // 2. 裸写级别（要求 ∈ LEVELS，大小写敏感）
     let mut bare_used = false;
-    if let Some(caps) = bare_level_re().captures(&msg) {
+    if let Some(caps) = BARE_LEVEL_RE.captures(&msg) {
         let word = caps.get(1).unwrap().as_str();
         if LEVELS.contains(&word) {
             level = Some(word.to_string());
@@ -80,7 +67,7 @@ pub fn parse_rest(rest: &str) -> RestParsed {
 
     // 3. 括号级别（裸写未命中/不在集合时；最左匹配，upper 后校验）
     if !bare_used {
-        if let Some(caps) = bracket_level_re().captures(&msg) {
+        if let Some(caps) = BRACKET_LEVEL_RE.captures(&msg) {
             let upper = caps.get(1).unwrap().as_str().to_uppercase();
             if LEVELS.contains(&upper.as_str()) {
                 level = Some(upper);

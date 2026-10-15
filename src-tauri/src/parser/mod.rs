@@ -1,125 +1,20 @@
-//! `parse_log` 命令：Rust 原生日志解析引擎入口。
+//! `parse_log` / `parse_dir` 命令：解析引擎薄壳层。
 //!
-//! 与 JS 引擎（src/parser/LogParser.ts）语义逐条对齐，对齐清单见 plans/rust-parser-design.md：
-//! - 行分割等价 `text.split(/\r?\n/)`；
-//! - 探测样本 = 前 100 行中的非空行（JS trim 语义）；
-//! - 空行与无法提取时间戳的行计入 skipped；
-//! - 事件 id = 原始行号（排序前赋值），最终按 ts 稳定排序；
-//! - rawLines 与 JS split 结果逐行一致（DetailPanel 上下文索引用）；
-//! - 探测失败时逐行尝试全部格式（JS extractTimestamp(undefined) 同）。
+//! 解析核心（行分割 / 时间戳探测与提取 / thread+level 行解析 / 多文件合并
+//! 重编）在 loggraph-engine `parser`；本层只做进程边界：IPC 参数转发、
+//! 进度事件推送（`parse_dir_progress`）与 prepare/chunk 分块传输缓存
+//! （进程内状态，属壳层会话）。
+//!
+//! 分块协议（141 文件 × 5.1MB 场景防 OOM）：parse_dir 只解析+缓存+回元数据
+//! （prepare）；前端循环 dir_lines_chunk / dir_events_chunk 按 offset 分块
+//! 拉取；dir_cache_drop 释放。内存峰值 ≈ Rust 缓存 + 单块 JSON，无巨型中间串。
 
-pub mod line;
-pub mod timestamp;
-
-use self::line::{js_trim, parse_rest};
-use self::timestamp::{detect_timestamp_format, extract_timestamp, find_format, TsFormat};
-use serde::Serialize;
-
-/// 单条日志事件（对齐 TS LogEvent；serde camelCase 序列化，None 字段缺省键）
-#[derive(Serialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct LogEventDto {
-    /// 行索引（排序前赋值的原始行号，多文件合并由前端重编）
-    pub id: u32,
-    /// epoch 毫秒
-    pub ts: i64,
-    /// 原始整行（不含换行符）
-    pub raw: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thread: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub level: Option<String>,
-    /// 时间戳之后的正文
-    pub message: String,
-    /// 单文件解析恒 None；多文件合并由前端赋值（保持两引擎合并逻辑统一）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_file: Option<String>,
-}
-
-/// 解析结果（= JS ParseResult + rawLines，前端零适配）
-#[derive(Serialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ParseResultDto {
-    pub events: Vec<LogEventDto>,
-    /// 与 JS text.split(/\r?\n/) 逐行一致
-    pub raw_lines: Vec<String>,
-    pub timestamp_format_id: Option<String>,
-    pub skipped: u32,
-    pub total_lines: u32,
-}
-
-/// 等价 JS `text.split(/\r?\n/)`：按 \n 切分后每段剥一个尾部 \r。
-/// 单独 \r 不切分；"a\r\r\nb" → ["a\r", "b"]，与 JS 正则行为一致。
-pub fn split_lines(text: &str) -> Vec<&str> {
-    text.split('\n')
-        .map(|l| l.strip_suffix('\r').unwrap_or(l))
-        .collect()
-}
-
-/// 核心解析流程（纯函数，对齐 LogParser.parse，供命令与单测共用）。
-pub fn parse_text_full(text: &str, forced: Option<&TsFormat>) -> ParseResultDto {
-    let lines = split_lines(text);
-    let total_lines = lines.len() as u32;
-
-    // 未指定格式 → 预扫描探测（前 100 行的非空行；对齐 JS slice(0,100).filter(l=>l.trim())）
-    let format = forced.or_else(|| {
-        let sample: Vec<&str> = lines
-            .iter()
-            .take(100)
-            .filter(|l| !js_trim(l).is_empty())
-            .copied()
-            .collect();
-        detect_timestamp_format(&sample)
-    });
-
-    let mut events: Vec<LogEventDto> = Vec::new();
-    let mut skipped: u32 = 0;
-
-    for (i, raw) in lines.iter().enumerate() {
-        // 空行（JS trim 语义）→ skipped
-        if js_trim(raw).is_empty() {
-            skipped += 1;
-            continue;
-        }
-        // 提取时间戳（探测失败 format=None 时逐行尝试全部格式，与 JS 一致）
-        let Some(ext) = extract_timestamp(raw, format) else {
-            skipped += 1;
-            continue;
-        };
-        // rest = 时间戳匹配区间之后的剩余。
-        // 注：JS 用 raw.indexOf(matchStr) 定位（matchStr 在行内更早重复出现时会定位到错误位置），
-        // 此处用真实匹配区间 —— 仅构造性输入下不同，已文档化（plans/rust-parser-design.md §5.2）。
-        let rest = &raw[ext.end..];
-        let parsed = parse_rest(rest);
-        events.push(LogEventDto {
-            id: i as u32,
-            ts: ext.ts,
-            raw: raw.to_string(),
-            thread: parsed.thread,
-            level: parsed.level,
-            message: parsed.message,
-            source_file: None,
-        });
-    }
-
-    // 按 ts 稳定排序（sort_by_key 稳定 = ES2019+ 的 JS sort 稳定；同 ts 保持原行序）
-    events.sort_by_key(|e| e.ts);
-
-    ParseResultDto {
-        events,
-        raw_lines: lines.into_iter().map(|l| l.to_string()).collect(),
-        timestamp_format_id: format.map(|f| f.id.to_string()),
-        skipped,
-        total_lines,
-    }
-}
-
-/// 读文件并做 lossy UTF-8 解码（非法字节 → U+FFFD，与浏览器 TextDecoder 默认行为一致）。
-/// 用 std::fs 直读：不经 plugin-fs 的 IPC 桥（scope 只约束插件命令，本命令为应用自有命令）。
-fn read_file_lossy(path: &str) -> Result<String, std::io::Error> {
-    let bytes = std::fs::read(path)?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
+use loggraph_engine::parser::{
+    find_format, parse_dir_files, parse_text_full, read_file_lossy, DirMeta, LogEvent, ParseResult,
+};
+use parking_lot::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 /// 统一解析命令：`path`（原生读文件+解析，推荐）与 `text`（直接解析文本）二选一，path 优先。
 /// 重活放 spawn_blocking 线程池，不阻塞 IPC/async 执行器。
@@ -128,7 +23,7 @@ pub async fn parse_log(
     path: Option<String>,
     text: Option<String>,
     format_id: Option<String>,
-) -> Result<ParseResultDto, String> {
+) -> Result<ParseResult, String> {
     // formatId 校验（当前前端不传，预留用户强制格式）
     let forced = match format_id.as_deref() {
         None => None,
@@ -144,7 +39,7 @@ pub async fn parse_log(
 
     tauri::async_runtime::spawn_blocking(move || {
         let content = if let Some(p) = &file_path {
-            read_file_lossy(p)
+            read_file_lossy(Path::new(p))
         } else if let Some(t) = &inline_text {
             Ok(t.clone())
         } else {
@@ -158,162 +53,44 @@ pub async fn parse_log(
     .map_err(|e| format!("解析任务执行失败: {e}"))?
 }
 
-// ---- 目录批量解析（P2：141 文件 × 5.1MB 场景，分块传输防 OOM）----
-// 教训：一次性返回全量 events+rawLines 会序列化出 ~2GB 的单个 JSON，
-// Rust 堆 + JSON 串 + JS parse 结果三份共存直接打爆 WebView 内存（应用退出）。
-// 协议：parse_dir 只解析+缓存+回元数据（prepare）；前端循环
-// dir_lines_chunk / dir_events_chunk 按 offset 分块拉取；dir_cache_drop 释放。
-// 内存峰值 ≈ Rust 缓存 + 单块 JSON（~15MB），无巨型中间串。
+// ---- 目录批量解析（prepare + 分块拉取） ----
 
-use std::sync::{Mutex, OnceLock};
-
-/// prepare 阶段缓存；events / raw_lines 由 dir_chunk 从头部 drain 取走
+/// prepare 阶段缓存；events / raw_lines 由 dir_chunk 从头部按 offset 切片返回
 struct DirParseCache {
-    events: Vec<LogEventDto>,
+    events: Vec<LogEvent>,
     raw_lines: Vec<String>,
 }
 
 fn dir_cache() -> &'static Mutex<Option<DirParseCache>> {
-    static CACHE: OnceLock<Mutex<Option<DirParseCache>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+    static CACHE: LazyLock<Mutex<Option<DirParseCache>>> =
+        LazyLock::new(|| Mutex::new(None));
+    CACHE
 }
 
-/// 目录解析元数据（不含大数据体）
-#[derive(Serialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct DirMetaDto {
-    pub total_events: u32,
-    pub total_lines: u32,
-    pub skipped: u32,
-    pub file_count: u32,
-    pub timestamp_format_id: Option<String>,
-    /// 参与合并的文件相对名
-    pub file_names: Vec<String>,
-}
-
-
-/// 判断文件名是否为可识别的日志文件（对齐前端 isLogFileName 宽松匹配）
-fn is_log_file_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    [".log", ".txt", ".out", ".csv", ".tsv"]
-        .iter()
-        .any(|ext| lower.ends_with(ext))
-}
-
-/// 递归枚举目录下日志文件（相对路径，'/' 分隔；与前端 listLogFiles 的 name 对齐）
-fn walk_log_files(dir: &std::path::Path, prefix: &str, depth: u32, out: &mut Vec<String>) {
-    if depth > 5 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return; // 无权限/不存在 → 跳过（前端行为一致）
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let path = entry.path();
-        if path.is_dir() {
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            walk_log_files(&path, &rel, depth + 1, out);
-        } else if is_log_file_name(&name) {
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            out.push(rel);
-        }
-    }
-}
-
-/// 批量解析目录（prepare 阶段）：枚举 + 逐文件解析 + 全局 id 重编 + sourceFile 赋值
-/// + 全局按 ts 排序，结果缓存在进程内，只回元数据（大数据体由 dir_chunk 分块拉取）。
+/// 批量解析目录（prepare 阶段）：引擎枚举 + 逐文件解析 + 全局 id 重编 +
+/// sourceFile 赋值 + 全局按 ts 排序，结果缓存在进程内，只回元数据
+/// （大数据体由 dir_chunk 分块拉取）。
 /// 进度经 Tauri event `parse_dir_progress` 推送 { loaded, total, current }。
 #[tauri::command]
-pub async fn parse_dir(
-    app: tauri::AppHandle,
-    dir: String,
-) -> Result<DirMetaDto, String> {
+pub async fn parse_dir(app: tauri::AppHandle, dir: String) -> Result<DirMeta, String> {
     use tauri::Emitter;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let root = std::path::PathBuf::from(&dir);
-        if !root.is_dir() {
-            return Err(format!("目录不存在: {dir}"));
-        }
-        // 枚举（排序与前端 localeCompare 近似：按名称字典序）
-        let mut names: Vec<String> = Vec::new();
-        walk_log_files(&root, "", 0, &mut names);
-        names.sort();
-        if names.is_empty() {
-            return Err("该目录下没有可识别的日志文件（.log/.txt/.out/.csv/.tsv）".into());
-        }
-        let total = names.len();
-
-        let mut all_events: Vec<LogEventDto> = Vec::new();
-        let mut all_raw_lines: Vec<String> = Vec::new();
-        let mut total_lines: u32 = 0;
-        let mut skipped: u32 = 0;
-        let mut format_ids: Vec<Option<String>> = Vec::new();
-        let mut file_names: Vec<String> = Vec::new();
-
-        for (i, rel) in names.iter().enumerate() {
-            let full = root.join(rel);
-            let text = match read_file_lossy(full.to_str().unwrap_or_default()) {
-                Ok(t) => t,
-                Err(_) => continue, // 读取失败跳过（前端降级行为一致）
-            };
-            let parsed = parse_text_full(&text, None);
+        let root = PathBuf::from(&dir);
+        let r = parse_dir_files(&root, |loaded, total, current| {
             let _ = app.emit(
                 "parse_dir_progress",
-                serde_json::json!({ "loaded": i + 1, "total": total, "current": rel }),
+                serde_json::json!({ "loaded": loaded, "total": total, "current": current }),
             );
-            file_names.push(rel.clone());
-            format_ids.push(parsed.timestamp_format_id.clone());
-            total_lines = total_lines.saturating_add(parsed.total_lines);
-            skipped = skipped.saturating_add(parsed.skipped);
-
-            // 全局 id 重编（baseId = 已累计行数）+ sourceFile 赋值（Rust 侧完成，
-            // 事件对象只存一份 name 引用，序列化后前端天然共享字符串池）
-            let base_id = all_raw_lines.len() as u32;
-            for l in parsed.raw_lines {
-                all_raw_lines.push(l);
-            }
-            for mut ev in parsed.events {
-                ev.id = base_id.saturating_add(ev.id);
-                ev.source_file = Some(rel.clone());
-                all_events.push(ev);
-            }
-        }
-
-        // 全局按 ts 稳定排序（与 JS mergeParsedInputs 相同语义）
-        all_events.sort_by_key(|e| e.ts);
-
-        // 格式 id：全部相同才透出（前端 meta 逻辑）
-        let timestamp_format_id = if !format_ids.is_empty() && format_ids.windows(2).all(|w| w[0] == w[1]) {
-            format_ids[0].clone()
-        } else {
-            None
-        };
-
-        let total_events = all_events.len() as u32;
-        // 缓存（覆盖旧的；连续加载时旧缓存被丢弃）
-        *dir_cache().lock().map_err(|e| e.to_string())? = Some(DirParseCache {
-            events: all_events,
-            raw_lines: all_raw_lines,
-        });
-
-        Ok(DirMetaDto {
-            total_events,
-            total_lines,
-            skipped,
-            file_count: file_names.len() as u32,
-            timestamp_format_id,
-            file_names,
         })
+        .map_err(|e| e.to_string())?;
+
+        // 缓存（覆盖旧的；连续加载时旧缓存被丢弃）
+        *dir_cache().lock() = Some(DirParseCache {
+            events: r.events,
+            raw_lines: r.raw_lines,
+        });
+        Ok(r.meta)
     })
     .await
     .map_err(|e| format!("目录解析任务执行失败: {e}"))?
@@ -322,11 +99,8 @@ pub async fn parse_dir(
 /// 取一块 rawLines（offset 起最多 max 条；不足 max = 已到尾）。
 /// 返回空数组 = 该序列传输完成。
 #[tauri::command]
-pub fn dir_lines_chunk(
-    offset: u32,
-    max: u32,
-) -> Result<Vec<String>, String> {
-    let guard = dir_cache().lock().map_err(|e| e.to_string())?;
+pub fn dir_lines_chunk(offset: u32, max: u32) -> Result<Vec<String>, String> {
+    let guard = dir_cache().lock();
     let Some(cache) = guard.as_ref() else {
         return Ok(Vec::new());
     };
@@ -338,11 +112,8 @@ pub fn dir_lines_chunk(
 /// 取一块事件（offset 起最多 max 条；事件已按 ts 升序）。
 /// 返回空数组 = 该序列传输完成。两序列都完成时由前端调 dir_cache_drop 释放。
 #[tauri::command]
-pub fn dir_events_chunk(
-    offset: u32,
-    max: u32,
-) -> Result<Vec<LogEventDto>, String> {
-    let guard = dir_cache().lock().map_err(|e| e.to_string())?;
+pub fn dir_events_chunk(offset: u32, max: u32) -> Result<Vec<LogEvent>, String> {
+    let guard = dir_cache().lock();
     let Some(cache) = guard.as_ref() else {
         return Ok(Vec::new());
     };
@@ -354,186 +125,48 @@ pub fn dir_events_chunk(
 /// 丢弃缓存（前端拉取完成后调用；重新 prepare 也会覆盖）。
 #[tauri::command]
 pub fn dir_cache_drop() -> Result<(), String> {
-    *dir_cache().lock().map_err(|e| e.to_string())? = None;
+    *dir_cache().lock() = None;
     Ok(())
 }
 
-// ---- 单元测试（cargo test；期望值均按 JS 语义人工推演）----
+// ---- 分块传输协议测试（壳层职责；解析语义测试在 engine） ----
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn split_lines_matrix() {
-        // 与 JS "x".split(/\r?\n/) 行为矩阵一致
-        assert_eq!(split_lines(""), vec![""]);
-        assert_eq!(split_lines("a"), vec!["a"]);
-        assert_eq!(split_lines("a\nb"), vec!["a", "b"]);
-        assert_eq!(split_lines("a\r\nb"), vec!["a", "b"]);
-        assert_eq!(split_lines("a\rb"), vec!["a\rb"]); // 单独 \r 不切
-        assert_eq!(split_lines("a\r\r\nb"), vec!["a\r", "b"]); // 只剥一个 \r
-        assert_eq!(split_lines("a\n"), vec!["a", ""]); // 尾换行 → 末尾空行
-        assert_eq!(split_lines("a\n\nb"), vec!["a", "", "b"]);
-        assert_eq!(split_lines("中文\n行"), vec!["中文", "行"]);
-    }
-
-    #[test]
-    fn parse_basic_with_meta() {
-        let text = "2024-01-01 10:00:00.000 [T1] INFO hello\n2024-01-01 10:00:01.000 [T1] WARN world\n";
-        let r = parse_text_full(text, None);
-        assert_eq!(r.total_lines, 3); // 末尾换行 → 第 3 行为空
-        assert_eq!(r.skipped, 1);
-        assert_eq!(r.timestamp_format_id.as_deref(), Some("iso-local-ms"));
-        assert_eq!(
-            r.raw_lines,
-            vec![
-                "2024-01-01 10:00:00.000 [T1] INFO hello",
-                "2024-01-01 10:00:01.000 [T1] WARN world",
-                ""
-            ]
-        );
-        assert_eq!(r.events.len(), 2);
-
-        let e0 = &r.events[0];
-        assert_eq!(e0.id, 0);
-        assert_eq!(e0.ts, 1704103200000); // Date.UTC(2024,0,1,10,0,0,0)
-        assert_eq!(e0.raw, "2024-01-01 10:00:00.000 [T1] INFO hello");
-        assert_eq!(e0.thread.as_deref(), Some("T1"));
-        assert_eq!(e0.level.as_deref(), Some("INFO"));
-        assert_eq!(e0.message, "hello");
-        assert_eq!(e0.source_file, None);
-
-        let e1 = &r.events[1];
-        assert_eq!(e1.id, 1);
-        assert_eq!(e1.ts, 1704103201000);
-        assert_eq!(e1.level.as_deref(), Some("WARN"));
-        assert_eq!(e1.message, "world");
-    }
-
-    #[test]
-    fn ids_are_original_line_indices() {
-        // 空行占行号：第二个事件 id=2（JS 用全局行号索引 rawLines，必须一致）
-        let text = "12:00:00.000 a\n\n12:00:02.000 b\n";
-        let r = parse_text_full(text, None);
-        assert_eq!(r.total_lines, 4);
-        assert_eq!(r.skipped, 2);
-        assert_eq!(r.timestamp_format_id.as_deref(), Some("time-only-ms"));
-        let ids: Vec<u32> = r.events.iter().map(|e| e.id).collect();
-        assert_eq!(ids, vec![0, 2]);
-        assert_eq!(r.events[0].ts, 43200000); // Date.UTC(1970,0,1,12)
-        assert_eq!(r.events[1].ts, 43202000);
-        // id 可直接索引 rawLines（DetailPanel 上下文依赖）
-        assert_eq!(r.raw_lines[2], "12:00:02.000 b");
-    }
-
-    #[test]
-    fn stable_sort_same_ts() {
-        // 同 ts 保持原行序（Rust sort_by_key 稳定 = ES2019+ JS sort 稳定）
-        let text = "12:00:00.000 b\n12:00:00.000 a\n";
-        let r = parse_text_full(text, None);
-        assert_eq!(r.events.len(), 2);
-        assert_eq!(r.events[0].id, 0);
-        assert!(r.events[0].raw.ends_with("b"));
-        assert_eq!(r.events[1].id, 1);
-        assert!(r.events[1].raw.ends_with("a"));
-    }
-
-    #[test]
-    fn sort_by_ts_across_lines() {
-        // 乱序输入 → 按 ts 升序修正（便于前端二分查找）
-        let text = "12:00:05.000 late\n12:00:01.000 early\n";
-        let r = parse_text_full(text, None);
-        assert_eq!(r.events[0].id, 1); // early 行 ts 更小 → 排前
-        assert!(r.events[0].raw.ends_with("early"));
-        assert!(r.events[1].raw.ends_with("late"));
-    }
-
-    #[test]
-    fn skipped_and_totals() {
-        // 尾换行 → split 3 段（末尾空行）；空行与无时间戳行均计入 skipped（JS split 同，
-        // 与 split_lines_matrix / detect_fallback_100_limit 的尾空行语义一致）
-        let text = "12:00:00.000 ok\nplain line without timestamp\n";
-        let r = parse_text_full(text, None);
-        assert_eq!(r.events.len(), 1);
-        assert_eq!(r.skipped, 2);
-        assert_eq!(r.total_lines, 3);
-    }
-
-    #[test]
-    fn crlf_equals_lf() {
-        let lf = "2024-01-01 10:00:00.000 a\n2024-01-01 10:00:01.000 b\n";
-        let crlf = "2024-01-01 10:00:00.000 a\r\n2024-01-01 10:00:01.000 b\r\n";
-        assert_eq!(parse_text_full(lf, None), parse_text_full(crlf, None));
-    }
-
-    #[test]
-    fn bom_prefixed_line() {
-        // BOM 保留在 raw 中；正则无锚点仍能命中时间戳（与浏览器 readAsText 行为一致）
-        let text = "\u{feff}2024-01-01 10:00:00.000 a";
-        let r = parse_text_full(text, None);
-        assert_eq!(r.events.len(), 1);
-        assert_eq!(r.events[0].ts, 1704103200000);
-        assert!(r.events[0].raw.starts_with('\u{feff}'));
-        assert_eq!(r.events[0].message, "a");
-    }
-
-    #[test]
-    fn forced_format() {
-        // 强制 epoch：正常命中
-        let fmt = find_format("epoch").unwrap();
-        let r = parse_text_full("1710000000000 x", Some(fmt));
-        assert_eq!(r.events.len(), 1);
-        assert_eq!(r.events[0].ts, 1710000000000);
-        assert_eq!(r.events[0].message, "x");
-        assert_eq!(r.timestamp_format_id.as_deref(), Some("epoch"));
-
-        // 强制 time-only：epoch 行不匹配 → skipped（不回退尝试其他格式，JS 同）
-        let fmt2 = find_format("time-only-ms").unwrap();
-        let r2 = parse_text_full("1710000000000 x", Some(fmt2));
-        assert_eq!(r2.events.len(), 0);
-        assert_eq!(r2.skipped, 1);
-        assert_eq!(r2.timestamp_format_id.as_deref(), Some("time-only-ms"));
-    }
-
-    #[test]
-    fn empty_input() {
-        let r = parse_text_full("", None);
-        assert_eq!(r.total_lines, 1); // "".split() = [""]
-        assert_eq!(r.skipped, 1);
-        assert!(r.events.is_empty());
-        assert_eq!(r.raw_lines, vec![""]);
-        assert_eq!(r.timestamp_format_id, None);
-    }
-
-    #[test]
-    fn detect_fail_falls_back_to_all_formats_per_line() {
-        // 前 100 非空行无一命中任何格式 → 探测返回 null；
-        // 但后续行逐行尝试全部格式（JS extractTimestamp(undefined) 同）
-        let mut text = String::new();
-        for _ in 0..100 {
-            text.push_str("plain filler line\n");
+    fn ev(id: u32, ts: i64) -> LogEvent {
+        LogEvent {
+            id,
+            ts,
+            raw: format!("line{id}"),
+            thread: None,
+            level: None,
+            message: format!("line{id}"),
+            source_file: None,
         }
-        text.push_str("1710000000000 real event\n");
-        let r = parse_text_full(&text, None);
-        assert_eq!(r.timestamp_format_id, None);
-        assert_eq!(r.events.len(), 1);
-        assert_eq!(r.events[0].id, 100);
-        assert_eq!(r.events[0].ts, 1710000000000);
-        assert_eq!(r.events[0].message, "real event");
-        // 100 填充行（无时间戳）+ 尾部换行产生的 1 个空行 → skipped = 101
-        assert_eq!(r.total_lines, 102);
-        assert_eq!(r.skipped, 101);
     }
 
+    /// 分块边界：offset 钳制、不足 max 截断、空缓存 → 空数组、drop 后 → 空数组
     #[test]
-    fn read_file_lossy_replaces_invalid_utf8() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("loggraph_test_{}.log", std::process::id()));
-        std::fs::write(&path, b"2024-01-01 10:00:00.000 \xff\xfe broken\n").unwrap();
-        let text = read_file_lossy(path.to_str().unwrap()).unwrap();
-        assert!(text.starts_with("2024-01-01 10:00:00.000 "));
-        assert!(text.contains('\u{fffd}')); // 非法字节 → U+FFFD
-        let _ = std::fs::remove_file(&path);
+    fn dir_chunk_protocol_boundaries() {
+        *dir_cache().lock() = Some(DirParseCache {
+            events: vec![ev(0, 100), ev(1, 200), ev(2, 300)],
+            raw_lines: vec!["a".into(), "b".into(), "c".into()],
+        });
+
+        assert_eq!(dir_lines_chunk(0, 2).unwrap(), vec!["a".to_string(), "b".to_string()]);
+        // offset 越界 → 空数组（传输完成信号）
+        assert_eq!(dir_lines_chunk(99, 2).unwrap(), Vec::<String>::new());
+        // 不足 max → 截断到尾
+        assert_eq!(dir_lines_chunk(1, 50).unwrap(), vec!["b".to_string(), "c".to_string()]);
+
+        let evs = dir_events_chunk(1, 1).unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].id, 1);
+
+        dir_cache_drop().unwrap();
+        assert_eq!(dir_lines_chunk(0, 2).unwrap(), Vec::<String>::new());
+        assert_eq!(dir_events_chunk(0, 2).unwrap(), Vec::<LogEvent>::new());
     }
 }

@@ -29,6 +29,9 @@ pub enum ErrorCode {
     Io,
     #[serde(rename = "E_NO_FILES")]
     NoFiles,
+    /// 会话/参数类使用错误（行号越界、目录不存在、清单为空等；v1.2）
+    #[serde(rename = "E_USAGE")]
+    Usage,
 }
 
 impl ErrorCode {
@@ -42,6 +45,7 @@ impl ErrorCode {
             Self::Glob => "E_GLOB",
             Self::Io => "E_IO",
             Self::NoFiles => "E_NO_FILES",
+            Self::Usage => "E_USAGE",
         }
     }
 }
@@ -61,6 +65,10 @@ pub struct ErrorDto {
 pub enum EngineError {
     #[error("非法正则/模式 {input:?}: {source}")]
     InvalidPattern { input: String, source: grep_regex::Error },
+
+    /// 会话扫描的正则编译失败（regex::bytes 路径；code 同 E_PATTERN，v1.2）
+    #[error("构建正则失败 {input:?}: {source}")]
+    PatternBuild { input: String, source: regex::Error },
 
     #[error("非法 glob {glob:?}: {source}")]
     InvalidGlob { glob: String, source: ignore::Error },
@@ -82,12 +90,16 @@ pub enum EngineError {
 
     #[error("{} 下未找到可搜索文件", path.display())]
     NoFiles { path: PathBuf },
+
+    /// 会话/参数类使用错误（v1.2：行号越界、目录不存在、清单为空等）
+    #[error("{message}")]
+    Usage { message: String },
 }
 
 impl EngineError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::InvalidPattern { .. } => ErrorCode::Pattern,
+            Self::InvalidPattern { .. } | Self::PatternBuild { .. } => ErrorCode::Pattern,
             Self::InvalidGlob { .. } => ErrorCode::Glob,
             Self::Io { .. } => ErrorCode::Io,
             Self::RulesSyntax { .. } => ErrorCode::RulesSyntax,
@@ -95,6 +107,7 @@ impl EngineError {
             Self::RulesSemantic { .. } => ErrorCode::RulesSemantic,
             Self::RulesVersion { .. } => ErrorCode::RulesVersion,
             Self::NoFiles { .. } => ErrorCode::NoFiles,
+            Self::Usage { .. } => ErrorCode::Usage,
         }
     }
 

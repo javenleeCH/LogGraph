@@ -251,25 +251,30 @@ fn ev_before(a: &SeqEvent, b: &SeqEvent) -> bool {
     a.ts < b.ts || (a.ts == b.ts && a.id < b.id)
 }
 
-/// 单边推进判定：ok(None)=not 通过且不断链；ok(Some)=推进到目标事件；
-/// violation=not 违规；break=断裂（目标缺失/插队/窗口耗尽）。
+/// 事件切片表：filter_id → 借用事件切片（匹配全程零整表拷贝）。
+type EventSlices<'a> = HashMap<&'a str, &'a [SeqEvent]>;
+
+/// 单边推进判定：ok(None)=not 通过且不断链；ok(Some((事件, 目标filterId)))=推进到目标事件
+/// （目标 id 由最早就绪判定给出，and 汇聚推进时为 None）；violation=not 违规；break=断裂
+/// （目标缺失/插队/窗口耗尽）。
 enum Advance {
-    Ok(Option<SeqEvent>),
+    Ok(Option<(SeqEvent, Option<String>)>),
     Violation(SeqEvent),
     Break,
 }
 
 /// 在窗口内找最早就绪目标（ts 升序，ts 相同按行号定先后）。
+/// 调用前先把各目标流中不晚于 from 或已消耗的事件跳过，并把指针写回 idx。
 fn earliest_ready(
     targets: &[String],
-    events_by_target: &HashMap<String, Vec<SeqEvent>>,
+    events_by_target: &EventSlices<'_>,
     consumed: &HashSet<u32>,
     from: &SeqEvent,
     idx: &mut HashMap<String, usize>,
 ) -> Option<(String, SeqEvent)> {
     let mut best: Option<(String, SeqEvent)> = None;
     for t in targets {
-        let evs = events_by_target.get(t).cloned().unwrap_or_default();
+        let evs = events_by_target.get(t.as_str()).copied().unwrap_or(&[]);
         let mut i = *idx.get(t).unwrap_or(&evs.len());
         while i < evs.len() && (!ev_before(from, &evs[i]) || consumed.contains(&evs[i].id)) {
             i += 1;
@@ -294,7 +299,7 @@ fn earliest_ready(
 fn advance_edge(
     edge: &EdgeSpec,
     from_events: &[SeqEvent],
-    events_by_target: &HashMap<String, Vec<SeqEvent>>,
+    events_by_target: &EventSlices<'_>,
     consumed: &HashSet<u32>,
     from: &SeqEvent,
 ) -> Advance {
@@ -304,13 +309,17 @@ fn advance_edge(
 
     let mut idx: HashMap<String, usize> = HashMap::new();
     for t in &targets {
-        let evs = events_by_target.get(t).cloned().unwrap_or_default();
-        idx.insert(t.clone(), next_unused_idx(&evs, consumed, from));
+        let evs = events_by_target.get(t.as_str()).copied().unwrap_or(&[]);
+        idx.insert(t.clone(), next_unused_idx(evs, consumed, from));
     }
     let i_from = next_unused_idx(from_events, consumed, from);
 
     if kind == "not" {
-        let from_ev = if i_from < from_events.len() { Some(&from_events[i_from]) } else { None };
+        let from_ev = if i_from < from_events.len() {
+            Some(&from_events[i_from])
+        } else {
+            None
+        };
         let ready = earliest_ready(&targets, events_by_target, consumed, from, &mut idx);
         if let Some(r) = ready {
             if r.1.ts <= hi && (from_ev.is_none() || ev_before(&r.1, from_ev.unwrap())) {
@@ -323,7 +332,11 @@ fn advance_edge(
     let mut and_ready: HashMap<String, SeqEvent> = HashMap::new();
     let target_set: HashSet<String> = targets.iter().cloned().collect();
     loop {
-        let from_ev = if i_from < from_events.len() { Some(&from_events[i_from]) } else { None };
+        let from_ev = if i_from < from_events.len() {
+            Some(&from_events[i_from])
+        } else {
+            None
+        };
         let from_ts_next = from_ev.map(|e| e.ts).unwrap_or(i64::MAX);
         let ready = earliest_ready(&targets, events_by_target, consumed, from, &mut idx);
         let ready_ts = ready.as_ref().map(|r| r.1.ts).unwrap_or(i64::MAX);
@@ -350,11 +363,11 @@ fn advance_edge(
                                 }
                             }
                         }
-                        return Advance::Ok(first);
+                        return Advance::Ok(first.map(|ev| (ev, None)));
                     }
                     continue;
                 }
-                return Advance::Ok(Some(r.1));
+                return Advance::Ok(Some((r.1, Some(r.0))));
             }
         }
         return Advance::Break;
@@ -452,9 +465,26 @@ impl GroupSpec {
 
 /// 对单个 group 跑序列匹配。事件流由 [`EventStore`] 提供（纯算法，不接触存储层）。
 pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<SeqResult> {
-    let get_events = |fid: &str| -> &[SeqEvent] {
-        store.get(fid).map(|v| v.as_slice()).unwrap_or(&[])
-    };
+    // 借用切片表：group 成员 filter + 边引用的 filter 全部入表，匹配全程按引用推进。
+    // 旧实现给每个头事件 to_vec() 克隆全部事件流（26 万头事件 × 33 万元素
+    // ≈ 千亿次拷贝），大数据集上直接挂死。
+    let mut lane_ids: HashSet<String> = spec.filter_ids.iter().cloned().collect();
+    for e in &spec.edges {
+        lane_ids.insert(e.from_filter_id.clone());
+        for t in targets_of(e) {
+            lane_ids.insert(t);
+        }
+    }
+    let slices: EventSlices<'_> = lane_ids
+        .iter()
+        .map(|fid| {
+            (
+                fid.as_str(),
+                store.get(fid).map(|v| v.as_slice()).unwrap_or(&[]),
+            )
+        })
+        .collect();
+    let get_slice = |fid: &str| -> &[SeqEvent] { slices.get(fid).copied().unwrap_or(&[]) };
 
     let mut edge_stats: Vec<EdgeStat> = spec
         .edges
@@ -475,15 +505,13 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
         if edge_kind(edge) != "not" {
             continue;
         }
-        let Some(to_fid) = edge.to_filter_id.as_deref() else {
+        if edge.to_filter_id.is_none() {
             continue;
-        };
-        let from_events = get_events(&edge.from_filter_id).to_vec();
-        let to_events = get_events(to_fid).to_vec();
+        }
+        let from_events = get_slice(&edge.from_filter_id);
         let no_consumed = HashSet::new();
-        for fe in &from_events {
-            let ev_by_target = HashMap::from([(to_fid.to_string(), to_events.clone())]);
-            let r = advance_edge(edge, &from_events, &ev_by_target, &no_consumed, fe);
+        for fe in from_events {
+            let r = advance_edge(edge, from_events, &slices, &no_consumed, fe);
             if let Advance::Violation(tgt) = r {
                 violations.push(NotViolation {
                     edge_id: edge.id.clone(),
@@ -505,14 +533,14 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
 
     for chain in &resolved {
         let head_fid = &chain[0].from_filter_id;
-        let head_events = get_events(head_fid).to_vec();
+        let head_events = get_slice(head_fid);
         if head_events.is_empty() {
             if let Some(st) = stat_mut(&mut edge_stats, &chain[0].id) {
                 st.miss_count += 1;
             }
             continue;
         }
-        for e0 in &head_events {
+        for e0 in head_events {
             if consumed.contains(&e0.id) {
                 continue;
             }
@@ -525,12 +553,8 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
             let mut ok = true;
             for edge in chain {
                 let kind = edge_kind(edge);
-                let from_events = get_events(&edge.from_filter_id).to_vec();
-                let mut ev_by_target: HashMap<String, Vec<SeqEvent>> = HashMap::new();
-                for t in targets_of(edge) {
-                    ev_by_target.insert(t.clone(), get_events(&t).to_vec());
-                }
-                let r = advance_edge(edge, &from_events, &ev_by_target, &consumed, &cur);
+                let from_events = get_slice(&edge.from_filter_id);
+                let r = advance_edge(edge, from_events, &slices, &consumed, &cur);
                 match r {
                     Advance::Break => {
                         if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
@@ -555,11 +579,11 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
                         if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
                             st.matched_count += 1;
                         }
-                        if let Some(mt) = moved_to {
+                        if let Some((mt, mt_target)) = moved_to {
                             if kind == "and" {
                                 for t in targets_of(edge) {
-                                    let evs = ev_by_target.get(&t).cloned().unwrap_or_default();
-                                    let i = next_unused_idx(&evs, &consumed, &cur);
+                                    let evs = get_slice(&t);
+                                    let i = next_unused_idx(evs, &consumed, &cur);
                                     if i < evs.len() && evs[i].ts <= cur.ts + edge.max_gap_ms {
                                         steps.push(Step {
                                             edge_id: Some(edge.id.clone()),
@@ -570,15 +594,10 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
                                 }
                                 cur = mt;
                             } else {
-                                let t_fid = if kind == "or" || kind == "seq" {
-                                    ev_by_target
-                                        .iter()
-                                        .find(|(_, evs)| evs.contains(&mt))
-                                        .map(|(k, _)| k.clone())
-                                        .unwrap_or_else(|| anchor_of(edge))
-                                } else {
-                                    anchor_of(edge)
-                                };
+                                // 目标 lane 由最早就绪判定直接给出（旧实现对全部
+                                // 目标流线性 contains 扫描，26 万头事件 × 7 万目标
+                                // = 另一笔十亿次级开销）
+                                let t_fid = mt_target.unwrap_or_else(|| anchor_of(edge));
                                 steps.push(Step {
                                     edge_id: Some(edge.id.clone()),
                                     filter_id: t_fid,
@@ -611,7 +630,7 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
 
     let mut uncovered: Vec<SeqEvent> = Vec::new();
     for fid in &spec.filter_ids {
-        for ev in get_events(fid) {
+        for ev in get_slice(fid) {
             if !consumed.contains(&ev.id) {
                 uncovered.push(ev.clone());
             }
@@ -676,6 +695,36 @@ mod tests {
             max_gap_ms: 1000,
             period_ms: None,
         }
+    }
+
+    #[test]
+    fn seq_scale_no_table_clones() {
+        // 回归：匹配循环曾对每个头事件 to_vec() 克隆全部事件流 + 对目标流
+        // 线性 contains 扫描（O(头事件 × 事件总数)，26 万级事件集上挂死）。
+        // 现为借用切片推进——本测试在旧实现下无法在有限时间内完成。
+        let n: usize = 50_000;
+        let a: Vec<SeqEvent> = (0..n)
+            .map(|i| SeqEvent::new((i * 2) as u32, (i * 10_000) as i64))
+            .collect();
+        let b: Vec<SeqEvent> = (0..n)
+            .map(|i| SeqEvent::new((i * 2 + 1) as u32, (i * 10_000 + 500) as i64))
+            .collect();
+        let mut s: EventStore<'static> = EventStore::new();
+        s.insert("A".into(), a);
+        s.insert("B".into(), b);
+        let spec = GroupSpec {
+            group_id: "g".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.chains.len(), n, "每对 A→B(500ms 后) 都应成链");
+        assert_eq!(r.uncovered_events.len(), 0);
+        assert_eq!(r.chains[0].steps[1].filter_id, "B");
     }
 
     #[test]

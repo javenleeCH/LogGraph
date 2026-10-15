@@ -27,7 +27,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 引擎 crate（engine_* IPC 命令，契约 §6；零数据库直扫 + CEP + 规则校验）
 loggraph-engine = { path = "../engine" }
-# Rust 原生日志解析引擎（时间戳/行解析正则；unicode 模式 + JS \s/\d 语义翻译，见 parser/timestamp.rs）
-regex = "1"
-# 锁原语（内存库 RwLock 快照读 + filter 命中缓存内层 Mutex；无中毒错误路径）
+# 锁原语（会话句柄 RwLock 快照读 + 分块缓存 Mutex；无中毒错误路径）
 parking_lot = "0.12"
