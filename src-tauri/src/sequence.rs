@@ -18,7 +18,7 @@ use loggraph_engine::cep::{GroupSpec, RunSeqResponse};
 /// CEP 匹配可达百万级事件 → 阻塞线程池执行，不占主线程。
 #[tauri::command]
 pub async fn db_run_sequences(groups: Vec<GroupSpec>) -> Result<RunSeqResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<RunSeqResponse, String> {
         let db = current_db()?;
         Ok(db.run_sequences(&groups))
     })

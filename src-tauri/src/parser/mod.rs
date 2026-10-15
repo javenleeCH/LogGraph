@@ -75,7 +75,7 @@ fn dir_cache() -> &'static Mutex<Option<DirParseCache>> {
 pub async fn parse_dir(app: tauri::AppHandle, dir: String) -> Result<DirMeta, String> {
     use tauri::Emitter;
 
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<DirMeta, String> {
         let root = PathBuf::from(&dir);
         let r = parse_dir_files(&root, |loaded, total, current| {
             let _ = app.emit(

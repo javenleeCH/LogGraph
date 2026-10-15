@@ -112,7 +112,7 @@ pub async fn db_open(
 ) -> Result<DbOpenResult, String> {
     use tauri::Emitter;
 
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<DbOpenResult, String> {
         let t0 = Instant::now();
         let root = std::path::PathBuf::from(&dir);
 
@@ -213,7 +213,7 @@ pub async fn db_filters_batch(
 /// 删除一个 filter 的命中（filter 被删时调用）
 #[tauri::command]
 pub async fn db_filter_drop(filter_id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let db = current_db()?;
         db.drop_filter(&filter_id);
         Ok(())
@@ -255,7 +255,7 @@ pub async fn db_corr_ids(
     start: i64,
     end: i64,
 ) -> Result<Vec<u32>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u32>, String> {
         let db = current_db()?;
         Ok(db.corr_ids(&filter_ids, start, end))
     })
@@ -273,7 +273,7 @@ pub fn db_close() -> Result<(), String> {
 /// 文件清单（first_line 升序）。无限上下文滚动需要知道每个文件的行号区间与绝对路径。
 #[tauri::command]
 pub async fn db_files() -> Result<Vec<FileInfo>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<FileInfo>, String> {
         let db = current_db()?;
         Ok(db.file_infos())
     })
