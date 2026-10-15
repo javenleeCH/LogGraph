@@ -432,9 +432,6 @@ export function FileTreePanel() {
               : '拖入日志文件，或点击工具栏「打开文件 / 打开目录」'}
           </div>
         )}
-        {loading && (
-          <div className={styles['fileTree-loading']}>{progress || '加载中…'}</div>
-        )}
         {renderNode(tree, 0, '')}
       </div>
 
@@ -519,6 +516,15 @@ export function FileTreePanel() {
                 保存
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {loading && (
+        <div className={styles.loadingMask}>
+          <div className={styles.loadingCard}>
+            <div className={styles.loadingSpinner} />
+            <div className={styles.loadingTitle}>正在加载日志</div>
+            <div className={styles.loadingDetail}>{progress || '准备中…'}</div>
           </div>
         </div>
       )}
