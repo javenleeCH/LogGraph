@@ -21,6 +21,7 @@ use loggraph_engine::parser::{
 };
 use loggraph_engine::pipeline::{run_cep, PipelineStats};
 use loggraph_engine::rules::{self, RuleIssue};
+use loggraph_engine::search::{self, Pattern, WalkOptions};
 use loggraph_engine::session::{FilterQuery, Session, WsCtx};
 use serde::Serialize;
 use std::collections::HashMap;
