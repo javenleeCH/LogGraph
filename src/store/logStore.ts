@@ -207,6 +207,8 @@ interface LogState {
   // --- 过滤器 ---
   filters: Filter[];
   matches: FilterMatch[]; // 过滤结果，按 filters 顺序
+  /** ws_filters 批量下推在途（dbMode）：纵轴空态据此显示"计算中"而非"无匹配" */
+  filtersComputing: boolean;
   groups: FilterGroup[]; // 过滤器分组（顺序即显示顺序）
   collapsedGroups: Set<string>; // 冗余：快速查询折叠状态
   // --- group actions ---
@@ -403,6 +405,7 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   filters: [],
   matches: [],
+  filtersComputing: false,
   matchProgress: null,
   groups: [],
   collapsedGroups: new Set(),
@@ -1008,11 +1011,12 @@ export const useLogStore = create<LogState>((set, get) => ({
   recomputeMatches: () => {
     const { events, filters, dbMode } = get();
     if ((dbMode ? get().meta?.totalLines : events.length) === 0 || filters.length === 0) {
-      set({ matches: [], correlatedEventIds: new Set(), sequenceResults: {} });
+      set({ matches: [], correlatedEventIds: new Set(), sequenceResults: {}, filtersComputing: false });
       return;
     }
     // dbMode：全部 filter 一次批量下推（单遍扫描；缓存命中的 filter 直接读库）
     if (dbMode) {
+      set({ filtersComputing: true });
       void (async () => {
         const active = filters.filter((f) => f.pattern && f.enabled);
         let results = new Map<string, DbFilterHits>();
@@ -1038,14 +1042,14 @@ export const useLogStore = create<LogState>((set, get) => ({
           get().recomputeMatches();
           return;
         }
-        set({ matches: out });
+        set({ matches: out, filtersComputing: false });
         get().recomputeSequences();
         get().recomputeCorrelations();
       })();
       return;
     }
     const matches = FilterEngine.run(events, filters);
-    set({ matches });
+    set({ matches, filtersComputing: false });
     get().recomputeSequences();
     get().recomputeCorrelations();
   },

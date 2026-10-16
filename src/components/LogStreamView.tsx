@@ -236,6 +236,7 @@ export function LogStreamView() {
   const viewRange = useLogStore((s) => s.viewRange);
   const fullRange = useLogStore((s) => s.fullRange);
   const matches = useLogStore((s) => s.matches);
+  const filtersComputing = useLogStore((s) => s.filtersComputing);
   const filters = useLogStore((s) => s.filters);
   const groups = useLogStore((s) => s.groups);
   // 可见 filter（多对多 + 真隐藏语义）：
@@ -878,7 +879,7 @@ export function LogStreamView() {
                   </div>
                 ))}
               {globalData.ticks.length === 0 && (
-                <div className={styles.emptyMsg}>当前时间窗内无刻度</div>
+                <div className={styles.emptyMsg}>{filtersComputing ? '正在计算过滤…' : '当前时间窗内无刻度'}</div>
               )}
             </div>
 
@@ -919,7 +920,7 @@ export function LogStreamView() {
                 </div>
               ))}
               {visibleRows.length === 0 && (
-                <div className={styles.emptyMsg}>当前时间窗内无匹配事件</div>
+                <div className={styles.emptyMsg}>{filtersComputing ? '正在计算过滤…' : '当前时间窗内无匹配事件'}</div>
               )}
             </div>
 
@@ -1018,6 +1019,7 @@ function GlobalLane({
   onSelect,
   onHover,
 }: GlobalLaneProps) {
+  const filtersComputing = useLogStore((s) => s.filtersComputing);
   const rgb = useMemo(() => hexToRgb(color), [color]);
   const overscan = 60;
   const yTop = Math.max(0, scrollTop - overscan);
@@ -1171,7 +1173,7 @@ function GlobalLane({
       })}
 
       {maxCount <= 1 && visibleCards.length === 0 && (
-        <div className={styles.emptyMsg}>无匹配</div>
+        <div className={styles.emptyMsg}>{filtersComputing ? '计算中…' : '无匹配'}</div>
       )}
     </div>
   );
@@ -1207,6 +1209,7 @@ function LaneStream({
   onSelect,
   onHover,
 }: LaneStreamProps) {
+  const filtersComputing = useLogStore((s) => s.filtersComputing);
   const cardH = CARD_H + 2;
   const overscan = 8;
   const startIdx = Math.max(0, Math.floor(scrollTop / cardH) - overscan);
@@ -1279,7 +1282,7 @@ function LaneStream({
           </div>
         );
       })}
-      {visible.length === 0 && <div className={styles.emptyMsg}>无匹配</div>}
+      {visible.length === 0 && <div className={styles.emptyMsg}>{filtersComputing ? '计算中…' : '无匹配'}</div>}
       <div style={{ height: bottomPad }} />
     </div>
   );
