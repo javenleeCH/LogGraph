@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+# 目的：把「构建偶发崩溃」这类问题从人工嘴里搬到机器上。
+# 桌面端打包（tauri build）暂不进 CI——它需要 webkit2gtk 系统依赖，
+# 会把单次流水线拉到 10 分钟以上；这里先守住类型 / 单测 / 前端构建 /
+# 引擎单测四道关。
+
+jobs:
+  frontend:
+    name: 前端（类型 / 单测 / 构建）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npx tsc -b
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建
+        run: npm run build
+
+  rust:
+    name: Rust（engine + cli 单测）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      # 只测不依赖 tauri 的两个 crate（src-tauri 需要 webkit2gtk）
+      - name: 单元测试
+        run: cargo test -p loggraph-engine -p loggraph-cli
