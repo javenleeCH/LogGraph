@@ -125,7 +125,7 @@ npm run dev        # 开发服务器 http://localhost:5180
 npm run build      # 生产构建到 dist/
 
 npm run tauri:dev  # 桌面开发模式（自动起 vite + cargo build 后打开窗口）
-npm run tauri:build  # 打包桌面安装包（产物在 src-tauri/target/release/bundle/）
+npm run tauri:build  # 构建 release 便携版（--no-bundle，产物 src-tauri/target/release/logGraph.exe，单文件直接运行）
 
 npm run test:wasm  # wasm 正则引擎冒烟测试（12 项）
 
