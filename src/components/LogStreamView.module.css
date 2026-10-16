@@ -64,6 +64,42 @@
   color: var(--text-dim);
 }
 
+/* 顶栏时间窗可编辑 */
+.headerRange {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+.rangeEditable {
+  cursor: text;
+  border-radius: 3px;
+  padding: 0 3px;
+  margin: 0 -3px;
+}
+.rangeEditable:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.rangeArrow {
+  color: var(--text-faint);
+  padding: 0 1px;
+}
+.rangeEdit {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  width: 92px;
+  text-align: center;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 2px;
+  background: var(--bg);
+  color: var(--text);
+  box-sizing: border-box;
+  outline: none;
+}
+
 .headerDivider {
   color: var(--text-faint);
 }

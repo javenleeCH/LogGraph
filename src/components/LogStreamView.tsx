@@ -380,6 +380,27 @@ export function LogStreamView() {
   const focusEvent = useLogStore((s) => s.focusEvent);
   // 纵轴视图时间列可编辑：提交后不可变更新 events 并级联重算
   const updateEventTs = useLogStore((s) => s.updateEventTs);
+  // 顶栏时间窗可编辑：编辑后 setViewRange，可见数据随之变化
+  const setViewRange = useLogStore((s) => s.setViewRange);
+  // 顶栏时间窗编辑态：rangeEdit = 正在编辑的端点（start/end）；rangeDraft = 输入框文本
+  const [rangeEdit, setRangeEdit] = useState<'start' | 'end' | null>(null);
+  const [rangeDraft, setRangeDraft] = useState('');
+  const commitRangeEdit = () => {
+    const editing = rangeEdit;
+    setRangeEdit(null);
+    if (editing == null || !viewRange || !fullRange) return;
+    const parsed = parseDateTime(rangeDraft);
+    if (parsed == null || parsed <= 0) return;
+    let start = viewRange.start;
+    let end = viewRange.end;
+    if (editing === 'start') start = parsed;
+    else end = parsed;
+    // 约束在 fullRange 内，且 start < end
+    start = Math.max(fullRange.start, Math.min(start, fullRange.end));
+    end = Math.max(fullRange.start, Math.min(end, fullRange.end));
+    if (start >= end) return;
+    setViewRange({ start, end });
+  };
   // 选中事件的时间戳（列头序号二分定位用；dbMode 走行号命中表）
   const selTs = useMemo(() => {
     if (selectedEventId === null) return null;
@@ -604,6 +625,84 @@ export function LogStreamView() {
 
   // 选中事件自动滚动
   const lastScrollTarget = useRef<number | null>(null);
+  // dbMode 行文本缓存的 ref 镜像（异步预取时判断"是否已取回"用，避免重复 IPC）
+  const lineTextRef = useRef(lineText);
+  lineTextRef.current = lineText;
+  // 计算某滚动位置下视口内会渲染的事件 id（与 renderedIds 同口径，但参数化为 scrollTopVal）
+  const collectWindowIds = (scrollTopVal: number): number[] => {
+    const ids: number[] = [];
+    if (!dbMode) return ids;
+    if (mode === 'aligned') {
+      const os = 6;
+      const minTop = scrollTopVal - os * 2 * CARD_H;
+      let lo = 0;
+      let hi = rows.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (rows[mid].top < minTop) lo = mid + 1;
+        else hi = mid;
+      }
+      let i = Math.max(0, lo - 1);
+      i = Math.max(0, i - os);
+      for (; i < rows.length; i++) {
+        const r = rows[i];
+        for (const le of laneEvents) {
+          const evs = runOf(le, r.ts);
+          for (let k = 0; k < evs.length; k++) ids.push(evs[k].id);
+        }
+        if (r.top > scrollTopVal + viewportH + os * 2 * CARD_H) break;
+      }
+    } else if (mode === 'global' && viewRange && globalData) {
+      const yTop = Math.max(0, scrollTopVal - 60);
+      const yBot = scrollTopVal + viewportH + 60;
+      const tsTop = viewRange.start + yTop / globalData.pxPerMs;
+      const tsBot = viewRange.start + yBot / globalData.pxPerMs;
+      for (const le of laneEvents) {
+        let s = bisectLeft(le, tsTop);
+        if (s > 0) s -= 1;
+        const e = bisectLeft(le, tsBot) + 1;
+        for (let k = Math.max(0, s); k < Math.min(le.length, e); k++) ids.push(le[k].id);
+      }
+    } else {
+      const cardH = CARD_H + 2;
+      const os = 8;
+      const startIdx = Math.max(0, Math.floor(scrollTopVal / cardH) - os);
+      const count = Math.ceil(viewportH / cardH) + os * 2;
+      const endIdx = startIdx + count;
+      for (const le of laneEvents) {
+        for (let k = startIdx; k < Math.min(le.length, endIdx); k++) ids.push(le[k].id);
+      }
+    }
+    return Array.from(new Set(ids));
+  };
+  // dbMode：预取一批事件 id 的行文本（合并进 lineText，带 LRU 上限）
+  const prefetchWindow = async (ids: number[]): Promise<void> => {
+    const localHave = new Set(lineTextRef.current.keys());
+    const missing = ids.filter((id) => !localHave.has(id));
+    for (let i = 0; i < missing.length; i += LINE_TEXT_BATCH) {
+      try {
+        const got = await fetchLinesByIds(missing.slice(i, i + LINE_TEXT_BATCH));
+        for (const k of got.keys()) localHave.add(k);
+        setLineText((prev) => {
+          const next = new Map(prev);
+          for (const [k, v] of got) next.set(k, v);
+          if (next.size > LINE_TEXT_LRU_MAX) {
+            let over = next.size - LINE_TEXT_LRU_MAX;
+            for (const k of next.keys()) {
+              if (over <= 0) break;
+              if (got.has(k)) continue;
+              next.delete(k);
+              over--;
+            }
+          }
+          return next;
+        });
+      } catch (err) {
+        console.warn('[dbMode] 目标视口预取失败:', err);
+        return;
+      }
+    }
+  };
   useEffect(() => {
     if (selectedEventId === null) {
       lastScrollTarget.current = null;
@@ -642,14 +741,30 @@ export function LogStreamView() {
       return;
     }
     const MARGIN = 24;
-    if (cardY < el.scrollTop) {
-      // 在视口上方：下滚刚好露出（带上边距）
-      el.scrollTo({ top: Math.max(0, cardY - MARGIN), behavior: 'smooth' });
-    } else {
-      // 在视口下方：上滚刚好露出（带下边距）
-      el.scrollTo({ top: cardY + CARD_H + MARGIN - el.clientHeight, behavior: 'smooth' });
+    const targetTop =
+      cardY < el.scrollTop
+        ? Math.max(0, cardY - MARGIN)
+        : cardY + CARD_H + MARGIN - el.clientHeight;
+    const distance = Math.abs(targetTop - el.scrollTop);
+    const FAR = el.clientHeight * 1.5;
+    // 远跳（尤其 dbMode 大时差）：先预取目标视口行文本再瞬时跳转——
+    // 避免 smooth 滚动逐帧触发 onScroll→renderedIds 重算→海量 IPC，且中间
+    // 卡片在取回前是空白。预取完成后再跳，目标视口内容已就位，无空白。
+    if (dbMode && distance > FAR) {
+      let cancelled = false;
+      void (async () => {
+        await prefetchWindow(collectWindowIds(targetTop));
+        if (cancelled || !scrollRef.current) return;
+        scrollRef.current.scrollTo({ top: targetTop, behavior: 'auto' });
+        lastScrollTarget.current = selectedEventId;
+      })();
+      return () => {
+        cancelled = true;
+      };
     }
+    // 近跳或小窗：平滑滚动；非 dbMode 远跳也用瞬时（避免长距离平滑动画拖沓）
     lastScrollTarget.current = selectedEventId;
+    el.scrollTo({ top: targetTop, behavior: distance > FAR ? 'auto' : 'smooth' });
   }, [selectedEventId, selTs, rows, visibleMatches, mode, viewRange, globalData]);
 
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
@@ -852,8 +967,66 @@ export function LogStreamView() {
       {/* 顶栏 */}
       <div className={styles.header}>
         <span className={styles.headerLabel}>纵轴视图</span>
-        <span className={styles.headerInfo}>
-          {formatTime(viewRange.start)} → {formatTime(viewRange.end)}
+        <span className={styles.headerRange}>
+          {rangeEdit === 'start' ? (
+            <input
+              className={styles.rangeEdit}
+              autoFocus
+              value={rangeDraft}
+              onChange={(e) => setRangeDraft(e.target.value)}
+              onBlur={commitRangeEdit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commitRangeEdit();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setRangeEdit(null);
+                }
+              }}
+            />
+          ) : (
+            <span
+              className={styles.rangeEditable}
+              title="点击编辑时间窗起点"
+              onClick={() => {
+                setRangeEdit('start');
+                setRangeDraft(formatDateTime(viewRange.start));
+              }}
+            >
+              {formatTime(viewRange.start)}
+            </span>
+          )}
+          <span className={styles.rangeArrow}>→</span>
+          {rangeEdit === 'end' ? (
+            <input
+              className={styles.rangeEdit}
+              autoFocus
+              value={rangeDraft}
+              onChange={(e) => setRangeDraft(e.target.value)}
+              onBlur={commitRangeEdit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commitRangeEdit();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setRangeEdit(null);
+                }
+              }}
+            />
+          ) : (
+            <span
+              className={styles.rangeEditable}
+              title="点击编辑时间窗终点"
+              onClick={() => {
+                setRangeEdit('end');
+                setRangeDraft(formatDateTime(viewRange.end));
+              }}
+            >
+              {formatTime(viewRange.end)}
+            </span>
+          )}
         </span>
         <span className={styles.headerDivider}>|</span>
         <span className={styles.headerInfo}>窗宽 {formatDuration(viewRange.end - viewRange.start)}</span>
