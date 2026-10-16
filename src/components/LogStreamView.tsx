@@ -7,7 +7,7 @@ import { levelColor as getLevelColor } from '../constants';
 import { ChevronLeft, ChevronRight, AlignCenter, Columns, Globe } from './Icon';
 import { CepTimelinePanel } from './CepTimelinePanel';
 import { WelcomeState, NoFilterState } from './EmptyState';
-import type { LogEvent, Filter } from '../types';
+import type { LogEvent, Filter, FilterGroup, SequenceMatchResult } from '../types';
 import styles from './LogStreamView.module.css';
 import { fetchLinesByIds } from '../io/dbStore';
 const CARD_H = 20; // 单个事件卡片高度
@@ -56,9 +56,7 @@ function hexToRgb(hex: string): [number, number, number] {
 
 interface RowData {
   ts: number;
-  /** 各列在该时间戳的事件数（用于计算行高） */
-  counts: number[];
-  /** 行高 = max(counts) * CARD_H + 2*ROW_PAD */
+  /** 行高 = 同 ts 最大堆叠数 * CARD_H + 2*ROW_PAD */
   height: number;
   /** 行顶部 Y = 之前所有行高之和 */
   top: number;
@@ -70,32 +68,23 @@ interface TickMark {
 }
 
 /**
- * 从所有匹配项的事件中收集去重时间戳（升序），并按列分组。
+ * 对齐模式行结构：各 lane（ts 升序）k 路游标归并出全局去重时间戳，
+ * 行高 = 同 ts 的最大堆叠数。lane 内事件、行内堆叠均按需二分取
+ * （runOf / stackPosOf）——不物化 laneByTs / rowOfEvent / cardTopOfEvent
+ * 三个百万级 Map，zoom/pan 重建从秒级降到百 ms 级。
  */
 function buildRows(
   matches: { filterId: string; events: LogEvent[] }[],
   viewRange: { start: number; end: number } | null,
 ): {
   rows: RowData[];
+  /** 各 lane 在 viewRange 内的事件切片（ts 升序） */
   laneEvents: LogEvent[][];
-  /** lane 内事件按 ts 分组（对齐模式渲染按行 O(1) 取事件） */
-  laneByTs: Map<number, LogEvent[]>[];
-  /** 事件 id → 行下标（选中定位 O(1) 查表，替代旧 O(N²) 全量扫描） */
-  rowOfEvent: Map<number, number>;
-  /** 事件 id → 卡片绝对 Y（对齐模式堆叠内精确定位，行级判定会误伤可见卡片） */
-  cardTopOfEvent: Map<number, number>;
 } {
   if (!viewRange || matches.length === 0) {
-    return {
-      rows: [],
-      laneEvents: matches.map(() => []),
-      laneByTs: matches.map(() => new Map()),
-      rowOfEvent: new Map(),
-      cardTopOfEvent: new Map(),
-    };
+    return { rows: [], laneEvents: matches.map(() => []) };
   }
-  // 收集每个 lane 在 viewRange 内的事件
-  const laneEvents: LogEvent[][] = matches.map((fm) => {
+  const laneEvents = matches.map((fm) => {
     const evs = fm.events;
     const s = bisectLeft(evs, viewRange.start);
     // end 含端点：bisectLeft 返回首个 >= end 的下标，直接 slice 会把
@@ -104,61 +93,189 @@ function buildRows(
     const e = bisectLeft(evs, viewRange.end + 1);
     return evs.slice(s, e);
   });
-  // 收集去重时间戳
-  const tsSet = new Set<number>();
-  for (const le of laneEvents) {
-    for (const ev of le) tsSet.add(ev.ts);
-  }
-  const tsList = Array.from(tsSet).sort((a, b) => a - b);
-  // 每个 lane 的事件按 ts 建索引（因可能同 ts 多事件，用 Map<ts, LogEvent[]>）
-  const laneByTs: Map<number, LogEvent[]>[] = laneEvents.map((le) => {
-    const m = new Map<number, LogEvent[]>();
-    for (const ev of le) {
-      let arr = m.get(ev.ts);
-      if (!arr) {
-        arr = [];
-        m.set(ev.ts, arr);
-      }
-      arr.push(ev);
-    }
-    return m;
-  });
-  // 构建行
+  const k = laneEvents.length;
+  const cur = new Int32Array(k);
   const rows: RowData[] = [];
-  const rowOfTs = new Map<number, number>();
   let top = 0;
-  for (const ts of tsList) {
-    rowOfTs.set(ts, rows.length);
-    const counts = laneByTs.map((m) => m.get(ts)?.length ?? 0);
-    const maxCount = Math.max(1, ...counts);
+  for (;;) {
+    let ts = Infinity;
+    for (let l = 0; l < k; l++) {
+      const le = laneEvents[l];
+      const c = cur[l];
+      if (c < le.length && le[c].ts < ts) ts = le[c].ts;
+    }
+    if (ts === Infinity) break;
+    let maxCount = 1;
+    for (let l = 0; l < k; l++) {
+      const le = laneEvents[l];
+      let c = cur[l];
+      let cnt = 0;
+      while (c < le.length && le[c].ts === ts) {
+        c++;
+        cnt++;
+      }
+      if (cnt > maxCount) maxCount = cnt;
+      cur[l] = c;
+    }
     const height = maxCount * CARD_H + ROW_PAD * 2;
-    rows.push({ ts, counts, height, top });
+    rows.push({ ts, height, top });
     top += height;
   }
-  // 事件 id → 行下标 / 卡片绝对 Y（同一物理行命中多列时行下标一致，先到先得）。
-  // 卡片 Y 对齐 .eventStack 几何：padding-top 2px + 堆叠序 × (卡片 18 + gap 2)
-  const rowOfEvent = new Map<number, number>();
-  const cardTopOfEvent = new Map<number, number>();
-  for (const m of laneByTs) {
-    for (const [ts, evs] of m) {
-      const ri = rowOfTs.get(ts);
-      if (ri === undefined) continue;
-      const rowTop = rows[ri].top;
-      for (let i = 0; i < evs.length; i++) {
-        const id = evs[i].id;
-        if (!rowOfEvent.has(id)) rowOfEvent.set(id, ri);
-        if (!cardTopOfEvent.has(id)) cardTopOfEvent.set(id, rowTop + 2 + i * CARD_H);
+  return { rows, laneEvents };
+}
+
+const NO_EVENTS: LogEvent[] = [];
+
+/** ts 有序 lane 内取同 ts 连续段（无 → 共享空数组，避免每行分配） */
+function runOf(evs: LogEvent[], ts: number): LogEvent[] {
+  const s = bisectLeft(evs, ts);
+  if (s >= evs.length || evs[s].ts !== ts) return NO_EVENTS;
+  let e = s + 1;
+  while (e < evs.length && evs[e].ts === ts) e++;
+  return evs.slice(s, e);
+}
+
+/** 同 ts 堆叠内的位次（选中滚动定位用；-1 = 该事件不在此 lane） */
+function stackPosOf(evs: LogEvent[], id: number, ts: number): number {
+  const s = bisectLeft(evs, ts);
+  for (let i = s; i < evs.length && evs[i].ts === ts; i++) {
+    if (evs[i].id === id) return i - s;
+  }
+  return -1;
+}
+
+/** rows 按 ts 严格升序：ts → 行下标（不存在返回 -1） */
+function rowIndexOfTs(rows: RowData[], ts: number): number {
+  let lo = 0;
+  let hi = rows.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].ts < ts) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < rows.length && rows[lo].ts === ts ? lo : -1;
+}
+
+/** 卡片角标（可见卡片渲染时按需合成，不再百万级物化） */
+interface ChainMark {
+  chainIndex: number;
+  color: string;
+  anomaly: boolean;
+  /** NOT 边违规（红 ⃠） */
+  violation?: boolean;
+  /** periodic 抖动（黄 ⚡） */
+  jitter?: boolean;
+}
+
+/** 每 filter 的 CEP 标记索引。旧实现给每个命中物化一个 ChainMark 对象
+ *  （百万级命中 = 百万对象 + 百万 Map 条目，GC 压力拖垮交互）：
+ *  覆盖关系只存 number（链号），标记对象在可见卡片渲染时合成。 */
+interface LaneMarks {
+  /** 引用该 filter 的各 group 一层：首个覆盖事件的 layer 胜出（与旧实现的首个 group 胜出一致） */
+  layers: { color: string; chainOf: Map<number, number> }[];
+  /** 首个开启异常检测的 group 色：未入任何链的事件 → 异常。
+ *  （旧实现按"未被该 group 覆盖"判定，多 group 引用同一 filter 且首个
+ *  group 无链时会把其它 group 已覆盖的事件误标异常，此处改为未入任何链） */
+  anomalyColor: string | null;
+  /** 显式覆盖标记（NOT 违规 / 抖动，量 ≤ 链上限） */
+  overrides: Map<number, ChainMark>;
+  get(id: number): ChainMark | undefined;
+}
+
+function buildLaneMarks(
+  groups: FilterGroup[],
+  sequenceResults: Record<string, SequenceMatchResult>,
+  visibleMatches: { filterId: string; events: LogEvent[] }[],
+): Map<string, LaneMarks> {
+  const m = new Map<string, LaneMarks>();
+  const marksOf = (fid: string): LaneMarks => {
+    let mk = m.get(fid);
+    if (!mk) {
+      mk = {
+        layers: [],
+        anomalyColor: null,
+        overrides: new Map(),
+        get(id) {
+          const ov = this.overrides.get(id);
+          if (ov) return ov;
+          for (const L of this.layers) {
+            const c = L.chainOf.get(id);
+            if (c !== undefined) return { chainIndex: c, color: L.color, anomaly: false };
+          }
+          return this.anomalyColor !== null
+            ? { chainIndex: 0, color: this.anomalyColor, anomaly: true }
+            : undefined;
+        },
+      };
+      m.set(fid, mk);
+    }
+    return mk;
+  };
+  for (const g of groups) {
+    const r = sequenceResults[g.id];
+    if (!r) continue;
+    for (const fid of g.filterIds) {
+      const mk = marksOf(fid);
+      // 覆盖层：引擎截断（maxChains）时全量标记由 coveredMarks 回传，
+      // 否则从 chains 推导（TS 引擎 / 未设上限路径）
+      const marks = r.coveredMarks?.[fid];
+      const chainOf = new Map<number, number>();
+      if (marks) {
+        for (const [id, chainIndex] of marks) chainOf.set(id, chainIndex);
+      } else {
+        for (const ch of r.chains) {
+          for (const stp of ch.steps) {
+            if (stp.filterId === fid && !chainOf.has(stp.event.id)) {
+              chainOf.set(stp.event.id, ch.chainIndex);
+            }
+          }
+        }
+      }
+      mk.layers.push({ color: g.color, chainOf });
+      if (g.sequence?.anomalyEnabled && mk.anomalyColor === null) mk.anomalyColor = g.color;
+    }
+    // NOT 违规：按边定义的 from/to filter 标记（覆盖链/异常标记）
+    for (const edge of g.sequence?.edges ?? []) {
+      if ((edge.kind ?? 'seq') !== 'not') continue;
+      const vs = r.notViolations.filter((v) => v.edgeId === edge.id);
+      if (vs.length === 0) continue;
+      const pairs: [string, LogEvent][] = vs.flatMap((v) => [
+        [edge.fromFilterId, v.fromEvent as LogEvent],
+        [edge.toFilterId, v.toEvent as LogEvent],
+      ]);
+      for (const [fid, ev] of pairs) {
+        const mk = m.get(fid);
+        if (!mk) continue;
+        mk.overrides.set(ev.id, {
+          chainIndex: mk.get(ev.id)?.chainIndex ?? 0,
+          color: g.color,
+          anomaly: true,
+          violation: true,
+        });
+      }
+    }
+    // periodic 抖动标记（仅 TS 引擎路径有 heartbeats）
+    for (const hb of r.heartbeats) {
+      const mk = m.get(hb.filterId);
+      if (!mk) continue;
+      const evs = visibleMatches.find((mm) => mm.filterId === hb.filterId)?.events ?? [];
+      for (const jt of hb.jitters) {
+        // 二分定位同 ts 首事件（旧 find 对全 lane 线性扫描）
+        const i = bisectLeft(evs, jt.ts);
+        if (i < evs.length && evs[i].ts === jt.ts && !mk.overrides.get(evs[i].id)?.violation) {
+          mk.overrides.set(evs[i].id, { chainIndex: 0, color: g.color, anomaly: false, jitter: true });
+        }
       }
     }
   }
-  return { rows, laneEvents, laneByTs, rowOfEvent, cardTopOfEvent };
+  return m;
 }
 
 /** 可见列分段：group 包裹子 filter 列 + 顶层 filter 列 */
 interface ColumnSegment {
   kind: 'group' | 'top';
   /** group 段的组对象（top 段为 null） */
-  group?: import('../types').FilterGroup;
+  group?: FilterGroup;
   /** 该段内的 filter 列表：
    *  - index: 该 filter 在 visibleFilters 中的全局索引（用于取 laneEvents/matches 等数据，同一 filter 多位置共享）
    *  - slot: 列实例位置（全局递增，不去重；用于取 colWidths，同一 filter 在不同 group 出现时宽度独立） */
@@ -173,7 +290,7 @@ interface ColumnSegment {
  */
 function buildVisibleColumns(
   visibleFilters: Filter[],
-  groups: import('../types').FilterGroup[],
+  groups: FilterGroup[],
 ): ColumnSegment[] {
   const segments: ColumnSegment[] = [];
   // 列实例计数器：每个出现在界面上的 filter 列实例递增分配一个 slot，
@@ -298,98 +415,13 @@ export function LogStreamView() {
   );
 
   /**
-   * 序列链信息（卡片角标用）：filterId → (eventId → { chainIndex, color, anomaly })
-   * anomaly 只有在该 group 异常开关开启时才标记。
+   * 序列链信息（卡片角标用）：filterId → LaneMarks。anomaly 只有在该
+   * group 异常开关开启时才标记；结构见 buildLaneMarks。
    */
-  const chainInfoByFilter = useMemo(() => {
-    const m = new Map<
-      string,
-      Map<number, { chainIndex: number; color: string; anomaly: boolean; violation?: boolean; jitter?: boolean }>
-    >();
-    for (const g of groups) {
-      const r = sequenceResults[g.id];
-      if (!r) continue;
-      for (const fid of g.filterIds) {
-        let info = m.get(fid);
-        if (!info) {
-          info = new Map();
-          m.set(fid, info);
-        }
-        const marks = r.coveredMarks?.[fid];
-        if (marks) {
-          // 引擎截断链列表（maxChains）时全量标记由 coveredMarks 回传
-          for (const [id, chainIndex] of marks) {
-            if (!info.has(id)) info.set(id, { chainIndex, color: g.color, anomaly: false });
-          }
-        } else {
-          for (const ch of r.chains) {
-            for (const stp of ch.steps) {
-              if (stp.filterId !== fid) continue;
-              if (!info.has(stp.event.id)) {
-                info.set(stp.event.id, { chainIndex: ch.chainIndex, color: g.color, anomaly: false });
-              }
-            }
-          }
-        }
-        if (g.sequence?.anomalyEnabled) {
-          // 未覆盖事件 = 异常（仅标在该 filter 自己的卡片上）
-          const filterEvents = visibleMatches.find((mm) => mm.filterId === fid)?.events ?? [];
-          const covered = new Set(
-            marks?.map((mm) => mm[0]) ??
-              r.chains.flatMap((ch) => ch.steps.filter((s2) => s2.filterId === fid).map((s2) => s2.event.id)),
-          );
-          for (const ev of filterEvents) {
-            if (!covered.has(ev.id) && !info.has(ev.id)) {
-              info.set(ev.id, { chainIndex: 0, color: g.color, anomaly: true });
-            }
-          }
-        }
-      }
-      // NOT 违规：按边定义的 from/to filter 标记（覆盖 chainInfo）
-      for (const edge of g.sequence?.edges ?? []) {
-        if ((edge.kind ?? 'seq') !== 'not') continue;
-        const vs = r.notViolations.filter((v) => v.edgeId === edge.id);
-        if (vs.length === 0) continue;
-        const fromInfo = m.get(edge.fromFilterId);
-        const toInfo = m.get(edge.toFilterId);
-        if (fromInfo) {
-          for (const v of vs) {
-            const prev = fromInfo.get(v.fromEvent.id);
-            fromInfo.set(v.fromEvent.id, {
-              chainIndex: prev?.chainIndex ?? 0,
-              color: g.color,
-              anomaly: true,
-              violation: true,
-            });
-          }
-        }
-        if (toInfo) {
-          for (const v of vs) {
-            const prev = toInfo.get(v.toEvent.id);
-            toInfo.set(v.toEvent.id, {
-              chainIndex: prev?.chainIndex ?? 0,
-              color: g.color,
-              anomaly: true,
-              violation: true,
-            });
-          }
-        }
-      }
-      // periodic 抖动标记
-      for (const hb of r.heartbeats) {
-        const info = m.get(hb.filterId);
-        if (!info) continue;
-        const filterEvents = visibleMatches.find((mm) => mm.filterId === hb.filterId)?.events ?? [];
-        for (const jt of hb.jitters) {
-          const ev = filterEvents.find((e) => e.ts === jt.ts);
-          if (ev && !info.get(ev.id)?.violation) {
-            info.set(ev.id, { chainIndex: 0, color: g.color, anomaly: false, jitter: true });
-          }
-        }
-      }
-    }
-    return m;
-  }, [groups, sequenceResults, visibleMatches]);
+  const chainInfoByFilter = useMemo(
+    () => buildLaneMarks(groups, sequenceResults, visibleMatches),
+    [groups, sequenceResults, visibleMatches],
+  );
   // 所有 group 标题列总宽（每个固定 28px），需从可用宽度扣除
   const segHeadersW = useMemo(
     () => segments.filter((s) => s.kind === 'group').length * 28,
@@ -405,7 +437,7 @@ export function LogStreamView() {
     () => totalSlots * 5,
     [totalSlots],
   );
-  const { rows, laneEvents, laneByTs, rowOfEvent, cardTopOfEvent } = useMemo(
+  const { rows, laneEvents } = useMemo(
     () => buildRows(visibleMatches, viewRange),
     [visibleMatches, viewRange],
   );
@@ -569,20 +601,26 @@ export function LogStreamView() {
     const el = scrollRef.current;
     if (!el) return;
 
-    // O(1) 查表定位（rowOfEvent/cardTopOfEvent 由 buildRows 一次构建）。
-    // 旧实现对齐模式是逐行 × 逐列 .some() 全量扫描 = O(N²)：百万级事件下
-    // 点一次选中就卡死主线程数分钟——详情不更新、后续点击无响应、光标
-    // 冻结在小手指（滚轮走合成线程仍可动）的根因。
-    const rowIdx = rowOfEvent.get(selectedEventId);
-    if (rowIdx === undefined) return;
+    // O(log) 定位：事件 ts → 行二分；堆叠位次 → 所在 lane 内二分。
+    // 旧实现查 rowOfEvent/cardTopOfEvent 两个全量 Map（百万级条目，
+    // buildRows 每次 zoom/pan 重建 = 主线程卡死的根因之一）。
+    if (selTs === null) return;
+    const rowIdx = rowIndexOfTs(rows, selTs);
+    if (rowIdx < 0) return;
     const targetRow = rows[rowIdx];
-    if (!targetRow) return;
+    // 该事件必须在某个可见 lane 内（隐藏 filter 的事件无卡片，不滚动）
+    let lanePos = -1;
+    for (const fm of visibleMatches) {
+      lanePos = stackPosOf(fm.events, selectedEventId, selTs);
+      if (lanePos >= 0) break;
+    }
+    if (lanePos < 0) return;
 
     // 目标卡片（对齐模式用堆叠内精确 Y；全局模式用 ts 映射 Y，忽略级联偏移）
     const cardY =
       mode === 'global' && viewRange && globalData
         ? (targetRow.ts - viewRange.start) * globalData.pxPerMs
-        : (cardTopOfEvent.get(selectedEventId) ?? targetRow.top);
+        : targetRow.top + 2 + lanePos * CARD_H;
 
     // 卡片已（完全）可见 → 一动不动。按行 top 判定会误伤：高堆叠行或行顶
     // 在视口上沿之外的行，卡片明明可见也被拽到固定位置（"点击后自己跳转"
@@ -600,7 +638,7 @@ export function LogStreamView() {
       el.scrollTo({ top: cardY + CARD_H + MARGIN - el.clientHeight, behavior: 'smooth' });
     }
     lastScrollTarget.current = selectedEventId;
-  }, [selectedEventId, rows, rowOfEvent, cardTopOfEvent, mode, viewRange, globalData]);
+  }, [selectedEventId, selTs, rows, visibleMatches, mode, viewRange, globalData]);
 
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
@@ -611,7 +649,7 @@ export function LogStreamView() {
     }
   }, []);
 
-  // laneByTs / rowOfEvent 由 buildRows 一并构建（旧代码在此重复建 Map，浪费一次 O(N)）
+  // lane 内事件按 ts 按需二分取（runOf），不预建 laneByTs 索引
 
   // 当前视口内真正会渲染的事件 id 集合（按视图模式推断），供 dbMode 惰性取文本
   const renderedIds = useMemo(() => {
@@ -619,9 +657,9 @@ export function LogStreamView() {
     const ids: number[] = [];
     if (mode === 'aligned') {
       for (const r of visibleRows) {
-        for (const m of laneByTs) {
-          const arr = m.get(r.ts);
-          if (arr) for (const e of arr) ids.push(e.id);
+        for (const le of laneEvents) {
+          const evs = runOf(le, r.ts);
+          for (let i = 0; i < evs.length; i++) ids.push(evs[i].id);
         }
       }
     } else if (mode === 'global' && viewRange && globalData) {
@@ -647,7 +685,7 @@ export function LogStreamView() {
       }
     }
     return Array.from(new Set(ids));
-  }, [dbMode, mode, visibleRows, laneByTs, laneEvents, viewRange, globalData, scrollTop, viewportH]);
+  }, [dbMode, mode, visibleRows, laneEvents, viewRange, globalData, scrollTop, viewportH]);
 
   // dbMode：按视口事件 id 分批取行文本（v3 id 契约，替代旧 min/max 区间——
   // 多文件时间交叠时区间会横跨数百万行）+ LRU 上限防长时间滚动内存膨胀
@@ -939,7 +977,7 @@ export function LogStreamView() {
                   color={f.color}
                   width={colWidths[slot] ?? MIN_LANE_WIDTH}
                   visibleRows={visibleRows}
-                  laneByTs={laneByTs[li] ?? new Map()}
+                  laneEvents={laneEvents[li] ?? []}
                   selectedEventId={selectedEventId}
                   hoveredEventId={hoveredEventId}
                   correlatedEventIds={correlatedEventIds}
@@ -981,16 +1019,6 @@ export function LogStreamView() {
   );
 }
 
-/** 单事件的序列链标记信息 */
-interface ChainMark {
-  chainIndex: number;
-  color: string;
-  anomaly: boolean;
-  /** NOT 边违规（红 ⃠） */
-  violation?: boolean;
-  /** periodic 抖动（黄 ⚡） */
-  jitter?: boolean;
-}
 
 /** 全局时间轴模式：密度热力条（按过滤器色着色、深浅=事件密度）+ 稀疏时叠加卡片 */
 interface GlobalLaneProps {
@@ -1005,7 +1033,7 @@ interface GlobalLaneProps {
   selectedEventId: number | null;
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
-  chainInfo?: Map<number, ChainMark>;
+  chainInfo?: LaneMarks;
   lineText?: Map<number, string>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
@@ -1198,7 +1226,7 @@ interface LaneStreamProps {
   selectedEventId: number | null;
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
-  chainInfo?: Map<number, ChainMark>;
+  chainInfo?: LaneMarks;
   lineText?: Map<number, string>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
@@ -1301,11 +1329,11 @@ interface LaneColumnProps {
   color: string;
   width: number;
   visibleRows: RowData[];
-  laneByTs: Map<number, LogEvent[]>;
+  laneEvents: LogEvent[];
   selectedEventId: number | null;
   hoveredEventId: number | null;
   correlatedEventIds: Set<number>;
-  chainInfo?: Map<number, ChainMark>;
+  chainInfo?: LaneMarks;
   lineText?: Map<number, string>;
   onSelect: (id: number) => void;
   onHover: (id: number | null) => void;
@@ -1315,7 +1343,7 @@ function LaneColumn({
   color,
   width,
   visibleRows,
-  laneByTs,
+  laneEvents,
   selectedEventId,
   hoveredEventId,
   correlatedEventIds,
@@ -1332,7 +1360,7 @@ function LaneColumn({
     >
       {/* 行背景 + 事件 */}
       {visibleRows.map((r) => {
-        const evs = laneByTs.get(r.ts) ?? [];
+        const evs = runOf(laneEvents, r.ts);
         return (
           <div
             key={r.ts}
