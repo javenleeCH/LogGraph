@@ -879,7 +879,7 @@ export function LogStreamView() {
                   </div>
                 ))}
               {globalData.ticks.length === 0 && (
-                <div className={styles.emptyMsg}>{filtersComputing ? '正在计算过滤…' : '当前时间窗内无刻度'}</div>
+                <div className={filtersComputing ? styles.computingMsg : styles.emptyMsg}>{filtersComputing ? '正在计算过滤…' : '当前时间窗内无刻度'}</div>
               )}
             </div>
 
@@ -920,7 +920,7 @@ export function LogStreamView() {
                 </div>
               ))}
               {visibleRows.length === 0 && (
-                <div className={styles.emptyMsg}>{filtersComputing ? '正在计算过滤…' : '当前时间窗内无匹配事件'}</div>
+                <div className={filtersComputing ? styles.computingMsg : styles.emptyMsg}>{filtersComputing ? '正在计算过滤…' : '当前时间窗内无匹配事件'}</div>
               )}
             </div>
 

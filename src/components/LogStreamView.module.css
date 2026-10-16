@@ -25,6 +25,17 @@
   font-size: 12px;
 }
 
+/* 过滤批量计算在途：比空态更醒目（大字 + 强调色） */
+.computingMsg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 48px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
 /* 顶栏 */
 .header {
   display: flex;
