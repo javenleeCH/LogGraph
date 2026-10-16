@@ -96,8 +96,10 @@ function skelEvents(hits: DbFilterHits | undefined): LogEvent[] {
   return out;
 }
 
-/** ws_sequences 下推时每组请求的链数上限：面板渲染上限同源（防大目录链载荷爆炸） */
-export const CEP_MAX_CHAINS = 200;
+/** ws_sequences 下推时每组请求的链数上限：引擎只回传按时间序的前 N 条链，
+ *  载荷随 N 线性增长（~200B/链，coveredMarks 不受影响）。面板按 RENDER_BATCH
+ *  渐进渲染（见 CepTimelinePanel），2000 行 ≈ 50 屏，再深请收窄规则/时间窗。 */
+export const CEP_MAX_CHAINS = 2000;
 
 /** 前端 TS 序列引擎的事件体量护栏：超限组跳过（大目录全量跑会把主线程拖死） */
 const TS_SEQ_EVENT_LIMIT = 300_000;

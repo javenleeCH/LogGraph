@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { CEP_MAX_CHAINS, useLogStore } from '../store/logStore';
 import { formatTime } from '../utils/timeFormat';
 import type { Filter, FilterGroup, LogEvent, SequenceMatchResult } from '../types';
@@ -38,19 +38,15 @@ interface CepBlock {
   color: string;
   chainCount: number;
   anomalyCount: number;
-  /** 行按 startTs 升序 */
+  /** 行按 startTs 升序（全量，≤ 三类输入上限之和；渲染时按 limit 渐进切片） */
   rows: CepRow[];
-  /** 超出渲染上限被截掉的行数（按时间序保留前 MAX_RENDER_ROWS 行） */
-  omitted: number;
 }
 
-/**
- * 单组最多渲染的行数（= 下推引擎请求的链数上限 CEP_MAX_CHAINS）。
- * 大目录（百 MB 级）下宽松规则的链可达数十万条，全量渲染（每链一行、
- * 每步一个按钮）会把渲染进程 OOM 拖死——按时间序截断，真实链数
- * 显示在块头统计（totalChains）里。
- */
-const MAX_RENDER_ROWS = CEP_MAX_CHAINS;
+/** 渲染批次：首屏渲染 200 行，滚动到底部（哨兵进入视口）自动续一批。
+ *  数据侧上限 CEP_MAX_CHAINS（引擎/TS 回退每类行最多取该数），行对象
+ *  全量构建但 DOM 按需增长——大目录宽松规则（数十万链）下全量渲染会
+ *  把渲染进程 OOM 拖死。 */
+const RENDER_BATCH = 200;
 
 /** 链行：节点=各步 filter 色块 + 链内步序号 */
 function chainRow(
@@ -86,10 +82,11 @@ function buildBlocks(
   for (const g of groups) {
     const r = sequenceResults[g.id];
     if (!r) continue;
-    const rows: CepRow[] = r.chains.map((ch) => chainRow(g, ch, filters));
+    // 每类行取数据上限（引擎路径已截断；TS 回退无上限，防全量物化行对象）
+    const rows: CepRow[] = r.chains.slice(0, CEP_MAX_CHAINS).map((ch) => chainRow(g, ch, filters));
     let anomalyCount = 0;
     if (g.sequence?.anomalyEnabled) {
-      for (const ev of r.uncoveredEvents) {
+      for (const ev of r.uncoveredEvents.slice(0, CEP_MAX_CHAINS)) {
         anomalyCount++;
         rows.push({
           count: 0,
@@ -103,7 +100,7 @@ function buildBlocks(
       // 引擎截断（maxChains）时未覆盖列表也被截断，总数取真值
       anomalyCount = r.totalUncovered ?? anomalyCount;
     }
-    for (const v of r.notViolations) {
+    for (const v of r.notViolations.slice(0, CEP_MAX_CHAINS)) {
       const from = v.fromEvent as LogEvent;
       const to = v.toEvent as LogEvent;
       rows.push({
@@ -123,15 +120,13 @@ function buildBlocks(
     rows.forEach((row, i) => {
       row.count = i + 1;
     });
-    const omitted = Math.max(0, rows.length - MAX_RENDER_ROWS);
     out.push({
       groupId: g.id,
       label: g.label,
       color: g.color,
       chainCount: r.totalChains ?? r.chains.length,
       anomalyCount,
-      rows: rows.slice(0, MAX_RENDER_ROWS),
-      omitted,
+      rows,
     });
   }
   return out;
@@ -152,11 +147,18 @@ export function CepTimelinePanel() {
   const focusEvent = useLogStore((s) => s.focusEvent);
   // 面板收纳（收纳后留 24px 竖条作展开入口）
   const [collapsed, setCollapsed] = useState(false);
+  // 每组渐进渲染上限（groupId → 已加载行数）：首屏 RENDER_BATCH 批，
+  // 滚动到块底哨兵自动续一批；数据重建（重算/改规则）时全部复位
+  const [limits, setLimits] = useState<Record<string, number>>({});
 
   const blocks = useMemo(() => {
     const filterMap = new Map(filters.map((f) => [f.id, f] as const));
     return buildBlocks(groups, sequenceResults, filterMap);
   }, [groups, sequenceResults, filters]);
+
+  useEffect(() => {
+    setLimits({});
+  }, [blocks]);
 
   if (blocks.length === 0) return null;
 
@@ -181,7 +183,12 @@ export function CepTimelinePanel() {
         <span className={styles.panelCount}>{blocks.length} 组规则</span>
       </div>
       <div className={styles.panelBody}>
-        {blocks.map((b) => (
+        {blocks.map((b) => {
+          // 渐进渲染：只挂载已加载批次，行号 count 已在全量 rows 上编好
+          const limit = limits[b.groupId] ?? RENDER_BATCH;
+          const visible = b.rows.slice(0, limit);
+          const hidden = b.rows.length - visible.length;
+          return (
           <div key={b.groupId} className={styles.block}>
             <div className={styles.blockHeader} style={{ borderLeftColor: b.color }}>
               <span className={styles.blockDot} style={{ background: b.color }} />
@@ -193,7 +200,7 @@ export function CepTimelinePanel() {
             {b.rows.length === 0 ? (
               <div className={styles.blockEmpty}>无匹配结果</div>
             ) : (
-              b.rows.map((row, ri) => (
+              visible.map((row, ri) => (
                 <div
                   key={`${row.startTs}-${ri}`}
                   className={`${styles.row} ${row.kind !== 'chain' ? styles.rowAnomaly : ''}`}
@@ -223,13 +230,21 @@ export function CepTimelinePanel() {
                 </div>
               ))
             )}
-            {b.omitted > 0 && (
+            {hidden > 0 && (
+              <LoadMore
+                onLoad={() =>
+                  setLimits((p) => ({ ...p, [b.groupId]: (p[b.groupId] ?? RENDER_BATCH) + RENDER_BATCH }))
+                }
+              />
+            )}
+            {b.chainCount > CEP_MAX_CHAINS && (
               <div className={styles.blockMore}>
-                已按时间序显示前 {MAX_RENDER_ROWS} 行，另有 {b.omitted} 条未渲染
+                引擎仅回传按时间序的前 {CEP_MAX_CHAINS} 条链（共 {b.chainCount}）——收窄规则或时间窗可查看其余
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
       <div className={styles.panelFooter}>
         <button
@@ -240,6 +255,30 @@ export function CepTimelinePanel() {
           <ChevronLeft size={16} strokeWidth={2.5} />
         </button>
       </div>
+    </div>
+  );
+}
+
+/** 滚动到底自动续批的哨兵：进入视口（IntersectionObserver）即触发 onLoad。
+ *  onLoad 用 ref 存最新回调，observer 只挂一次，避免每次渲染重建。 */
+function LoadMore({ onLoad }: { onLoad: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onLoadRef = useRef(onLoad);
+  onLoadRef.current = onLoad;
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) onLoadRef.current();
+      });
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return (
+    <div ref={ref} className={styles.blockMore}>
+      下滑加载更多…
     </div>
   );
 }
