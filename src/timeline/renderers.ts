@@ -6,7 +6,9 @@
 
 import type { Filter, FilterGroup, FilterMatch, LogEvent, MatchedChain, SequenceMatchResult, TimeRange } from '../types';
 import { LAYOUT } from './layout';
+import { DENSITY_BUCKET_W, densityAlpha, withAlpha } from './density';
 import { chooseTickStep, formatTime, formatDateTime } from '../utils/timeFormat';
+import { fmtCompact } from '../utils/counts';
 import type { VisibleRow } from './layout';
 
 export interface RenderContext {
@@ -68,14 +70,7 @@ export function refreshPalette() {
   C = buildPalette();
 }
 
-// ---- 颜色工具 ----
-function withAlpha(hex: string, alpha: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 255;
-  const g = (n >> 8) & 255;
-  const b = n & 255;
-  return `rgba(${r},${g},${b},${alpha})`;
-}
+// ---- 颜色工具（withAlpha 见 ./density，与密度着色同源） ----
 
 function getMonoFont() {
   return '"Roboto Mono","SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace';
@@ -381,15 +376,17 @@ export function drawLaneEventsAt(
   // 桶聚合绘制 + 仅单独绘制选中/悬停/关联标记：宽视口下逐标记 fillRect
   // 是每帧数百 ms 的主因（WASD 卡顿）；密度图在大 zoom-out 下信息量等价。
   if (events.length > LAYOUT.DENSITY_EVENT_THRESHOLD) {
-    const bucketW = 3;
+    const bucketW = DENSITY_BUCKET_W;
     const bucketCount = Math.ceil(chartWidth / bucketW);
     const buckets = new Int32Array(bucketCount);
     const specials: { x: number; ev: LogEvent }[] = [];
+    let inView = 0;
     for (const ev of events) {
       if (ev.ts < view.start || ev.ts > view.end) continue;
       const x = timeToX(ev.ts);
       if (x < chartLeft || x >= width) continue;
       buckets[Math.min(bucketCount - 1, Math.floor((x - chartLeft) / bucketW))]++;
+      inView++;
       if (
         ev.id === selectedId ||
         ev.id === hoveredId ||
@@ -398,16 +395,15 @@ export function drawLaneEventsAt(
         specials.push({ x, ev });
       }
     }
-    let maxCount = 1;
-    for (let i = 0; i < bucketCount; i++) {
-      if (buckets[i] > maxCount) maxCount = buckets[i];
-    }
+    // 常态速率 = 可见事件均匀铺满各桶时每桶应有的条数。
+    // 用它做 0 点而不是 cnt/maxCount（后者在均匀分布下全线饱和 → 实心色条）。
+    const expected = Math.max(1, inView / bucketCount);
     const barH = h * LAYOUT.EVENT_HEIGHT_RATIO;
     const barTop = y + (h - barH) / 2;
     for (let i = 0; i < bucketCount; i++) {
       const cnt = buckets[i];
       if (cnt === 0) continue;
-      ctx.fillStyle = withAlpha(filter.color, 0.25 + (cnt / maxCount) * 0.7);
+      ctx.fillStyle = withAlpha(filter.color, densityAlpha(cnt, expected));
       ctx.fillRect(chartLeft + i * bucketW, barTop, bucketW - 0.5, barH);
     }
     // 特殊标记（少量）单独绘制，保持选中/悬停/关联在密度图上可见
@@ -635,14 +631,27 @@ export function drawMinimap(
   if (cache) {
     ctx.drawImage(cache.canvas, left, top, w, h);
   } else {
+    // 降级直绘路径（缓存未就绪时的首帧）：与缓存同口径按列聚合
+    const cols = Math.max(1, Math.floor(w));
     for (let i = 0; i < matches.length; i++) {
       const fm = matches[i];
       const color = filters.find((f) => f.id === fm.filterId)?.color ?? '#888';
       const bandTop = top + 6 + (i % 4) * 8;
-      ctx.fillStyle = withAlpha(color, 0.9);
+      const buckets = new Int32Array(cols);
+      let inView = 0;
       for (const ev of fm.events) {
-        const x = tToX(ev.ts);
-        ctx.fillRect(x, bandTop, 1, 7);
+        if (ev.ts < fullRange.start || ev.ts > fullRange.end) continue;
+        const x = Math.floor(((ev.ts - fullRange.start) / span) * w);
+        if (x < 0 || x >= cols) continue;
+        buckets[x]++;
+        inView++;
+      }
+      const expected = Math.max(1, inView / cols);
+      for (let x = 0; x < cols; x++) {
+        const c = buckets[x];
+        if (c === 0) continue;
+        ctx.fillStyle = withAlpha(color, densityAlpha(c, expected));
+        ctx.fillRect(left + x, bandTop, 1, 7);
       }
     }
   }
@@ -746,8 +755,9 @@ export function drawGroupHeader(
 
   // 序列链统计（组名右侧，图表区内）：⛓ N 链 · M 异常
   if (seqStat && seqStat.chains >= 0 && (seqStat.chains > 0 || seqStat.anomalyEnabled)) {
-    const parts: string[] = [`⛓ ${seqStat.chains} 链`];
-    if (seqStat.anomalyEnabled) parts.push(`${seqStat.anomalies} 异常`);
+    // 紧凑格式：真值可能是 33.6 万，展开写会顶掉图表区
+    const parts: string[] = [`⛓ ${fmtCompact(seqStat.chains)} 链`];
+    if (seqStat.anomalyEnabled) parts.push(`${fmtCompact(seqStat.anomalies)} 异常`);
     const label = parts.join(' · ');
     ctx.save();
     ctx.fillStyle = seqStat.anomalyEnabled && seqStat.anomalies > 0 ? C.anomalyFill : C.textDim;
@@ -832,30 +842,27 @@ export function drawGroupDensity(
     ctx.font = `11px ${getSansFont()}`;
   } else {
     // 密度桶：每桶 3px 宽，统计桶内事件数
-    const bucketW = 3;
+    const bucketW = DENSITY_BUCKET_W;
     const bucketCount = Math.ceil(chartW / bucketW);
     const buckets = new Int32Array(bucketCount);
+    let inView = 0;
     for (const ev of events) {
       if (ev.ts < view.start || ev.ts > view.end) continue;
       const x = timeToX(ev.ts) - chartLeft;
       if (x < 0 || x >= chartW) continue;
       const idx = Math.min(bucketCount - 1, Math.floor(x / bucketW));
       buckets[idx]++;
+      inView++;
     }
-    let maxCount = 1;
-    for (let i = 0; i < bucketCount; i++) {
-      if (buckets[i] > maxCount) maxCount = buckets[i];
-    }
-    // 绘制密度柱：高度按 count/maxCount 比例，颜色深浅同步
+    // 深浅 = 相对常态速率的倍率（对数），常态为中间灰度；见 density.ts
+    const expected = Math.max(1, inView / bucketCount);
     const barH = rowH * LAYOUT.EVENT_HEIGHT_RATIO;
     const barTop = rowY + (rowH - barH) / 2;
     for (let i = 0; i < bucketCount; i++) {
       const cnt = buckets[i];
       if (cnt === 0) continue;
-      const intensity = cnt / maxCount; // 0..1
       const bx = chartLeft + i * bucketW;
-      // 深浅 = alpha 按 intensity 缩放
-      ctx.fillStyle = withAlpha(group.color, 0.25 + intensity * 0.7);
+      ctx.fillStyle = withAlpha(group.color, densityAlpha(cnt, expected));
       ctx.fillRect(bx, barTop, bucketW - 0.5, barH);
     }
   }

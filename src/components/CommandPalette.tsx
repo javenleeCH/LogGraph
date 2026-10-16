@@ -18,6 +18,7 @@ import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
 import {
   FileText,
   Folder,
+  FolderOpen,
   Table,
   BarChart,
   Plus,
@@ -26,7 +27,15 @@ import {
   Keyboard,
   Search,
   Type,
+  Copy,
 } from './Icon';
+import {
+  copySelectedChainMarkdown,
+  copySelectedEventMarkdown,
+  exportMatchesMarkdown,
+  exportRulesFile,
+  importRulesFile,
+} from '../io/exportActions';
 import { OPEN_TS_FORMAT_EVENT } from './TimestampFormatEditor';
 import styles from './CommandPalette.module.css';
 
@@ -241,6 +250,80 @@ function buildCommands(ctx: { closeAll: () => void }): Command[] {
         .then(() => toast.success('工作区已保存', '过滤器与分组已写入 .logGraph'))
         .catch((e: Error) => toast.error('保存失败', e.message))
         .finally(end);
+    },
+  });
+
+  /* —— 导出：结论带走 / 规则带走 —— */
+  commands.push({
+    id: 'export.chain',
+    group: '导出',
+    label: '复制选中链为 Markdown',
+    hint: '选中链上任一步即可，整链含文件 / 行号 / 时间，可直接贴进工单',
+    keywords: 'copy export markdown chain 复制 导出 链 工单 复盘',
+    icon: <Copy size={14} />,
+    run: () => {
+      ctx.closeAll();
+      void copySelectedChainMarkdown();
+    },
+  });
+  commands.push({
+    id: 'export.event',
+    group: '导出',
+    label: '复制选中事件为 Markdown',
+    hint: '含 文件:行号、时间、级别、线程',
+    keywords: 'copy export markdown event 复制 导出 事件',
+    icon: <Copy size={14} />,
+    run: () => {
+      ctx.closeAll();
+      void copySelectedEventMarkdown();
+    },
+  });
+  commands.push({
+    id: 'export.matches',
+    group: '导出',
+    label: '导出当前命中为 Markdown 文件…',
+    hint: '每个过滤器最多 500 条，再多人也看不过来',
+    keywords: 'export markdown file 导出 命中 文件',
+    icon: <FileText size={14} />,
+    run: () => {
+      ctx.closeAll();
+      void exportMatchesMarkdown();
+    },
+  });
+  commands.push({
+    id: 'rules.export.cep',
+    group: '导出',
+    label: '导出规则为 .cep.json（CLI / CI 用）…',
+    hint: '引擎 v1 跑不了的特性会逐条提示，绝不静默降级',
+    keywords: 'export cep rules cli ci 导出 规则 流水线',
+    icon: <Save size={14} />,
+    run: () => {
+      ctx.closeAll();
+      void exportRulesFile('cep');
+    },
+  });
+  commands.push({
+    id: 'rules.export.loggraph',
+    group: '导出',
+    label: '导出规则为 .loggraph.json（完整，给同事）…',
+    hint: '含颜色 / 折叠 / 画布坐标，GUI 之间可直接互导',
+    keywords: 'export rules share backup 导出 规则 分享 备份',
+    icon: <Save size={14} />,
+    run: () => {
+      ctx.closeAll();
+      void exportRulesFile('loggraph');
+    },
+  });
+  commands.push({
+    id: 'rules.import',
+    group: '导出',
+    label: '导入规则文件…',
+    hint: '.loggraph.json / .cep.json 自动识别（替换当前规则）',
+    keywords: 'import rules 导入 规则',
+    icon: <FolderOpen size={14} />,
+    run: () => {
+      ctx.closeAll();
+      void importRulesFile();
     },
   });
 

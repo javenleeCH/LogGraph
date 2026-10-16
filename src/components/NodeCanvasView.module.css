@@ -1056,3 +1056,37 @@
 .edgeStatRow b {
   color: var(--text);
 }
+
+/* ===== ReactFlow 内置控件主题接管（@xyflow/react v12）=====
+ * MiniMap / Controls 默认白底黑字，深色主题下是一整块白框 + 白色圆按钮，
+ * 在深色画布上看起来像坏了；这里是最高价值页面（规则画布）的门面。
+ * v12 的变量链是 -props → -default → 裸名，三档都写才稳。 */
+.overlay :global(.react-flow__minimap) {
+  --xy-minimap-background-color: var(--bg-panel);
+  --xy-minimap-background-color-default: var(--bg-panel);
+  --xy-minimap-background-color-props: var(--bg-panel);
+  --xy-minimap-mask-background-color: rgba(0, 0, 0, 0.24);
+  --xy-minimap-mask-background-color-default: rgba(0, 0, 0, 0.24);
+  --xy-minimap-mask-background-color-props: rgba(0, 0, 0, 0.24);
+  --xy-minimap-node-stroke-color: var(--border-strong);
+  --xy-minimap-node-stroke-color-default: var(--border-strong);
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.overlay :global(.react-flow__controls-button) {
+  --xy-controls-button-background-color: var(--bg-elevated);
+  --xy-controls-button-background-color-default: var(--bg-elevated);
+  --xy-controls-button-background-color-props: var(--bg-elevated);
+  --xy-controls-button-background-color-hover: var(--bg-elevated-hover);
+  --xy-controls-button-background-color-hover-default: var(--bg-elevated-hover);
+  --xy-controls-button-color: var(--text);
+  --xy-controls-button-color-default: var(--text);
+  --xy-controls-button-color-props: var(--text);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-button-border-color-default: var(--border);
+  background-color: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  fill: var(--text);
+}

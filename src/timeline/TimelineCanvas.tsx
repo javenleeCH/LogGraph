@@ -23,8 +23,10 @@ import {
   type MinimapCache,
 } from './renderers';
 import { bisectLeft, nearestEvent } from './correlation';
+import { densityAlpha, withAlpha } from './density';
 import { ZoomPanAnimator } from './zoomPanAnimator';
 import { formatDateTime } from '../utils/timeFormat';
+import { trueChainCount, trueUncoveredCount } from '../utils/counts';
 import type { Filter, FilterMatch, LogEvent, TimeRange } from '../types';
 import tipStyles from './Tooltip.module.css';
 
@@ -239,8 +241,10 @@ export function TimelineCanvas() {
           i === hoveredRowIdx,
           sr
             ? {
-                chains: sr.chains.length,
-                anomalies: sr.uncoveredEvents.length,
+                // 一律取真值：引擎截断时 length 只是上限（历史 bug：这里显示
+                // 2000 异常，而 CEP 面板显示 335,780，同一分组两个数）
+                chains: trueChainCount(sr),
+                anomalies: trueUncoveredCount(sr),
                 anomalyEnabled: row.group.sequence?.anomalyEnabled ?? false,
               }
             : null,
@@ -448,13 +452,27 @@ export function TimelineCanvas() {
       if (!octx) return null;
       octx.setTransform(dpr, 0, 0, dpr, 0, 0);
       const span = fullRange.end - fullRange.start || 1;
+      const cols = Math.max(1, Math.floor(cw));
       for (let i = 0; i < matches.length; i++) {
         const fm = matches[i];
         const color = filters.find((f) => f.id === fm.filterId)?.color ?? '#888';
         const bandTop = 6 + (i % 4) * 8;
-        octx.fillStyle = color;
+        // 按像素列分桶：逐事件 fillRect 时每列会被覆盖数百次，结果只是
+        // 一条实心条（看不出分布，也和主视图的观感对不上）。聚合后
+        // 明暗 = 相对常态的倍率，与 lane 密度条同一套口径。
+        const buckets = new Int32Array(cols);
+        let inView = 0;
         for (const ev of fm.events) {
           const x = Math.floor(((ev.ts - fullRange.start) / span) * cw);
+          if (x < 0 || x >= cols) continue;
+          buckets[x]++;
+          inView++;
+        }
+        const expected = Math.max(1, inView / cols);
+        for (let x = 0; x < cols; x++) {
+          const c = buckets[x];
+          if (c === 0) continue;
+          octx.fillStyle = withAlpha(color, densityAlpha(c, expected));
           octx.fillRect(x, bandTop, 1, 7);
         }
       }

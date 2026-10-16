@@ -807,3 +807,30 @@
   color: #ffb4b9;
   font-weight: 700;
 }
+
+/* 顶栏「跳到最密集时段」：概览态下几十万命中在密度条上是一片均匀色块，
+   肉眼找不到峰值——这个按钮是概览视图真正的出口。 */
+.headerAction {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 7px;
+  cursor: pointer;
+  line-height: 18px;
+  white-space: nowrap;
+  transition: background 0.08s, color 0.08s, border-color 0.08s;
+}
+
+.headerAction:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.headerAction b {
+  color: var(--danger);
+  font-weight: 600;
+}

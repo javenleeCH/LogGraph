@@ -1,9 +1,17 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
-import { Link, AlertTriangle } from './Icon';
+import { Link, AlertTriangle, Copy } from './Icon';
 import type { FilterGroup, MatchedChain, LogEvent } from '../types';
 import styles from './DetailPanel.module.css';
+import { copyChainMarkdown } from '../io/exportActions';
+import {
+  fmtCompact,
+  fmtCount,
+  isSequenceTruncated,
+  trueChainCount,
+  trueUncoveredCount,
+} from '../utils/counts';
 
 /** 区块内循环导航：cur<0 时按方向从第一条/最后一条开始 */
 function navIdx(cur: number, dir: 1 | -1, count: number): number {
@@ -42,11 +50,6 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
   const focusEvent = useLogStore((s) => s.focusEvent);
 
   const result = sequenceResults[group.id];
-
-  const anomalyCount = useMemo(() => {
-    if (!result) return 0;
-    return result.uncoveredEvents.length + result.notViolations.length;
-  }, [result]);
 
   const kw = keyword.trim().toLowerCase();
 
@@ -137,6 +140,16 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
   const showChains = mode !== 'anomaly';
   const showAnomaly = mode !== 'chains';
 
+  // 计数口径：无关键字时取真值（引擎截断时 length 只是上限）；有关键字时显示命中数
+  const shownChains = kw ? chains.length : trueChainCount(result);
+  const shownAnomalies = kw
+    ? uncovered.length + violations.length
+    : trueUncoveredCount(result) + result.notViolations.length;
+  const truncated = isSequenceTruncated(result);
+  const truncTip = truncated
+    ? `\n明细按上限回传，此处为完整统计（点击可逐条查看前若干条）`
+    : '';
+
   return (
     <div className={styles['gm-root']}>
       {/* 筛选按钮组：全部 / 匹配 / 异常（可点击切换） */}
@@ -154,15 +167,17 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
           title="仅显示匹配链"
         >
           <Link size={12} />
-          匹配 <b>{chains.length}</b>
+          匹配{' '}
+          <b title={`${fmtCount(shownChains)} 条${truncTip}`}>{fmtCompact(shownChains)}</b>
         </button>
         <button
-          className={`${styles['gm-stat']} ${mode === 'anomaly' ? styles['gm-stat-active'] : ''} ${anomalyCount > 0 && mode !== 'anomaly' ? styles['gm-stat-warn'] : ''}`}
+          className={`${styles['gm-stat']} ${mode === 'anomaly' ? styles['gm-stat-active'] : ''} ${shownAnomalies > 0 && mode !== 'anomaly' ? styles['gm-stat-warn'] : ''}`}
           onClick={() => setMode('anomaly')}
-          title="仅显示异常（未覆盖事件 + NOT 违规）"
+          title={`仅显示异常（未覆盖事件 + NOT 违规）\n共 ${fmtCount(shownAnomalies)} 条${truncTip}`}
         >
           <AlertTriangle size={12} />
-          异常 <b>{anomalyCount}</b>
+          异常{' '}
+          <b title={`${fmtCount(shownAnomalies)} 条`}>{fmtCompact(shownAnomalies)}</b>
         </button>
       </div>
 
@@ -187,7 +202,9 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
         {showChains && (
           <>
             <div className={styles['gm-section-title']}>
-              <span>匹配链（{chains.length}/{result.chains.length}）</span>
+              <span>
+                匹配链（{kw ? `${chains.length}/${fmtCompact(shownChains)}` : fmtCount(shownChains)}）
+              </span>
               <SeqNav count={chains.length} cur={chainIdx} onNav={(d) => setChainIdx(navIdx(chainIdx, d, chains.length))} />
             </div>
             {chains.length === 0 && (
@@ -209,6 +226,14 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
                   <span className={styles['gm-chain-ts']}>
                     {formatDateTime(ch.startTs)} ~ {formatDateTime(ch.endTs)}
                   </span>
+                  <span className={styles['gm-chain-spacer']} />
+                  <button
+                    className={styles['gm-copy']}
+                    title="复制整链为 Markdown（含文件 / 行号 / 时间，可直接贴进工单）"
+                    onClick={() => void copyChainMarkdown(group, result, ch)}
+                  >
+                    <Copy size={11} />
+                  </button>
                 </div>
                 {ch.steps.map((st, i) => (
                   <div
@@ -267,7 +292,21 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
         {showAnomaly && (
           <>
             <div className={styles['gm-section-title']}>
-              <span>未覆盖事件（{result.uncoveredEvents.length}）</span>
+              <span
+                title={
+                  trueUncoveredCount(result) > result.uncoveredEvents.length
+                    ? `共 ${fmtCount(trueUncoveredCount(result))} 条；引擎单次最多回传 ${fmtCount(
+                        result.uncoveredEvents.length,
+                      )} 条明细，收窄时间窗可看其余`
+                    : `${fmtCount(trueUncoveredCount(result))} 条`
+                }
+              >
+                未覆盖事件（
+                {truncated
+                  ? `${fmtCompact(result.uncoveredEvents.length)}/${fmtCompact(trueUncoveredCount(result))}`
+                  : fmtCount(trueUncoveredCount(result))}
+                ）
+              </span>
               <SeqNav count={uncovered.length} cur={uncovIdx} onNav={(d) => setUncovIdx(navIdx(uncovIdx, d, uncovered.length))} />
             </div>
             {result.uncoveredEvents.length === 0 && (

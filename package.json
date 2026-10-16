@@ -12,6 +12,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build --no-bundle",
     "build:wasm": "cd filter-wasm && cargo build --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/filter_wasm.wasm --target web --out-dir ../src/filters/wasm-filter/pkg --out-name filter_wasm",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:wasm": "node scripts/test-wasm-regex.mjs"
   },
   "dependencies": {
@@ -31,6 +33,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "typescript": "^5.9.3",
-    "vite": "^8.3.1"
+    "vite": "^8.3.1",
+    "vitest": "^5.0.5"
   }
 }

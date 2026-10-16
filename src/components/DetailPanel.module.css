@@ -495,3 +495,28 @@
   color: #f87171;
   flex: 0 0 auto;
 }
+
+/* 链头右侧的「复制为 Markdown」：找到根因后能直接把结论带走 */
+.gm-chain-spacer {
+  flex: 1 1 auto;
+}
+
+.gm-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background 0.08s, color 0.08s;
+}
+
+.gm-copy:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}

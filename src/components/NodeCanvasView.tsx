@@ -11,16 +11,54 @@
 import { useEffect, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FilterEngine } from '../filters/FilterEngine';
-import type { FilterGroup, SequenceEdge } from '../types';
+import type { FilterGroup, SequenceEdge, SequenceMatchResult } from '../types';
 import { ChevronLeft, X, Trash, Plus } from './Icon';
 import { GroupFlowCanvas } from './flow/GroupFlowCanvas';
 import styles from './NodeCanvasView.module.css';
+import { CEP_MAX_CHAINS } from '../store/logStore';
+import {
+  fmtCount,
+  isSequenceTruncated,
+  trueChainCount,
+  trueUncoveredCount,
+} from '../utils/counts';
 
 /** 格式化时间窗标签：1000 → 1s，1500 → 1.5s，500 → 500ms */
 export function formatGap(ms: number): string {
   if (ms >= 1000 && ms % 1000 === 0) return `${ms / 1000}s`;
   if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
   return `${ms}ms`;
+}
+
+/**
+ * 序列匹配统计标签。
+ * 一律取真值：引擎截断时 `chains.length` 只是上限，直接显示会把上限读成总数
+ * （历史 bug：此处 2000 异常 vs CEP 面板 335,780 异常）。
+ */
+function SeqStat({
+  result,
+  anomalyEnabled,
+}: {
+  result: SequenceMatchResult;
+  anomalyEnabled: boolean;
+}) {
+  const truncated = isSequenceTruncated(result);
+  return (
+    <span
+      className={styles.seqStat}
+      title={
+        truncated
+          ? `引擎最多回传 ${fmtCount(CEP_MAX_CHAINS)} 条明细，此处为完整统计：${fmtCount(
+              trueChainCount(result),
+            )} 链 / ${fmtCount(trueUncoveredCount(result))} 异常`
+          : '当前规则在该日志上的完整匹配统计'
+      }
+    >
+      ⛓ {fmtCount(trueChainCount(result))} 链
+      {anomalyEnabled ? ` · ${fmtCount(trueUncoveredCount(result))} 异常` : ''}
+      {truncated ? '（明细截断）' : ''}
+    </span>
+  );
 }
 
 export function GroupEditorPage() {
@@ -73,10 +111,7 @@ export function GroupEditorPage() {
           {group.sequence?.scope === 'thread' ? '🧵 按线程' : '🌐 全局'}
         </button>
         {seqResult && (
-          <span className={styles.seqStat}>
-            ⛓ {seqResult.chains.length} 链
-            {group.sequence?.anomalyEnabled ? ` · ${seqResult.uncoveredEvents.length} 异常` : ''}
-          </span>
+          <SeqStat result={seqResult} anomalyEnabled={!!group.sequence?.anomalyEnabled} />
         )}
         <input
           className={`${styles.labelInput} mono`}

@@ -4,6 +4,7 @@ import { formatTime, formatDateTime, parseDateTime } from '../utils/timeFormat';
 import type { Filter, FilterGroup, LogEvent, SequenceMatchResult } from '../types';
 import styles from './CepTimelinePanel.module.css';
 import { ChevronLeft, ChevronRight, AlertTriangle } from './Icon';
+import { fmtCompact, fmtCount } from '../utils/counts';
 
 interface CepNode {
   eventId: number;
@@ -126,8 +127,10 @@ function buildBlocks(
     inRange.forEach((row, i) => {
       row.count = i + 1;
     });
-    const chainCount = inRange.filter((row) => row.kind === 'chain').length;
-    // anomalyCount：异常开启时等于过滤后异常行数（无筛选时取真值，避免被 CEP_MAX_CHAINS 截断误导）
+    // 无时间窗筛选时取真值（inRange 受 CEP_MAX_CHAINS 限制），有筛选时取窗内行数
+    const chainCount = cepRange
+      ? inRange.filter((row) => row.kind === 'chain').length
+      : (r.totalChains ?? r.chains.length);
     let anomalyCount = 0;
     if (anomalyEnabled) {
       const filtered = inRange.filter((row) => row.kind === 'anomaly').length;
@@ -269,17 +272,27 @@ export function CepTimelinePanel() {
             <div className={styles.blockHeader} style={{ borderLeftColor: b.color }}>
               <span className={styles.blockDot} style={{ background: b.color }} />
               <span className={styles.blockTitle} title={b.label}>{b.label}</span>
-              <span className={styles.blockStat}>
-                {b.chainCount} 链{b.anomalyCount > 0 ? ` · ${b.anomalyCount} 异常` : ''}
+              <span
+                className={styles.blockStat}
+                title={`${fmtCount(b.chainCount)} 条链${
+                  b.anomalyCount > 0 ? ` · ${fmtCount(b.anomalyCount)} 条异常` : ''
+                }${b.overLimit ? '\n（明细按上限回传，此处为完整统计）' : ''}`}
+              >
+                {fmtCompact(b.chainCount)} 链
+                {b.anomalyCount > 0 ? ` · ${fmtCompact(b.anomalyCount)} 异常` : ''}
               </span>
               <button
                 className={`${styles.anomalyToggle} ${b.anomalyEnabled ? styles.anomalyToggleActive : ''}`}
-                title={b.anomalyEnabled ? '异常高亮已开启：未覆盖事件标红' : '异常高亮已关闭：点击开启'}
+                title={
+                  b.anomalyEnabled
+                    ? `异常高亮已开启：${fmtCount(b.anomalyCount)} 个未覆盖事件标红`
+                    : '异常高亮已关闭：点击开启'
+                }
                 onClick={() => toggleSequenceAnomaly(b.groupId)}
               >
                 <AlertTriangle size={13} />
                 {b.anomalyEnabled && b.anomalyCount > 0 && (
-                  <span className={styles.anomalyBadge}>{b.anomalyCount}</span>
+                  <span className={styles.anomalyBadge}>{fmtCompact(b.anomalyCount)}</span>
                 )}
               </button>
             </div>

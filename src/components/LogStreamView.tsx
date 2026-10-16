@@ -2,6 +2,8 @@ import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'rea
 import { hitTsByLine, useLogStore } from '../store/logStore';
 import { LaneHeader } from './LaneHeader';
 import { bisectLeft } from '../timeline/correlation';
+import { findHotspots } from '../timeline/hotspots';
+import { densityAlpha, fmtRatio } from '../timeline/density';
 import { formatTime, formatDateTime, parseDateTime, formatDuration, chooseTickStep } from '../utils/timeFormat';
 import { levelColor as getLevelColor } from '../constants';
 import { ChevronLeft, ChevronRight, AlignCenter, Columns, Globe } from './Icon';
@@ -10,6 +12,13 @@ import { WelcomeState, NoFilterState } from './EmptyState';
 import type { LogEvent, Filter, FilterGroup, SequenceMatchResult } from '../types';
 import styles from './LogStreamView.module.css';
 import { fetchLinesByIds } from '../io/dbStore';
+import {
+  fmtCompact,
+  fmtCount,
+  isSequenceTruncated,
+  trueChainCount,
+  trueUncoveredCount,
+} from '../utils/counts';
 const CARD_H = 20; // 单个事件卡片高度
 const ROW_PAD = 4; // 行内上下留白
 const TIME_COL_WIDTH = 104; // 左侧时间列宽
@@ -852,6 +861,27 @@ export function LogStreamView() {
     };
   }, [dbMode, renderedIds, lineText]);
 
+  /**
+   * 概览热点：当前时间窗内事件最密集的连续时段。
+   * 依赖 laneEvents / viewRange，只在改窗、缩放时重算，滚动不触发
+   * （滚动会重建 yTop/yBot 但不重建 laneEvents）。
+   */
+  const hotspots = useMemo(
+    () => (viewRange ? findHotspots(viewRange, laneEvents) : []),
+    [viewRange, laneEvents],
+  );
+  /** 当前显示/下一个要跳的热点下标；-1=尚未跳转（显示第 0 个） */
+  const [hotIdx, setHotIdx] = useState(-1);
+  /** 跳到下一个热点（循环）：概览态下肉眼扫色块找峰值太慢，直接送过去 */
+  const jumpHotspot = () => {
+    if (hotspots.length === 0) return;
+    const next = (hotIdx + 1) % hotspots.length;
+    setHotIdx(next);
+    const h = hotspots[next];
+    setViewRange({ start: h.start, end: h.end });
+  };
+  const curHot = hotspots[Math.max(0, hotIdx)] ?? null;
+
   if (!viewRange || !fullRange) {
     return (
       <div ref={measureRef} className={styles.empty}>
@@ -923,14 +953,20 @@ export function LogStreamView() {
                 <span className={styles.segTitleV} style={{ color: '#ffffff' }}>
                   {seg.group!.label}
                 </span>
-                {seqRes && seqRes.chains.length > 0 && (
+                {seqRes && trueChainCount(seqRes) > 0 && (
                   <span
                     className={styles.segSeqStat}
-                    title={`序列链 ${seqRes.chains.length} 条${seg.group!.sequence?.anomalyEnabled ? ` · 异常 ${seqRes.uncoveredEvents.length} 条` : ''}`}
+                    title={`序列链 ${fmtCount(trueChainCount(seqRes))} 条${
+                      seg.group!.sequence?.anomalyEnabled
+                        ? ` · 异常 ${fmtCount(trueUncoveredCount(seqRes))} 条`
+                        : ''
+                    }${isSequenceTruncated(seqRes) ? '（明细按上限截断，此处为完整统计）' : ''}`}
                   >
-                    ⛓{seqRes.chains.length}
-                    {seg.group!.sequence?.anomalyEnabled && seqRes.uncoveredEvents.length > 0 && (
-                      <span className={styles.segSeqAnomaly}>⚠{seqRes.uncoveredEvents.length}</span>
+                    ⛓{fmtCompact(trueChainCount(seqRes))}
+                    {seg.group!.sequence?.anomalyEnabled && trueUncoveredCount(seqRes) > 0 && (
+                      <span className={styles.segSeqAnomaly}>
+                        ⚠{fmtCompact(trueUncoveredCount(seqRes))}
+                      </span>
                     )}
                   </span>
                 )}
@@ -1036,6 +1072,25 @@ export function LogStreamView() {
             ? `${globalData?.ticks.length ?? 0} 刻度 · ${visibleFilters.length} 列`
             : `${rows.length} 个时间点 · ${visibleFilters.length} 列`}
         </span>
+        {curHot && (
+          <>
+            <span className={styles.headerDivider}>|</span>
+            <button
+              className={styles.headerAction}
+              onClick={jumpHotspot}
+              title={
+                `跳到最密集时段：${formatTime(curHot.start)} ~ ${formatTime(curHot.end)}\n` +
+                `${fmtCount(curHot.count)} 条 · 常态的 ${curHot.ratio.toFixed(1)} 倍` +
+                (hotspots.length > 1 ? `\n共 ${hotspots.length} 个热点，连点循环切换` : '')
+              }
+            >
+              🔥 最密集{' '}
+              <b>
+                {formatTime(curHot.start)} · {fmtRatio(curHot.ratio)}×
+              </b>
+            </button>
+          </>
+        )}
         <span className={styles.spacer} />
         <span className={styles.hint} title="W/S 上下滚动，A/D 左右滚动">
           <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
@@ -1233,7 +1288,7 @@ export function LogStreamView() {
 }
 
 
-/** 全局时间轴模式：密度热力条（按过滤器色着色、深浅=事件密度）+ 稀疏时叠加卡片 */
+/** 全局时间轴模式：密度热力条（按过滤器色着色、深浅=相对常态的倍率）+ 稀疏时叠加卡片 */
 interface GlobalLaneProps {
   color: string;
   width: number;
@@ -1277,7 +1332,7 @@ function GlobalLane({
   const bucketCount = Math.max(0, Math.ceil((yBot - yTop) / DENSITY_BUCKET_H));
 
   // 密度桶：统计每个纵向像素桶内的事件数
-  const { buckets, maxCount } = useMemo(() => {
+  const { buckets, peakCount } = useMemo(() => {
     const arr = new Array(bucketCount).fill(0);
     const tsTop = viewRange.start + yTop / pxPerMs;
     const tsBot = viewRange.start + yBot / pxPerMs;
@@ -1292,13 +1347,23 @@ function GlobalLane({
       else if (bi >= bucketCount) bi = bucketCount - 1;
       arr[bi]++;
     }
-    let mx = 1;
-    for (const c of arr) if (c > mx) mx = c;
-    return { buckets: arr, maxCount: mx };
+    let peak = 0;
+    for (const c of arr) if (c > peak) peak = c;
+    return { buckets: arr, peakCount: peak };
   }, [events, viewRange, pxPerMs, yTop, yBot, bucketCount]);
 
+  /**
+   * 常态速率：事件均匀铺满整个时间窗时，每个 3px 桶应有的条数。
+   * 只依赖总量与总高度（**不含 scrollTop**），因此滚动过程中基线恒定、
+   * 颜色不跳变——这是拿它当颜色 0 点而非「视口内中位数」的原因。
+   */
+  const expectedPerBucket = useMemo(() => {
+    const totalH = Math.max(1, (viewRange.end - viewRange.start) * pxPerMs);
+    return Math.max(1, (events.length * DENSITY_BUCKET_H) / totalH);
+  }, [events.length, viewRange, pxPerMs]);
+
   // 稀疏时才叠加独立卡片
-  const dense = maxCount > DENSITY_CARD_THRESHOLD;
+  const dense = peakCount > DENSITY_CARD_THRESHOLD;
   const tsTop = viewRange.start + yTop / pxPerMs;
   const tsBot = viewRange.start + yBot / pxPerMs;
   let sIdx = bisectLeft(events, tsTop);
@@ -1332,11 +1397,12 @@ function GlobalLane({
         <div key={'g' + t.ts} className={styles.guideLine} style={{ top: t.y }} />
       ))}
 
-      {/* 密度热力条：始终渲染，颜色深浅=事件密度，色调=过滤器色 */}
+      {/* 密度热力条：始终渲染，明暗=相对常态速率的倍率（对数），色调=过滤器色 */}
       {buckets.map((c, i) => {
         if (c === 0) return null;
-        const alpha = Math.min(0.18 + (c / maxCount) * 0.77, 0.95);
+        const alpha = densityAlpha(c, expectedPerBucket);
         const isSel = i === selBucket;
+        const bTs = viewRange.start + (yTop + i * DENSITY_BUCKET_H) / pxPerMs;
         return (
           <div
             key={i}
@@ -1346,7 +1412,7 @@ function GlobalLane({
               height: DENSITY_BUCKET_H,
               background: `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha.toFixed(3)})`,
             }}
-            title={`${c} 条事件`}
+            title={`${formatTime(bTs)} · ${c} 条 · ${fmtRatio(c / expectedPerBucket)}× 常态`}
             onClick={() => {
               // 点击桶：选中该桶内第一个事件
               const by = yTop + i * DENSITY_BUCKET_H;
@@ -1422,7 +1488,7 @@ function GlobalLane({
         );
       })}
 
-      {maxCount <= 1 && visibleCards.length === 0 && (
+      {peakCount <= 1 && visibleCards.length === 0 && (
         <div className={styles.emptyMsg}>{filtersComputing ? '计算中…' : '无匹配'}</div>
       )}
     </div>

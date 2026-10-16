@@ -9,6 +9,7 @@ import { GroupMatchesTab } from './GroupMatchesTab';
 import { ContextStream } from './ContextStream';
 import { getDbFiles, type DbFileInfo } from '../io/dbStore';
 import styles from './DetailPanel.module.css';
+import { fmtCompact, trueUncoveredCount } from '../utils/counts';
 
 /** dbMode 下关联集仅用于 web 模式 ctxLines 高亮；恒定空集避免缩放期间
  * 每次 correlatedEventIds 更新都触发本组件（连带 GroupMatchesTab）重渲 */
@@ -186,8 +187,8 @@ export function DetailPanel() {
             .filter((g) => g.id !== activeGroup.id)
             .map((g) => {
               const r = sequenceResults[g.id];
-              const anomaly =
-                r.uncoveredEvents.length + r.notViolations.length;
+              // 真值：引擎截断时 length 只是上限
+              const anomaly = trueUncoveredCount(r) + r.notViolations.length;
               return (
                 <button
                   key={g.id}
@@ -200,7 +201,7 @@ export function DetailPanel() {
                   <span className={styles.tabBadge}>{r.chains.length}</span>
                   {anomaly > 0 && (
                     <span className={`${styles.tabBadge} ${styles.tabBadgeWarn}`}>
-                      {anomaly}
+                      {fmtCompact(anomaly)}
                     </span>
                   )}
                 </button>
@@ -227,7 +228,7 @@ export function DetailPanel() {
           <button className={`${styles.tabBtn} ${styles.tabBtnActive}`}>详情</button>
           {seqGroups.map((g) => {
             const r = sequenceResults[g.id];
-            const anomaly = r.uncoveredEvents.length + r.notViolations.length;
+            const anomaly = trueUncoveredCount(r) + r.notViolations.length;
             return (
               <button
                 key={g.id}
@@ -240,7 +241,7 @@ export function DetailPanel() {
                 <span className={styles.tabBadge}>{r.chains.length}</span>
                 {anomaly > 0 && (
                   <span className={`${styles.tabBadge} ${styles.tabBadgeWarn}`}>
-                    {anomaly}
+                    {fmtCompact(anomaly)}
                   </span>
                 )}
               </button>
@@ -292,7 +293,7 @@ export function DetailPanel() {
         </button>
         {seqGroups.map((g) => {
           const r = sequenceResults[g.id];
-          const anomaly = r.uncoveredEvents.length + r.notViolations.length;
+          const anomaly = trueUncoveredCount(r) + r.notViolations.length;
           return (
             <button
               key={g.id}
@@ -305,7 +306,7 @@ export function DetailPanel() {
               <span className={styles.tabBadge}>{r.chains.length}</span>
               {anomaly > 0 && (
                 <span className={`${styles.tabBadge} ${styles.tabBadgeWarn}`}>
-                  {anomaly}
+                  {fmtCompact(anomaly)}
                 </span>
               )}
             </button>
