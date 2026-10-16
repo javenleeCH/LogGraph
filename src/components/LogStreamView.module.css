@@ -464,6 +464,31 @@
   line-height: 16px;
 }
 
+/* 时间列可编辑：点击进入输入态 */
+.tickEditable {
+  cursor: text;
+  border-radius: 3px;
+  padding: 0 2px;
+  margin: 0 -2px;
+}
+.tickEditable:hover {
+  background: var(--accent-soft);
+}
+.tickEdit {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  width: 92px;
+  text-align: right;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 2px;
+  background: var(--bg);
+  color: var(--text);
+  box-sizing: border-box;
+  outline: none;
+  line-height: 16px;
+}
+
 .tickLine {
   flex: 1 1 auto;
   height: 1px;
@@ -540,12 +565,12 @@
 }
 
 .eventCorr {
-  border-left-color: var(--warn);
+  border-left-color: var(--corr);
 }
 
 .eventSel.eventCorr {
   border-left-color: var(--accent);
-  box-shadow: inset 2px 0 0 var(--warn);
+  box-shadow: inset 2px 0 0 var(--corr);
 }
 
 .eventLevel {
@@ -694,11 +719,11 @@
 }
 
 .globalEventCorr {
-  box-shadow: 0 0 0 1.5px var(--warn), 0 1px 2px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 0 0 1.5px var(--corr), 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 .globalEventSel.globalEventCorr {
-  box-shadow: 0 0 0 1.5px var(--accent), 0 0 0 3px var(--warn);
+  box-shadow: 0 0 0 1.5px var(--accent), 0 0 0 3px var(--corr);
 }
 
 /* ===== 序列链标记（graph 关联）===== */
@@ -708,11 +733,11 @@
   box-shadow: inset 0 0 0 1px var(--chain-color, var(--accent));
 }
 
-/* 异常卡片：红色警示边 + 微红背景 */
+/* 异常卡片：红色警示边 + 微红背景（--anomaly：与 --corr 关联蓝刻意区分） */
 .eventAnomaly {
-  border-color: var(--danger, #e5484d) !important;
-  background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
-  box-shadow: 0 0 0 1px var(--danger, #e5484d);
+  border-color: var(--anomaly, #cf222e) !important;
+  background: color-mix(in srgb, var(--anomaly, #cf222e) 10%, transparent);
+  box-shadow: 0 0 0 1px var(--anomaly, #cf222e);
 }
 
 /* 链号角标：卡片左上角 */

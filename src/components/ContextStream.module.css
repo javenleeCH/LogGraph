@@ -61,7 +61,7 @@
 }
 
 .row.correlated {
-  box-shadow: inset 3px 0 0 var(--warn);
+  box-shadow: inset 3px 0 0 var(--corr);
 }
 
 /* 文件分隔条 */

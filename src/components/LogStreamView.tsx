@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'rea
 import { hitTsByLine, useLogStore } from '../store/logStore';
 import { LaneHeader } from './LaneHeader';
 import { bisectLeft } from '../timeline/correlation';
-import { formatTime, formatDuration, chooseTickStep } from '../utils/timeFormat';
+import { formatTime, formatDateTime, parseDateTime, formatDuration, chooseTickStep } from '../utils/timeFormat';
 import { levelColor as getLevelColor } from '../constants';
 import { ChevronLeft, ChevronRight, AlignCenter, Columns, Globe } from './Icon';
 import { CepTimelinePanel } from './CepTimelinePanel';
@@ -378,6 +378,8 @@ export function LogStreamView() {
   const setHovered = useLogStore((s) => s.setHovered);
   const resetView = useLogStore((s) => s.resetView);
   const focusEvent = useLogStore((s) => s.focusEvent);
+  // 纵轴视图时间列可编辑：提交后不可变更新 events 并级联重算
+  const updateEventTs = useLogStore((s) => s.updateEventTs);
   // 选中事件的时间戳（列头序号二分定位用；dbMode 走行号命中表）
   const selTs = useMemo(() => {
     if (selectedEventId === null) return null;
@@ -454,6 +456,16 @@ export function LogStreamView() {
   const [colWidths, setColWidths] = useState<number[]>([]);
   // dbMode 下列表只持有骨架事件（raw=''），按视口惰性从 cache.db 取行文本（no=全局行号=event.id）
   const [lineText, setLineText] = useState<Map<number, string>>(new Map());
+  // 时间列编辑态：editingTs = 正在编辑的行时间戳；tsDraft = 输入框文本
+  const [editingTs, setEditingTs] = useState<number | null>(null);
+  const [tsDraft, setTsDraft] = useState('');
+  const commitTsEdit = (oldTs: number) => {
+    const parsed = parseDateTime(tsDraft);
+    setEditingTs(null);
+    if (parsed != null && parsed > 0 && parsed !== oldTs) {
+      updateEventTs(oldTs, parsed);
+    }
+  };
   // 列实例数量变化时重置为等分填充可用宽
   useEffect(() => {
     setColWidths((prev) => {
@@ -962,7 +974,35 @@ export function LogStreamView() {
                   className={styles.tickRow}
                   style={{ top: r.top, height: r.height }}
                 >
-                  <span className={styles.tickLabel}>{formatTime(r.ts)}</span>
+                  {editingTs === r.ts ? (
+                    <input
+                      className={styles.tickEdit}
+                      autoFocus
+                      value={tsDraft}
+                      onChange={(e) => setTsDraft(e.target.value)}
+                      onBlur={() => commitTsEdit(r.ts)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          commitTsEdit(r.ts);
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setEditingTs(null);
+                        }
+                      }}
+                    />
+                  ) : (
+                    <span
+                      className={`${styles.tickLabel} ${styles.tickEditable}`}
+                      title="点击编辑该时间点的时间戳（同时间戳的全部事件一起移动）"
+                      onClick={() => {
+                        setEditingTs(r.ts);
+                        setTsDraft(formatDateTime(r.ts));
+                      }}
+                    >
+                      {formatTime(r.ts)}
+                    </span>
+                  )}
                   <span className={styles.tickLine} />
                 </div>
               ))}
@@ -1179,9 +1219,9 @@ function GlobalLane({
                 className={styles.chainTag}
                 style={{
                   background: mark.violation
-                    ? 'var(--danger)'
+                    ? 'var(--anomaly)'
                     : mark.jitter
-                      ? 'var(--warn)'
+                      ? 'var(--corr)'
                       : mark.color,
                 }}
                 title={
@@ -1290,9 +1330,9 @@ function LaneStream({
                 className={styles.chainTag}
                 style={{
                   background: mark.violation
-                    ? 'var(--danger)'
+                    ? 'var(--anomaly)'
                     : mark.jitter
-                      ? 'var(--warn)'
+                      ? 'var(--corr)'
                       : mark.color,
                 }}
                 title={
@@ -1397,7 +1437,7 @@ function LaneColumn({
                         className={styles.chainTag}
                         style={{
                           background: mark.violation
-                            ? 'var(--danger)'
+                            ? 'var(--anomaly)'
                             : mark.jitter
                               ? 'var(--warn)'
                               : mark.color,

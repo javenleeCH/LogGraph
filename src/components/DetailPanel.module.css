@@ -150,7 +150,7 @@
 }
 
 .ctx-line.correlated {
-  box-shadow: inset 3px 0 0 var(--warn);
+  box-shadow: inset 3px 0 0 var(--corr);
 }
 
 .ctx-line .level-tag {

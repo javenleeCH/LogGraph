@@ -44,16 +44,18 @@ function buildPalette() {
   gridLine: 'rgba(60,64,67,0.08)',
   trackBottom: readVar('--border-light', '#e8eaed'),
   selectedFill: readVar('--text', '#202124'),
-  corrStroke: readVar('--track-orange', '#e69f00'),
+  corrStroke: readVar('--corr', '#2563eb'),
   scrubberStroke: 'rgba(26,115,232,0.5)',
   scrubberBubble: readVar('--accent', '#1a73e8'),
   minimapBg: readVar('--bg-panel', '#f8f9fa'),
   minimapBorder: readVar('--border', '#dadce0'),
   minimapViewFill: 'rgba(26,115,232,0.12)',
   minimapViewStroke: readVar('--accent', '#1a73e8'),
-  corrLink: 'rgba(230,159,0,0.45)',
-  anomalyFill: readVar('--danger', '#e5484d'),
-  anomalyStroke: readVar('--danger', '#e5484d'),
+  corrLink: 'rgba(37,99,235,0.4)',
+  // CEP 异常 / NOT 违规：专用红（--anomaly），刻意区别于 --track-orange 关联琥珀，
+  // 见 global.css 中 --anomaly 的注释
+  anomalyFill: readVar('--anomaly', '#cf222e'),
+  anomalyStroke: readVar('--anomaly', '#cf222e'),
   seqLinkAlpha: 0.75,
   tooltipBg: readVar('--bg', '#ffffff'),
   tooltipBorder: readVar('--border', '#dadce0'),
@@ -278,9 +280,12 @@ export function drawLaneEvents(
     }
 
     if (isCorr && !isSel) {
+      // 关联=琥珀虚线框（区别于 CEP 异常的红色实线框、链节点的组色实线框）
+      ctx.setLineDash(CORR_RING_DASH);
       ctx.strokeStyle = C.corrStroke;
       ctx.lineWidth = 1;
       ctx.strokeRect(xOff - 1, eventY - 1, w + 2, eventH + 2);
+      ctx.setLineDash([]);
     }
   }
   ctx.restore();
@@ -341,6 +346,10 @@ export function drawLaneBackgroundAt(
   ctx.stroke();
   ctx.restore();
 }
+
+/** 关联的ptime邻域标记：虚线框（区别于 CEP 链/异常的实线框）。
+ *  颜色之外再补一重形状语义——组色调色板含橙色项，仅靠色相差不足以保证可辨。 */
+const CORR_RING_DASH = [2, 2];
 
 /** 绘制 lane 内的事件标记（直接给定 y/h，用于 visibleRows 布局） */
 export function drawLaneEventsAt(
@@ -410,9 +419,11 @@ export function drawLaneEventsAt(
       ctx.fillStyle = isSel ? C.selectedFill : isCorr ? lightenHex(filter.color, 0.15) : filter.color;
       ctx.fillRect(x - w / 2, eventY, w, eventH);
       if (isCorr && !isSel) {
+        ctx.setLineDash(CORR_RING_DASH);
         ctx.strokeStyle = C.corrStroke;
         ctx.lineWidth = 1;
         ctx.strokeRect(x - w / 2 - 1, eventY - 1, w + 2, eventH + 2);
+        ctx.setLineDash([]);
       }
     }
     ctx.restore();
@@ -437,7 +448,9 @@ export function drawLaneEventsAt(
     ctx.fillStyle = fillColor;
     const w = isSel ? 3.5 : isHov || isChain ? 3 : LAYOUT.EVENT_MIN_WIDTH;
     ctx.fillRect(x - w / 2, eventY, w, eventH);
-    // 链上事件：组色描边（外框标记）；异常/违规：红框；抖动：黄框
+  // 外框语义三态：链上=组色实线框；异常/违规=--anomaly 专红实线框；
+  // 抖动=关联蓝框（见 corrStroke，虚线）。红框与蓝框刻意不同色：前者是引擎
+  // 判定的数据异常，后者是选中事件派生的时间邻域，混淆会直接误判现场。
     if (isChain && !isSel) {
       ctx.strokeStyle = chainColor ?? filter.color;
       ctx.lineWidth = 1.5;
@@ -477,9 +490,11 @@ export function drawLaneEventsAt(
       ctx.fill();
     }
     if (isCorr && !isSel) {
+      ctx.setLineDash(CORR_RING_DASH);
       ctx.strokeStyle = C.corrStroke;
       ctx.lineWidth = 1;
       ctx.strokeRect(x - w / 2 - 1, eventY - 1, w + 2, eventH + 2);
+      ctx.setLineDash([]);
     }
   }
   ctx.restore();

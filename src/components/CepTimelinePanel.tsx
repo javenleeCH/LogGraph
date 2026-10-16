@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CEP_MAX_CHAINS, useLogStore } from '../store/logStore';
-import { formatTime } from '../utils/timeFormat';
+import { formatTime, formatDateTime, parseDateTime } from '../utils/timeFormat';
 import type { Filter, FilterGroup, LogEvent, SequenceMatchResult } from '../types';
 import styles from './CepTimelinePanel.module.css';
-import { ChevronLeft, ChevronRight } from './Icon';
+import { ChevronLeft, ChevronRight, AlertTriangle } from './Icon';
 
 interface CepNode {
   eventId: number;
@@ -38,6 +38,10 @@ interface CepBlock {
   color: string;
   chainCount: number;
   anomalyCount: number;
+  /** 该组异常高亮开关是否开启（从 group 编辑器迁入的开关，按组控制） */
+  anomalyEnabled: boolean;
+  /** 引擎/TS 回退仅回传了前 CEP_MAX_CHAINS 条链（真值更多） */
+  overLimit: boolean;
   /** 行按 startTs 升序（全量，≤ 三类输入上限之和；渲染时按 limit 渐进切片） */
   rows: CepRow[];
 }
@@ -77,28 +81,26 @@ function buildBlocks(
   groups: FilterGroup[],
   sequenceResults: Record<string, SequenceMatchResult>,
   filters: Map<string, Filter>,
+  cepRange: { start: number; end: number } | null,
 ): CepBlock[] {
   const out: CepBlock[] = [];
   for (const g of groups) {
     const r = sequenceResults[g.id];
     if (!r) continue;
     // 每类行取数据上限（引擎路径已截断；TS 回退无上限，防全量物化行对象）
+    const anomalyEnabled = !!g.sequence?.anomalyEnabled;
     const rows: CepRow[] = r.chains.slice(0, CEP_MAX_CHAINS).map((ch) => chainRow(g, ch, filters));
-    let anomalyCount = 0;
-    if (g.sequence?.anomalyEnabled) {
+    if (anomalyEnabled) {
       for (const ev of r.uncoveredEvents.slice(0, CEP_MAX_CHAINS)) {
-        anomalyCount++;
         rows.push({
           count: 0,
           startTs: ev.ts,
           endTs: ev.ts,
           kind: 'anomaly',
           chainIndex: 0,
-          nodes: [{ eventId: ev.id, color: 'var(--danger, #e5484d)', stepNo: 1, anomaly: true }],
+          nodes: [{ eventId: ev.id, color: 'var(--anomaly, #cf222e)', stepNo: 1, anomaly: true }],
         });
       }
-      // 引擎截断（maxChains）时未覆盖列表也被截断，总数取真值
-      anomalyCount = r.totalUncovered ?? anomalyCount;
     }
     for (const v of r.notViolations.slice(0, CEP_MAX_CHAINS)) {
       const from = v.fromEvent as LogEvent;
@@ -110,23 +112,37 @@ function buildBlocks(
         kind: 'violation',
         chainIndex: 0,
         nodes: [
-          { eventId: from.id, color: 'var(--danger, #e5484d)', stepNo: 1, violation: true },
-          { eventId: to.id, color: 'var(--danger, #e5484d)', stepNo: 2, violation: true },
+          { eventId: from.id, color: 'var(--anomaly, #cf222e)', stepNo: 1, violation: true },
+          { eventId: to.id, color: 'var(--anomaly, #cf222e)', stepNo: 2, violation: true },
         ],
       });
     }
     rows.sort((a, b) => a.startTs - b.startTs || a.chainIndex - b.chainIndex);
+    // CEP 面板内时间窗筛选：保留与窗口重叠的行（链/违规按区间，点按时刻）
+    const inRange = cepRange
+      ? rows.filter((row) => row.endTs >= cepRange.start && row.startTs <= cepRange.end)
+      : rows;
     // 行序号：块内按 startTime 排序后 1-based
-    rows.forEach((row, i) => {
+    inRange.forEach((row, i) => {
       row.count = i + 1;
     });
+    const chainCount = inRange.filter((row) => row.kind === 'chain').length;
+    // anomalyCount：异常开启时等于过滤后异常行数（无筛选时取真值，避免被 CEP_MAX_CHAINS 截断误导）
+    let anomalyCount = 0;
+    if (anomalyEnabled) {
+      const filtered = inRange.filter((row) => row.kind === 'anomaly').length;
+      anomalyCount = cepRange ? filtered : (r.totalUncovered ?? filtered);
+    }
+    const overLimit = (r.totalChains ?? r.chains.length) > CEP_MAX_CHAINS;
     out.push({
       groupId: g.id,
       label: g.label,
       color: g.color,
-      chainCount: r.totalChains ?? r.chains.length,
+      chainCount,
       anomalyCount,
-      rows,
+      anomalyEnabled,
+      overLimit,
+      rows: inRange,
     });
   }
   return out;
@@ -145,16 +161,42 @@ export function CepTimelinePanel() {
   const filters = useLogStore((s) => s.filters);
   const selectedEventId = useLogStore((s) => s.selectedEventId);
   const focusEvent = useLogStore((s) => s.focusEvent);
+  // 异常高亮开关（从 group 编辑器迁入）：按组控制未覆盖事件标红
+  const toggleSequenceAnomaly = useLogStore((s) => s.toggleSequenceAnomaly);
   // 面板收纳（收纳后留 24px 竖条作展开入口）
   const [collapsed, setCollapsed] = useState(false);
   // 每组渐进渲染上限（groupId → 已加载行数）：首屏 RENDER_BATCH 批，
   // 滚动到块底哨兵自动续一批；数据重建（重算/改规则）时全部复位
   const [limits, setLimits] = useState<Record<string, number>>({});
+  // CEP 面板内时间窗筛选（仅本面板生效，不动全局 viewRange）
+  const [cepRange, setCepRange] = useState<{ start: number; end: number } | null>(null);
+  const [rangeOpen, setRangeOpen] = useState(false);
+  const [rangeStart, setRangeStart] = useState('');
+  const [rangeEnd, setRangeEnd] = useState('');
+
+  const openRange = () => {
+    const vr = useLogStore.getState().viewRange;
+    setRangeStart(cepRange ? formatDateTime(cepRange.start) : vr ? formatDateTime(vr.start) : '');
+    setRangeEnd(cepRange ? formatDateTime(cepRange.end) : vr ? formatDateTime(vr.end) : '');
+    setRangeOpen((o) => !o);
+  };
+  const applyRange = () => {
+    const s = parseDateTime(rangeStart);
+    const e = parseDateTime(rangeEnd);
+    if (s != null && e != null && s <= e) {
+      setCepRange({ start: s, end: e });
+      setRangeOpen(false);
+    }
+  };
+  const clearRange = () => {
+    setCepRange(null);
+    setRangeOpen(false);
+  };
 
   const blocks = useMemo(() => {
     const filterMap = new Map(filters.map((f) => [f.id, f] as const));
-    return buildBlocks(groups, sequenceResults, filterMap);
-  }, [groups, sequenceResults, filters]);
+    return buildBlocks(groups, sequenceResults, filterMap, cepRange);
+  }, [groups, sequenceResults, filters, cepRange]);
 
   useEffect(() => {
     setLimits({});
@@ -180,7 +222,41 @@ export function CepTimelinePanel() {
     <div className={styles.panel}>
       <div className={styles.panelHeader}>
         <span className={styles.panelTitle}>CEP 规则</span>
+        <span className={styles.spacer} />
         <span className={styles.panelCount}>{blocks.length} 组规则</span>
+        <button
+          className={`${styles.rangeBtn} ${cepRange ? styles.rangeActive : ''}`}
+          title="按时间筛选 CEP 结果（仅本面板生效）"
+          onClick={openRange}
+        >
+          ⏱ 时间
+        </button>
+        {rangeOpen && (
+          <div className={styles.rangePop}>
+            <div className={styles.rangeRow}>
+              <span className={styles.rangeLabel}>起</span>
+              <input
+                className={styles.rangeInput}
+                value={rangeStart}
+                onChange={(e) => setRangeStart(e.target.value)}
+                placeholder="YYYY-MM-DD HH:mm:ss.SSS"
+              />
+            </div>
+            <div className={styles.rangeRow}>
+              <span className={styles.rangeLabel}>止</span>
+              <input
+                className={styles.rangeInput}
+                value={rangeEnd}
+                onChange={(e) => setRangeEnd(e.target.value)}
+                placeholder="YYYY-MM-DD HH:mm:ss.SSS"
+              />
+            </div>
+            <div className={styles.rangeActions}>
+              <button className="ghost" onClick={clearRange}>清除</button>
+              <button className={styles.rangeApply} onClick={applyRange}>应用</button>
+            </div>
+          </div>
+        )}
       </div>
       <div className={styles.panelBody}>
         {blocks.map((b) => {
@@ -196,6 +272,16 @@ export function CepTimelinePanel() {
               <span className={styles.blockStat}>
                 {b.chainCount} 链{b.anomalyCount > 0 ? ` · ${b.anomalyCount} 异常` : ''}
               </span>
+              <button
+                className={`${styles.anomalyToggle} ${b.anomalyEnabled ? styles.anomalyToggleActive : ''}`}
+                title={b.anomalyEnabled ? '异常高亮已开启：未覆盖事件标红' : '异常高亮已关闭：点击开启'}
+                onClick={() => toggleSequenceAnomaly(b.groupId)}
+              >
+                <AlertTriangle size={13} />
+                {b.anomalyEnabled && b.anomalyCount > 0 && (
+                  <span className={styles.anomalyBadge}>{b.anomalyCount}</span>
+                )}
+              </button>
             </div>
             {b.rows.length === 0 ? (
               <div className={styles.blockEmpty}>无匹配结果</div>
@@ -237,7 +323,7 @@ export function CepTimelinePanel() {
                 }
               />
             )}
-            {b.chainCount > CEP_MAX_CHAINS && (
+            {b.overLimit && (
               <div className={styles.blockMore}>
                 引擎仅回传按时间序的前 {CEP_MAX_CHAINS} 条链（共 {b.chainCount}）——收窄规则或时间窗可查看其余
               </div>

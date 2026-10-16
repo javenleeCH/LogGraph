@@ -342,6 +342,9 @@ interface LogState {
   updateFilter: (id: string, patch: Partial<Filter>) => void;
   removeFilter: (id: string) => void;
   recomputeMatches: () => void;
+  /** 编辑事件时间戳（纵轴视图时间列可编辑）：不可变更新 events 并级联重算
+   *  过滤/CEP/关联。仅内存修改，dbMode 不支持；同 ts 的全部事件一起移动。 */
+  updateEventTs: (oldTs: number, newTs: number) => void;
   /** 单 filter 增量重算（编辑 filter 用；大数据量自动分块异步） */
   recomputeFilterMatch: (id: string) => void;
   /** 分块过滤进度（null=无进行中任务）；UI 展示进度条用 */
@@ -1077,6 +1080,20 @@ export const useLogStore = create<LogState>((set, get) => ({
     set({ matches, filtersComputing: false });
     get().recomputeSequences();
     get().recomputeCorrelations();
+  },
+
+  updateEventTs: (oldTs, newTs) => {
+    if (!Number.isFinite(newTs) || newTs <= 0 || oldTs === newTs) return;
+    const { dbMode, events } = get();
+    if (dbMode || !events || events.length === 0) {
+      if (dbMode) toast.warn('数据库模式下暂不支持编辑时间戳');
+      return;
+    }
+    const updated = events.map((e) => (e.ts === oldTs ? { ...e, ts: newTs } : e));
+    // 维持 events 按 ts 升序不变式（FilterEngine 不分桶排序，下游 bisect 依赖有序）
+    updated.sort((a, b) => a.ts - b.ts);
+    set({ events: updated });
+    get().recomputeMatches();
   },
 
   setViewRange: (r) => {

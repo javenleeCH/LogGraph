@@ -826,10 +826,11 @@
   pointer-events: none;
 }
 
-/* NOT 禁止边：红色密虚线 */
+/* NOT 禁止边：红色密虚线（--anomaly：CEP 违规语义，区别于 UI 报错 --danger）
+   注意同组顺序边用组色实线/疏虚线，红色在此专指 NOT 违规 */
 .edgePathNot {
   fill: none;
-  stroke: var(--danger);
+  stroke: var(--anomaly, #cf222e);
   stroke-width: 2;
   stroke-dasharray: 4 3;
   opacity: 0.8;
@@ -986,7 +987,7 @@
   font-size: 10px;
   font-weight: 600;
   color: #fff;
-  background: var(--danger, #e5484d);
+  background: var(--anomaly, #cf222e);
   border-radius: 8px;
   padding: 0 5px;
   margin-left: 4px;

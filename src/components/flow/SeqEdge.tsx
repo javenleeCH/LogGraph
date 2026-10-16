@@ -111,7 +111,7 @@ function SeqEdgeInner(props: EdgeProps<SeqEdgeType>) {
         markerEnd={undefined}
         style={
           isNot
-            ? { stroke: 'var(--danger)', strokeWidth: 2, strokeDasharray: '4 3', opacity: 0.85 }
+            ? { stroke: 'var(--anomaly)', strokeWidth: 2, strokeDasharray: '4 3', opacity: 0.85 }
             : isOpt
               ? { stroke: data?.color, strokeWidth: 2, strokeDasharray: '2 5', opacity: 0.7 }
               : { stroke: data?.color, strokeWidth: 2, opacity: 0.85 }

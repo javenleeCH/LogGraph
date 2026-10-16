@@ -28,6 +28,15 @@
   --accent-grad: linear-gradient(135deg, #1a73e8 0%, #56b4e9 100%);
   --danger: #d55e00;
   --warn: #e69f00;
+  /* CEP 异常 / NOT 违规专用色（数据语义）——必须与关联高亮的琥珀色
+     （--warn / --track-orange）拉开色相：前者是"引擎判定的异常"，
+     后者是"点击/选中事件后派生的时间邻域关联"，两者同为 1~1.5px 描边，
+     若都取橙色系则肉眼无法分辨。UI 报错仍用 --danger。 */
+  --anomaly: #cf222e;
+  /* CEP 点击/选中事件后派生的时间邻域关联高亮：专用蓝（--corr）。
+     刻意区别于 --anomaly 专红（异常）与 --accent 选中环，并与红框同为 1~1.5px
+     描边但关联用虚线，避免与异常实线框混淆。 */
+  --corr: #2563eb;
   --ok: #009e73;
   --cta: #22c55e;
   --link: #1a73e8;
@@ -126,6 +135,10 @@
   --accent-grad: linear-gradient(135deg, #7c5cff 0%, #22d3ee 100%);
   --danger: #f87171;
   --warn: #fbbf24;
+  /* CEP 异常 / NOT 违规专用色（数据语义），与琥珀色关联高亮区分 */
+  --anomaly: #f87171;
+  /* CEP 点击/选中事件后派生的时间邻域关联高亮：专用蓝（--corr） */
+  --corr: #3b82f6;
   --ok: #34d399;
   --cta: #34d399;
   --link: #8ab4f8;

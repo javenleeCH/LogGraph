@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FilterEngine } from '../filters/FilterEngine';
 import type { FilterGroup, SequenceEdge } from '../types';
-import { ChevronLeft, X, AlertTriangle, Trash, Plus } from './Icon';
+import { ChevronLeft, X, Trash, Plus } from './Icon';
 import { GroupFlowCanvas } from './flow/GroupFlowCanvas';
 import styles from './NodeCanvasView.module.css';
 
@@ -28,7 +28,6 @@ export function GroupEditorPage() {
   const setActiveGroup = useLogStore((s) => s.setActiveGroup);
   const groups = useLogStore((s) => s.groups);
   const updateGroup = useLogStore((s) => s.updateGroup);
-  const toggleSequenceAnomaly = useLogStore((s) => s.toggleSequenceAnomaly);
   const setSequenceScope = useLogStore((s) => s.setSequenceScope);
   const sequenceResults = useLogStore((s) => s.sequenceResults);
 
@@ -64,16 +63,6 @@ export function GroupEditorPage() {
         <button className="ghost" onClick={() => setActiveGroup(null)}>← 返回</button>
         <span className={styles.crumbs}>分组编辑 / {group.label}</span>
         <div className={styles.spacer} />
-        <button
-          className={`ghost ${group.sequence?.anomalyEnabled ? styles.toolbarBtnActive : ''}`}
-          onClick={() => toggleSequenceAnomaly(group.id)}
-          title="异常开关：开启后在时间线/日志流视图中把未覆盖事件标红"
-        >
-          <AlertTriangle size={14} /> 异常
-          {seqResult && seqResult.uncoveredEvents.length > 0 && (
-            <span className={styles.anomalyBadge}>{seqResult.uncoveredEvents.length}</span>
-          )}
-        </button>
         <button
           className={`ghost ${group.sequence?.scope === 'thread' ? styles.toolbarBtnActive : ''}`}
           onClick={() =>
