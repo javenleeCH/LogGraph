@@ -40,7 +40,16 @@ interface CepBlock {
   anomalyCount: number;
   /** 行按 startTs 升序 */
   rows: CepRow[];
+  /** 超出渲染上限被截掉的行数（按时间序保留前 MAX_RENDER_ROWS 行） */
+  omitted: number;
 }
+
+/**
+ * 单组最多渲染的行数。大目录（百 MB 级）下宽松规则的链可达数十万条，
+ * 全量渲染（每链一行、每步一个按钮）会把渲染进程 OOM 拖死——按时间序
+ * 截断展示，真实链数仍显示在块头统计里。
+ */
+const MAX_RENDER_ROWS = 200;
 
 /** 链行：节点=各步 filter 色块 + 链内步序号 */
 function chainRow(
@@ -111,13 +120,15 @@ function buildBlocks(
     rows.forEach((row, i) => {
       row.count = i + 1;
     });
+    const omitted = Math.max(0, rows.length - MAX_RENDER_ROWS);
     out.push({
       groupId: g.id,
       label: g.label,
       color: g.color,
       chainCount: r.chains.length,
       anomalyCount,
-      rows,
+      rows: rows.slice(0, MAX_RENDER_ROWS),
+      omitted,
     });
   }
   return out;
@@ -208,6 +219,11 @@ export function CepTimelinePanel() {
                   </span>
                 </div>
               ))
+            )}
+            {b.omitted > 0 && (
+              <div className={styles.blockMore}>
+                已按时间序显示前 {MAX_RENDER_ROWS} 行，另有 {b.omitted} 条未渲染
+              </div>
             )}
           </div>
         ))}

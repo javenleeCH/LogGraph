@@ -151,6 +151,13 @@
   font-size: 11px;
 }
 
+.blockMore {
+  padding: 4px 12px 6px;
+  color: var(--cep-faint);
+  font-size: 11px;
+  border-top: 1px dashed var(--cep-border);
+}
+
 .row {
   display: flex;
   align-items: center;
