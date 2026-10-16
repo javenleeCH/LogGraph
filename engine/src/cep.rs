@@ -32,6 +32,10 @@ pub struct GroupSpec {
     pub node_conditions: Option<HashMap<String, String>>,
     #[serde(default)]
     pub node_counts: Option<HashMap<String, NodeCountSpec>>,
+    /// 返回链数上限（UI 防载荷爆炸用；None=不限制，CLI 缺省）。
+    /// 截断时全量统计经 total_* 回传、全量 lane 标记经 covered_marks 回传。
+    #[serde(default)]
+    pub max_chains: Option<u32>,
 }
 
 fn default_scope() -> String {
@@ -183,6 +187,16 @@ pub struct SeqResult {
     #[serde(rename = "notViolations")]
     pub not_violations: Vec<NotViolation>,
     pub heartbeats: Vec<Heartbeat>,
+    /// 完整链数（未截断时 = chains.len()）：截断后 UI 统计仍取真值
+    #[serde(rename = "totalChains")]
+    pub total_chains: usize,
+    /// 完整未覆盖事件数（语义同上）
+    #[serde(rename = "totalUncovered")]
+    pub total_uncovered: usize,
+    /// fid → [(事件id, 链号)]：截断时链列表不全，全量 lane 标记由此回传
+    /// （未截断时为空，前端从 chains 自行推导）
+    #[serde(rename = "coveredMarks")]
+    pub covered_marks: BTreeMap<String, Vec<(u32, u32)>>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -643,6 +657,8 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
         c.chain_index = (i as u32) + 1;
     }
 
+    let total_chains = chains.len();
+    let total_uncovered = uncovered.len();
     Ok(SeqResult {
         group_id: spec.group_id.clone(),
         chains,
@@ -650,6 +666,9 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
         edge_stats,
         not_violations: violations,
         heartbeats: Vec::new(),
+        total_chains,
+        total_uncovered,
+        covered_marks: BTreeMap::new(),
     })
 }
 
@@ -663,7 +682,26 @@ pub fn run_sequences(groups: &[GroupSpec], store: &EventStore<'_>) -> RunSeqResp
             continue;
         }
         match match_group(spec, store) {
-            Ok(r) => {
+            Ok(mut r) => {
+                if let Some(max) = spec.max_chains {
+                    r.total_chains = r.chains.len();
+                    r.total_uncovered = r.uncovered_events.len();
+                    // 全量 lane 标记：截断后链列表不全，标记从完整链提取
+                    let mut marks: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+                    for c in &r.chains {
+                        for s in &c.steps {
+                            marks
+                                .entry(s.filter_id.clone())
+                                .or_default()
+                                .push((s.event.id, c.chain_index));
+                        }
+                    }
+                    r.covered_marks = marks;
+                    let max = max as usize;
+                    r.chains.truncate(max);
+                    r.uncovered_events.truncate(max);
+                    r.not_violations.truncate(max);
+                }
                 results.insert(spec.group_id.clone(), r);
             }
             Err(_) => fallback = true,
@@ -720,6 +758,7 @@ mod tests {
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: None,
+            max_chains: None,
         };
         let r = match_group(&spec, &s).unwrap();
         assert_eq!(r.chains.len(), n, "每对 A→B(500ms 后) 都应成链");
@@ -739,6 +778,7 @@ mod tests {
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: None,
+            max_chains: None,
         };
         let r = match_group(&spec, &s).unwrap();
         assert_eq!(r.chains.len(), 1, "应只有 1 条链");
@@ -752,6 +792,32 @@ mod tests {
     }
 
     #[test]
+    fn max_chains_truncates_with_totals_and_marks() {
+        // maxChains 截断：chains 截断、total_* 保留真值、coveredMarks
+        // 携带全量 lane 标记（含被截掉的链），UI 大目录防载荷爆炸的依据
+        let s = store(&[("A", &[(1, 100), (2, 300)]), ("B", &[(3, 150), (4, 350)])]);
+        let spec = GroupSpec {
+            group_id: "g".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: Some(1),
+        };
+        let r = run_sequences(&[spec], &s);
+        assert!(!r.fallback);
+        let res = r.results.get("g").unwrap();
+        assert_eq!(res.chains.len(), 1, "截断到 1 条链");
+        assert_eq!(res.total_chains, 2, "完整链数保留真值");
+        assert_eq!(res.total_uncovered, 0);
+        assert_eq!(res.covered_marks["A"].len(), 2, "A 全量标记（含截掉的链）");
+        assert_eq!(res.covered_marks["B"].len(), 2);
+        assert!(res.covered_marks["A"].iter().any(|&(id, _)| id == 2));
+    }
+
+    #[test]
     fn not_edge_violation_detected() {
         let s = store(&[("A", &[(1, 100)]), ("B", &[(2, 120)])]);
         let spec = GroupSpec {
@@ -762,6 +828,7 @@ mod tests {
             edges: vec![EdgeSpec { kind: Some("not".into()), ..seq_edge() }],
             node_conditions: None,
             node_counts: None,
+            max_chains: None,
         };
         let r = match_group(&spec, &s).unwrap();
         assert_eq!(r.not_violations.len(), 1);
@@ -789,6 +856,7 @@ mod tests {
             }],
             node_conditions: None,
             node_counts: None,
+            max_chains: None,
         };
         let r = match_group(&spec, &s).unwrap();
         assert_eq!(r.chains.len(), 1);
@@ -805,6 +873,7 @@ mod tests {
             edges: vec![],
             node_conditions: None,
             node_counts: None,
+            max_chains: None,
         };
         assert!(!spec.is_supported());
     }
@@ -846,6 +915,7 @@ mod tests {
             ],
             node_conditions: None,
             node_counts: None,
+            max_chains: None,
         };
         let r = match_group(&spec, &s).unwrap();
         assert_eq!(r.chains.len(), 1, "应成一条 A→(B∧C)→D 链");

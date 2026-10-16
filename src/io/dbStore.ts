@@ -348,6 +348,8 @@ export interface DbRunSeqGroup {
   edges: DbRunSeqEdge[];
   nodeConditions?: Record<string, string>;
   nodeCounts?: Record<string, { min: number; max: number }>;
+  /** 引擎返回链数上限：截断时 totalChains/coveredMarks 携带全量统计与 lane 标记 */
+  maxChains?: number;
 }
 
 export interface DbRunSeqResponse {
@@ -385,6 +387,7 @@ export async function runDbSequences(
       })),
       nodeConditions: g.nodeConditions,
       nodeCounts: g.nodeCounts,
+      maxChains: g.maxChains,
     }));
   if (specs.length === 0) return { fallback: true, results: {} };
   try {

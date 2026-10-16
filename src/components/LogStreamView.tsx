@@ -315,11 +315,19 @@ export function LogStreamView() {
           info = new Map();
           m.set(fid, info);
         }
-        for (const ch of r.chains) {
-          for (const stp of ch.steps) {
-            if (stp.filterId !== fid) continue;
-            if (!info.has(stp.event.id)) {
-              info.set(stp.event.id, { chainIndex: ch.chainIndex, color: g.color, anomaly: false });
+        const marks = r.coveredMarks?.[fid];
+        if (marks) {
+          // 引擎截断链列表（maxChains）时全量标记由 coveredMarks 回传
+          for (const [id, chainIndex] of marks) {
+            if (!info.has(id)) info.set(id, { chainIndex, color: g.color, anomaly: false });
+          }
+        } else {
+          for (const ch of r.chains) {
+            for (const stp of ch.steps) {
+              if (stp.filterId !== fid) continue;
+              if (!info.has(stp.event.id)) {
+                info.set(stp.event.id, { chainIndex: ch.chainIndex, color: g.color, anomaly: false });
+              }
             }
           }
         }
@@ -327,7 +335,8 @@ export function LogStreamView() {
           // 未覆盖事件 = 异常（仅标在该 filter 自己的卡片上）
           const filterEvents = visibleMatches.find((mm) => mm.filterId === fid)?.events ?? [];
           const covered = new Set(
-            r.chains.flatMap((ch) => ch.steps.filter((s2) => s2.filterId === fid).map((s2) => s2.event.id)),
+            marks?.map((mm) => mm[0]) ??
+              r.chains.flatMap((ch) => ch.steps.filter((s2) => s2.filterId === fid).map((s2) => s2.event.id)),
           );
           for (const ev of filterEvents) {
             if (!covered.has(ev.id) && !info.has(ev.id)) {

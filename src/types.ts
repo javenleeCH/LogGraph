@@ -165,6 +165,12 @@ export interface SequenceMatchResult {
   notViolations: NotViolation[];
   /** periodic 心跳断言（仅当组内有 periodic 边时非空） */
   heartbeats: HeartbeatGroup[];
+  /** 完整链数（引擎 maxChains 截断时 ≠ chains.length；未截断时缺省= chains.length） */
+  totalChains?: number;
+  /** 完整未覆盖事件数（语义同上） */
+  totalUncovered?: number;
+  /** fid → [事件id, 链号]：截断时链列表不全，全量 lane 标记由此回传（未截断时缺省） */
+  coveredMarks?: Record<string, [number, number][]>;
 }
 
 // ===== 节点画布（draw.io 风格区域式画布）=====

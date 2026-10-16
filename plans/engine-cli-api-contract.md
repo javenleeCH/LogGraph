@@ -552,6 +552,7 @@ pub fn parse_rules(json: &str) -> EngineResult<RulesFile>;
 | `edges` | Edge[] | **是** | — | 0..256 条；可为空（该 group 只产出 uncovered 事件清单） |
 | `nodeCounts` | map | 否 | `{}` | 见 §3.6（v1 不支持 → W04） |
 | `nodeConditions` | map | 否 | `{}` | 见 §3.6（v1 不支持 → W05） |
+| `maxChains` | integer ≥1 | 否 | —（不限） | 返回链数上限（UI 防大目录载荷爆炸）。截断时 `totalChains`/`totalUncovered` 仍报全量真值，`coveredMarks` 回传全量 lane 标记 |
 
 ### 3.5 `groups[].edges[]`（边定义与 kind 语义）
 
@@ -1003,7 +1004,10 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
                            "raw": "09:00:08.800 [net-0] WARN  Connection reset by peer",
                            "message": "Connection reset by peer", "thread": "net-0" } }
         ],
-        "heartbeats": []
+        "heartbeats": [],
+        "totalChains": 1,
+        "totalUncovered": 0,
+        "coveredMarks": {}
       }
     }
   },
@@ -1021,6 +1025,11 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
   （Rust `BTreeMap`），agent 可依赖。
 * `thread: null` / `lateCount: null`：null 与缺省不同（字段存在、值未知 / 无）。
   `heartbeats` v1 恒 `[]`（periodic 保留位，W03）。
+* `totalChains`/`totalUncovered`：全量真值。未设 `maxChains` 时分别等于
+  `chains.length`/`uncoveredEvents.length`；截断后链表被裁但统计保真。
+* `coveredMarks`：仅设 `maxChains` 截断时非空——`filterId → [[事件id, 链号], …]`
+  全量 lane 标记（含被截掉的链），供 UI 时间线标链用；未截断为 `{}`，
+  调用方自行从 `chains` 推导。
 * `fallback: true` 时被跳过的 group **不在 `results` 里**（不是空结果占位），
   其余 group 照常计算。
 

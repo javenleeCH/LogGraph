@@ -4,6 +4,7 @@
  */
 
 import { create } from 'zustand';
+import { toast } from './uiStore';
 import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, SavedRange, SequenceConfig, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
 import type { FullParseResult } from '../parser/parseBridge';
 import { FilterEngine } from '../filters/FilterEngine';
@@ -93,6 +94,27 @@ function skelEvents(hits: DbFilterHits | undefined): LogEvent[] {
     out[i] = { id: hits.lines[i], ts: hits.ts[i], raw: '', message: '' };
   }
   return out;
+}
+
+/** ws_sequences 下推时每组请求的链数上限：面板渲染上限同源（防大目录链载荷爆炸） */
+export const CEP_MAX_CHAINS = 200;
+
+/** 前端 TS 序列引擎的事件体量护栏：超限组跳过（大目录全量跑会把主线程拖死） */
+const TS_SEQ_EVENT_LIMIT = 300_000;
+
+function seqTsSafeGroups(groups: FilterGroup[], matches: FilterMatch[]): FilterGroup[] {
+  const len = new Map<string, number>();
+  for (const fm of matches) len.set(fm.filterId, fm.events.length);
+  const ok = groups.filter((g) =>
+    g.filterIds.reduce((n, fid) => n + (len.get(fid) ?? 0), 0) <= TS_SEQ_EVENT_LIMIT,
+  );
+  if (ok.length < groups.length) {
+    toast.warn(
+      'CEP 数据量过大，已跳过部分规则组',
+      `命中事件超过 ${TS_SEQ_EVENT_LIMIT / 1000}k 的组不走前端引擎（引擎下推失败/不支持时），请收紧规则`,
+    );
+  }
+  return ok;
 }
 
 function scheduleCorrRecompute(run: () => void) {
@@ -857,20 +879,21 @@ export const useLogStore = create<LogState>((set, get) => ({
                 })),
                 nodeConditions: g.sequence!.nodeConditions,
                 nodeCounts: g.sequence!.nodeCounts,
+                maxChains: CEP_MAX_CHAINS,
               })),
               seqQueries,
             );
             if (resp.fallback) {
-              results = runSequenceMatching(rustGroups, matches);
+              results = runSequenceMatching(seqTsSafeGroups(rustGroups, matches), matches);
             } else {
               results = resp.results as Record<string, SequenceMatchResult>;
             }
           } catch {
-            results = runSequenceMatching(rustGroups, matches);
+            results = runSequenceMatching(seqTsSafeGroups(rustGroups, matches), matches);
           }
         }
         if (tsGroups.length > 0) {
-          Object.assign(results, runSequenceMatching(tsGroups, matches));
+          Object.assign(results, runSequenceMatching(seqTsSafeGroups(tsGroups, matches), matches));
         }
         set({ sequenceResults: results });
         get().recomputeCorrelations();

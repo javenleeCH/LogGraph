@@ -1820,6 +1820,7 @@ mod tests {
             }],
             node_conditions: None,
             node_counts: None,
+            max_chains: None,
         }];
         let r = s.run_sequences(&groups);
         assert!(!r.fallback);
@@ -1844,6 +1845,7 @@ mod tests {
             }],
             node_conditions: None,
             node_counts: None,
+            max_chains: None,
         }];
         let r2 = s.run_sequences(&groups2);
         assert!(r2.results.get("g2").unwrap().chains.is_empty());

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useLogStore } from '../store/logStore';
+import { CEP_MAX_CHAINS, useLogStore } from '../store/logStore';
 import { formatTime } from '../utils/timeFormat';
 import type { Filter, FilterGroup, LogEvent, SequenceMatchResult } from '../types';
 import styles from './CepTimelinePanel.module.css';
@@ -45,11 +45,12 @@ interface CepBlock {
 }
 
 /**
- * 单组最多渲染的行数。大目录（百 MB 级）下宽松规则的链可达数十万条，
- * 全量渲染（每链一行、每步一个按钮）会把渲染进程 OOM 拖死——按时间序
- * 截断展示，真实链数仍显示在块头统计里。
+ * 单组最多渲染的行数（= 下推引擎请求的链数上限 CEP_MAX_CHAINS）。
+ * 大目录（百 MB 级）下宽松规则的链可达数十万条，全量渲染（每链一行、
+ * 每步一个按钮）会把渲染进程 OOM 拖死——按时间序截断，真实链数
+ * 显示在块头统计（totalChains）里。
  */
-const MAX_RENDER_ROWS = 200;
+const MAX_RENDER_ROWS = CEP_MAX_CHAINS;
 
 /** 链行：节点=各步 filter 色块 + 链内步序号 */
 function chainRow(
@@ -99,6 +100,8 @@ function buildBlocks(
           nodes: [{ eventId: ev.id, color: 'var(--danger, #e5484d)', stepNo: 1, anomaly: true }],
         });
       }
+      // 引擎截断（maxChains）时未覆盖列表也被截断，总数取真值
+      anomalyCount = r.totalUncovered ?? anomalyCount;
     }
     for (const v of r.notViolations) {
       const from = v.fromEvent as LogEvent;
@@ -125,7 +128,7 @@ function buildBlocks(
       groupId: g.id,
       label: g.label,
       color: g.color,
-      chainCount: r.chains.length,
+      chainCount: r.totalChains ?? r.chains.length,
       anomalyCount,
       rows: rows.slice(0, MAX_RENDER_ROWS),
       omitted,
