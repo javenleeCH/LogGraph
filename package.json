@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
+    "tauri:build": "tauri build --no-bundle",
     "build:wasm": "cd filter-wasm && cargo build --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/filter_wasm.wasm --target web --out-dir ../src/filters/wasm-filter/pkg --out-name filter_wasm",
     "test:wasm": "node scripts/test-wasm-regex.mjs"
   },
