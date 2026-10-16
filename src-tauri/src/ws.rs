@@ -13,7 +13,6 @@
 
 use loggraph_engine::cep::{GroupSpec, RunSeqResponse};
 use loggraph_engine::session::{FilterBatchOut, FilterQuery, Session, WsCtx};
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
