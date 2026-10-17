@@ -28,6 +28,7 @@ import type {
   SequenceEdge,
   SequenceEdgeStat,
   SequenceMatchResult,
+  ThreadStats,
 } from '../types';
 import { bisectLeft } from '../timeline/correlation';
 import { compileExpr } from './expr';
@@ -546,6 +547,32 @@ export function matchGroup(
   }
   uncovered.sort((a, b) => a.ts - b.ts || a.id - b.id);
 
+  // thread 解析质量统计（可观测性）：与分桶、未覆盖统计用的是同一批事件，
+  // 提示才不会和实际行为脱节。不论 scope 都产出——用户切到按线程作用域之前
+  // 就该知道这份日志有没有 thread 可用。详见 `ThreadStats` 文档。
+  const laneIds = new Set(filterIds);
+  for (const e of config.edges) {
+    laneIds.add(e.fromFilterId);
+    for (const t of targetsOf(e)) laneIds.add(t);
+  }
+  let totalEvents = 0;
+  let withThread = 0;
+  const distinctThreads = new Set<string>();
+  for (const fid of laneIds) {
+    for (const ev of matchByFilterId.get(fid) ?? []) {
+      totalEvents += 1;
+      if (ev.thread) {
+        withThread += 1;
+        distinctThreads.add(ev.thread);
+      }
+    }
+  }
+  const threadStats: ThreadStats = {
+    totalEvents,
+    withThread,
+    distinctThreads: distinctThreads.size,
+  };
+
   return {
     groupId: '',
     chains: allChains,
@@ -553,6 +580,7 @@ export function matchGroup(
     edgeStats: Array.from(totalStats.values()),
     notViolations: violations,
     heartbeats,
+    threadStats,
   };
 }
 

@@ -212,6 +212,33 @@ pub struct SeqResult {
     /// （未截断时为空，前端从 chains 自行推导）
     #[serde(rename = "coveredMarks")]
     pub covered_marks: BTreeMap<String, Vec<(u32, u32)>>,
+    /// thread 解析质量统计（**无论 scope 是否为 thread 都产出**）
+    #[serde(rename = "threadStats")]
+    pub thread_stats: ThreadStats,
+}
+
+/// `thread` 字段的解析质量统计——纯可观测性，不改变任何匹配语义。
+///
+/// thread 是**位置启发式**产物（`parse_rest` 只认紧跟时间戳的 `[...]`），
+/// 绝大多数日志格式解析不出来（level 在前的 Spring Boot/Logback 两种主流
+/// Java 格式即落空）。分桶一旦全落到 `∅`，`scope:thread` 就静默退化成
+/// 全局——行为上还算保守，但用户会误以为在按线程隔离。这里把质量数据回传，
+/// 让调用方（UI / CLI）能自己判断：
+///
+/// - `with_thread == 0` ⇒ 所有事件落 `∅` 单桶 ⇒ `scope:thread` ≡ 全局；
+/// - `distinct_threads` 接近 `with_thread` ⇒ 几乎每个事件一桶 ⇒ 疑似把
+///   traceId/requestId 之类非线程字段当成了 thread（链被拆碎 → 全部漏报）。
+///
+/// 只回传原始计数，覆盖率由消费端算，避免浮点在跨端比较时出分歧。
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadStats {
+    /// 参与本组匹配的事件总数（与分桶用的是同一批事件，保证提示与行为一致）
+    pub total_events: usize,
+    /// 其中解析出非空 thread 的事件数
+    pub with_thread: usize,
+    /// distinct thread 数（`∅` 桶不计入）
+    pub distinct_threads: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -874,6 +901,24 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
 
     let total_chains = chains.len();
     let total_uncovered = uncovered.len();
+
+    // thread 解析质量：与分桶/未覆盖统计用的是同一批事件，提示才不会和
+    // 实际行为脱节。空串按「没有 thread」计（parse_rest 不会产出空串，防御性处理）。
+    let mut total_events = 0usize;
+    let mut with_thread = 0usize;
+    let mut distinct: HashSet<&str> = HashSet::new();
+    for fid in &lane_ids {
+        for ev in get_orig(fid) {
+            total_events += 1;
+            if let Some(t) = ev.thread.as_deref() {
+                if !t.is_empty() {
+                    with_thread += 1;
+                    distinct.insert(t);
+                }
+            }
+        }
+    }
+
     Ok(SeqResult {
         group_id: spec.group_id.clone(),
         chains,
@@ -884,6 +929,11 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
         total_chains,
         total_uncovered,
         covered_marks: BTreeMap::new(),
+        thread_stats: ThreadStats {
+            total_events,
+            with_thread,
+            distinct_threads: distinct.len(),
+        },
     })
 }
 
@@ -1350,6 +1400,101 @@ mod tests {
         assert_eq!(res.chains[0].thread.as_deref(), Some("t1"));
         assert_eq!(res.chains[0].steps[0].event.id, 1);
         assert_eq!(res.chains[0].steps[1].event.id, 3);
+    }
+
+    /// thread 是位置启发式产物（见 `ThreadStats` 文档）：统计不论 scope 都产出，
+    /// 让调用方判断 scope=thread 是否真的在按线程隔离。
+    #[test]
+    fn thread_stats_reported_even_in_global_scope() {
+        // A 有 3 条（t1 两条 + t2 一条），B 有 1 条（无 thread）
+        let s = store_full(&[
+            (
+                "A",
+                &[
+                    ev(1, 100, Some("t1"), None, ""),
+                    ev(2, 200, Some("t1"), None, ""),
+                    ev(3, 300, Some("t2"), None, ""),
+                ],
+            ),
+            ("B", &[ev(4, 400, None, None, "")]),
+        ]);
+        let spec = GroupSpec {
+            group_id: "g".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let st = match_group(&spec, &s).unwrap().thread_stats;
+        assert_eq!(st.total_events, 4);
+        assert_eq!(st.with_thread, 3);
+        assert_eq!(st.distinct_threads, 2, "t1 出现两次只算一个");
+    }
+
+    /// 解析不出 thread ⇒ 全落 `∅` 单桶 ⇒ scope=thread 静默退化成全局。
+    /// 这里锁住「退化时的行为 + 统计指纹」，UI/CLI 据此提示用户。
+    #[test]
+    fn thread_stats_zero_coverage_means_thread_scope_equals_global() {
+        let s = store_full(&[("A", &[ev(1, 100, None, None, "")]), ("B", &[ev(2, 150, None, None, "")])]);
+        let spec = GroupSpec {
+            group_id: "g".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "thread".into(),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        // 行为：只有一个 ∅ 桶，跨「线程」照样成链（= 全局语义）
+        assert_eq!(r.chains.len(), 1);
+        assert_eq!(r.chains[0].thread, None);
+        // 指纹：覆盖率为 0，调用方据此提示「按线程作用域等同全局」
+        assert_eq!(r.thread_stats.total_events, 2);
+        assert_eq!(r.thread_stats.with_thread, 0);
+        assert_eq!(r.thread_stats.distinct_threads, 0);
+    }
+
+    /// 误把 traceId/requestId 之类当 thread 的指纹：distinct ≈ with_thread，
+    /// 流被拆成 N 个桶 ⇒ 链必须在桶内成立 ⇒ 全部漏报。
+    #[test]
+    fn thread_stats_distinct_near_total_signals_misgrabbed_thread() {
+        // A/B/C 各带不同的「thread」，实为每条请求一个 id
+        let s = store_full(&[
+            ("A", &[ev(1, 100, Some("req-1"), None, "")]),
+            ("B", &[ev(2, 150, Some("req-2"), None, "")]),
+            ("C", &[ev(3, 200, Some("req-3"), None, "")]),
+        ]);
+        let spec = GroupSpec {
+            group_id: "g".into(),
+            filter_ids: vec!["A".into(), "B".into(), "C".into()],
+            label: None,
+            scope: "thread".into(),
+            edges: vec![
+                seq_edge(),
+                EdgeSpec {
+                    id: "e2".into(),
+                    from_filter_id: "B".into(),
+                    to_filter_id: Some("C".into()),
+                    ..seq_edge()
+                },
+            ],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        // 每事件一桶 ⇒ 没有任何桶能凑齐 A→B→C ⇒ 零链（这就是误抓的代价）
+        assert_eq!(r.chains.len(), 0);
+        assert_eq!(r.thread_stats.with_thread, 3);
+        assert_eq!(
+            r.thread_stats.distinct_threads, 3,
+            "distinct == with_thread 即为疑似误抓指纹"
+        );
     }
 
     #[test]

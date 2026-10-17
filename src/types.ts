@@ -171,6 +171,31 @@ export interface SequenceMatchResult {
   totalUncovered?: number;
   /** fid → [事件id, 链号]：截断时链列表不全，全量 lane 标记由此回传（未截断时缺省） */
   coveredMarks?: Record<string, [number, number][]>;
+  /** thread 解析质量统计（无论 scope 是否 thread 都产出，缺省=旧数据/未统计） */
+  threadStats?: ThreadStats;
+}
+
+/**
+ * `thread` 字段的解析质量统计——纯可观测性，不改变任何匹配语义。
+ *
+ * thread 是**位置启发式**产物（解析器只认紧跟时间戳的 `[...]`），绝大多数
+ * 日志格式解析不出来：level 在前的 Spring Boot / Logback 两种主流 Java 格式
+ * 即落空，行首 `[INFO]` 还会被误当成线程名。解析不出时所有事件落 `∅` 单桶，
+ * `scope: 'thread'` 就**静默退化成全局**——行为保守，但用户会误以为在按线程
+ * 隔离，从而相信那些跨线程串出来的伪链。
+ *
+ * 两个可直接判读的指纹：
+ * - `withThread === 0` ⇒ 按线程作用域等同全局；
+ * - `distinctThreads` 接近 `withThread` ⇒ 几乎每个事件一个桶 ⇒ 疑似把
+ *   traceId / requestId 之类非线程字段当成了 thread（链被拆碎 → 全部漏报）。
+ */
+export interface ThreadStats {
+  /** 参与本组匹配的事件总数（与分桶、未覆盖统计用的是同一批事件） */
+  totalEvents: number;
+  /** 其中解析出非空 thread 的事件数 */
+  withThread: number;
+  /** distinct thread 数（`∅` 桶不计入） */
+  distinctThreads: number;
 }
 
 // ===== 节点画布（draw.io 风格区域式画布）=====

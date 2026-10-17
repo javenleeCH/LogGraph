@@ -371,6 +371,8 @@ pub struct EdgeStat    { pub edge_id: String, pub matched_count: u32, pub miss_c
                          pub late_count: Option<u32>, pub jitter_count: Option<u32> }
 pub struct NotViolation{ pub edge_id: String, pub from_event: SeqEvent, pub to_event: SeqEvent }
 pub struct Heartbeat   { /* periodic 心跳断言（engine ≥ 0.2.1 起填充 segments/gaps/jitters） */ }
+pub struct ThreadStats { pub total_events: usize, pub with_thread: usize,
+                         pub distinct_threads: usize }   // camelCase: totalEvents / withThread / distinctThreads
 pub struct SeqResult {
     pub group_id: String,
     pub chains: Vec<MatchedChain>,
@@ -378,6 +380,10 @@ pub struct SeqResult {
     pub edge_stats: Vec<EdgeStat>,
     pub not_violations: Vec<NotViolation>,
     pub heartbeats: Vec<Heartbeat>,
+    pub total_chains: usize,
+    pub total_uncovered: usize,
+    pub covered_marks: BTreeMap<String, Vec<(u32, u32)>>,
+    pub thread_stats: ThreadStats,   // 不论 scope 是否 thread 都产出，见 §3.10
 }
 pub struct RunSeqResponse { pub fallback: bool, pub results: BTreeMap<String, SeqResult> }
 // BTreeMap：--json 输出按 groupId 字典序，agent 可依赖键序
@@ -855,6 +861,43 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 | 表达式条件 | `nodeConditions` | 同上，engine ≥ 0.2.1 起生效 |
 | 颜色 / 折叠 / 视图 | —（不进 `.cep`） | 存 UI 工程文件（如 `.lgui.json`，v1 不定） |
 
+### 3.13 `threadStats`（thread 解析质量，✅ engine ≥ 0.2.1）
+
+**背景**：`thread` 不是日志里的独立字段，而是**位置启发式**的解析产物
+（`parse_rest` 只认紧跟时间戳的 `[...]`）。实测 9 种常见格式只有 1 种能解析出
+thread（log4j2 那种线程写在最前的写法）；level 写在 thread 之前的 Spring Boot /
+Logback 两种主流写法、以及 nginx / syslog / Python logging 全部解析不出。
+
+解析不出时所有事件落进同一个空桶 `∅`，`scope: "thread"` 就**静默退化成 global**
+——行为保守（等价于没开分桶），但调用方会误以为在按线程隔离，从而相信那些跨线程
+串出来的伪链。故引擎**不论 scope 是否为 thread** 都回传以下统计（纯可观测性，
+不改变任何匹配语义）：
+
+```json
+"threadStats": { "totalEvents": 1200, "withThread": 0, "distinctThreads": 0 }
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `totalEvents` | 参与本组匹配的事件总数（与分桶、`uncoveredEvents` 用的是同一批事件） |
+| `withThread` | 其中解析出非空 thread 的事件数 |
+| `distinctThreads` | distinct thread 数（`∅` 桶不计入） |
+
+调用方据此可判读两种指纹（覆盖率由消费端算，引擎不回传浮点，避免跨端比较分歧）：
+
+| 指纹 | 含义 | 后果 |
+| --- | --- | --- |
+| `withThread === 0` | 全部落 `∅` 单桶 | `scope:"thread"` ≡ 全局，链会跨线程串出伪链 |
+| `distinctThreads / withThread ≈ 1` | 几乎每个事件一个桶 | 疑似把 traceId/requestId 当成 thread；链必须在桶内成立 ⇒ **全部漏报（零链）** |
+
+**误抓远比漏解析危险**：漏解析只是退化成全局（结果保守可用），误抓会把流拆碎导致
+链永远凑不齐。因此**禁止**用"取消行首锚定、到处找方括号"来提高覆盖率——那只是把
+假阴性换成更坏的假阳性。若要改进解析，须同步修改引擎 `parser/line.rs::parse_rest`
+与前端 `parser/LogParser.ts::parseRest`（逐行对齐的两份同款实现）。
+
+前端展示位：CEP 面板每个分组块的头部（`scope === 'thread'` 时才显示，全局作用域下
+分桶不生效、提示纯属噪音），实现见 `src/sequence/threadHint.ts`。
+
 ***
 
 ## 4. CLI 命令面（`loggraph`，D7）
@@ -1008,7 +1051,8 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
         "heartbeats": [],
         "totalChains": 1,
         "totalUncovered": 0,
-        "coveredMarks": {}
+        "coveredMarks": {},
+        "threadStats": { "totalEvents": 3, "withThread": 3, "distinctThreads": 3 }
       }
     }
   },
@@ -1029,6 +1073,7 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
 * `totalChains`/`totalUncovered`：全量真值。未设 `maxChains` 时分别等于
   `chains.length`/`uncoveredEvents.length`；截断后链表被裁但统计保真。
 * `coveredMarks`：仅设 `maxChains` 截断时非空——`filterId → [[事件id, 链号], …]`
+* `threadStats`：thread 解析质量，**不论 scope 是否 thread 都产出**（§3.13）。
   全量 lane 标记（含被截掉的链），供 UI 时间线标链用；未截断为 `{}`，
   调用方自行从 `chains` 推导。
 * `fallback: true` 时被跳过的 group **不在 `results` 里**（不是空结果占位），
@@ -1129,6 +1174,10 @@ v1 无流式进度 / 取消命令（引擎单次调用同步完成；大目录�
 * 判读：`jq '.response.results.<groupId>.chains | length'`；
   违规 `.response.results.<groupId>.notViolations`；
   未覆盖事件 `.response.results.<groupId>.uncoveredEvents`。
+* **用 `scope:"thread"` 的规则必读** `.response.results.<groupId>.threadStats`
+  （§3.13）：`withThread === 0` 表示**分桶根本没生效、结果等同全局**，此时
+  结论不可按线程解读（会串出跨线程伪链）；`distinctThreads ≈ withThread`
+  表示疑似把 traceId/requestId 当成了 thread，零链是拆分所致而非真的没发生。
 * 错误处理：stderr 首行 `错误: …`，随后每问题一行 `  [S04] $.path: message`；
   agent 按 §3.10 code 分支，`path` 直接可定位 JSON 节点。
 * 前向兼容：新增字段会 bump `version`；agent 遇 `E_RULES_VERSION`
@@ -1141,6 +1190,7 @@ v1 无流式进度 / 取消命令（引擎单次调用同步完成；大目录�
 | 项 | 状态 | 备注 |
 | --- | --- | --- |
 | 线程域序列（`scope:"thread"`） | ✅ 支持（engine ≥ 0.2.1，按 thread 分桶隔离匹配） |
+| thread 字段的格式自适应解析 | ❌ | 位置启发式：只认紧跟时间戳的 `[...]`。多数格式解析不出 ⇒ 分桶退化为全局，**质量回传 `threadStats`（§3.13）而非自动适配** |
 | `opt` 边 | ✅ 支持（engine ≥ 0.2.0，复用 seq 推进，缺失即跳过） |
 | `periodic` 边 /heartbeats | ✅ 支持（engine ≥ 0.2.1，缺口/抖动入 `heartbeats`） |
 | nodeCounts / nodeConditions | ✅ 支持（engine ≥ 0.2.1，节点循环计数 / 条件表达式） |

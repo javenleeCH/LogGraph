@@ -146,6 +146,28 @@
   font-size: 11px;
 }
 
+/* thread 解析质量提示（仅按线程作用域时显示）。告警态用 --warn（UI 警告，
+   与 ToastHost 同源），刻意不用 --anomaly：那是「引擎判定的数据异常」，
+   而这里说的是解析质量，两者混色会让用户以为日志本身出了问题。 */
+.threadStat {
+  flex: 0 0 auto;
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--cep-border);
+  border-radius: 4px;
+  background: var(--cep-bg);
+  color: var(--cep-faint);
+  font-size: 10px;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: help;
+}
+.threadStatWarn {
+  border-color: var(--warn, #e69f00);
+  color: var(--warn, #e69f00);
+  background: color-mix(in srgb, var(--warn, #e69f00) 12%, transparent);
+}
+
 .blockEmpty {
   padding: 8px 12px;
   color: var(--cep-faint);

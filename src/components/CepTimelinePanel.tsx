@@ -5,6 +5,7 @@ import type { Filter, FilterGroup, LogEvent, SequenceMatchResult } from '../type
 import styles from './CepTimelinePanel.module.css';
 import { ChevronLeft, ChevronRight, AlertTriangle } from './Icon';
 import { fmtCompact, fmtCount } from '../utils/counts';
+import { threadHint, type ThreadHint } from '../sequence/threadHint';
 
 interface CepNode {
   eventId: number;
@@ -45,6 +46,8 @@ interface CepBlock {
   overLimit: boolean;
   /** 行按 startTs 升序（全量，≤ 三类输入上限之和；渲染时按 limit 渐进切片） */
   rows: CepRow[];
+  /** 仅按线程作用域时给出：thread 解析质量提示（无提示=null） */
+  threadHint: ThreadHint | null;
 }
 
 /** 渲染批次：首屏渲染 200 行，滚动到底部（哨兵进入视口）自动续一批。
@@ -146,6 +149,7 @@ function buildBlocks(
       anomalyEnabled,
       overLimit,
       rows: inRange,
+      threadHint: g.sequence?.scope === 'thread' ? threadHint(r) : null,
     });
   }
   return out;
@@ -281,6 +285,14 @@ export function CepTimelinePanel() {
                 {fmtCompact(b.chainCount)} 链
                 {b.anomalyCount > 0 ? ` · ${fmtCompact(b.anomalyCount)} 异常` : ''}
               </span>
+              {b.threadHint && (
+                <span
+                  className={`${styles.threadStat} ${b.threadHint.warn ? styles.threadStatWarn : ''}`}
+                  title={b.threadHint.title}
+                >
+                  {b.threadHint.text}
+                </span>
+              )}
               <button
                 className={`${styles.anomalyToggle} ${b.anomalyEnabled ? styles.anomalyToggleActive : ''}`}
                 title={
