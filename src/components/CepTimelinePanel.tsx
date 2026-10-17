@@ -7,6 +7,12 @@ import { ChevronLeft, ChevronRight, AlertTriangle } from './Icon';
 import { fmtCompact, fmtCount } from '../utils/counts';
 import { threadHint, type ThreadHint } from '../sequence/threadHint';
 import { explainNoMatch, type Diagnosis } from '../sequence/explain';
+import {
+  aggregateAnomalyWindows,
+  windowAt,
+  LEVEL_LABEL,
+  type AnomalySummary,
+} from '../sequence/anomalyWindows';
 
 interface CepNode {
   eventId: number;
@@ -32,6 +38,9 @@ interface CepRow {
   chainIndex: number;
   /** 右侧节点图标：有多少节点就有多少个 */
   nodes: CepNode[];
+  /** 异常行专属：所属异常窗口的标注（如「连发 60 条 · 密集爆发」），
+   *  让用户看出这几条是一伙的；非异常行为空 */
+  note?: string;
 }
 
 /** 一个 CEP 规则分组的块 */
@@ -52,6 +61,29 @@ interface CepBlock {
   /** 仅零链时给出：「为何没匹配」诊断（无诊断=null）。基于各 filter 的实际
    *  命中反推，不参与匹配语义，故永远不会改变结果 */
   diagnoses: Diagnosis[] | null;
+  /** 异常按时间聚合后的窗口（未开异常高亮时=null）。逐个事件报异常在大目录
+   *  下是纯噪声，聚成段后段数本身就是信号 */
+  anomalySummary: AnomalySummary | null;
+  /** 异常事件真值（引擎/TS 回传的 totalUncovered；明细受上限截断） */
+  anomalyTrueTotal: number;
+}
+
+/**
+ * 块头统计的悬浮说明。异常部分刻意报**两件事**：段数（人能理解的规模）与
+ * 原始条数（真值，明细可能受上限截断）——只报其中一个都会误导。
+ */
+function blockStatTitle(b: CepBlock): string {
+  const lines = [`${fmtCount(b.chainCount)} 条链`];
+  if (b.anomalySummary && b.anomalySummary.windows.length > 0) {
+    lines.push(
+      `${fmtCount(b.anomalySummary.windows.length)} 段异常窗口（原始 ${fmtCount(b.anomalyTrueTotal)} 条）`,
+    );
+    const { high, med } = b.anomalySummary.counts;
+    if (high > 0) lines.push(`其中 ${fmtCount(high)} 段密集爆发`);
+    else if (med > 0) lines.push(`其中 ${fmtCount(med)} 段成簇`);
+  }
+  if (b.overLimit) lines.push('（明细按上限回传，此处为完整统计）');
+  return lines.join('\n');
 }
 
 /** 渲染批次：首屏渲染 200 行，滚动到底部（哨兵进入视口）自动续一批。
@@ -98,9 +130,17 @@ function buildBlocks(
     if (!r) continue;
     // 每类行取数据上限（引擎路径已截断；TS 回退无上限，防全量物化行对象）
     const anomalyEnabled = !!g.sequence?.anomalyEnabled;
+    // 先聚合异常窗口（必须在逐条标注之前）：聚合只对**未筛选**的事件做，
+    // 筛选后的子集会人为造出不存在的段落边界。
+    const anomalySummary = anomalyEnabled ? aggregateAnomalyWindows(r.uncoveredEvents) : null;
+    const anomalyTrueTotal = anomalyEnabled
+      ? (r.totalUncovered ?? r.uncoveredEvents.length)
+      : 0;
     const rows: CepRow[] = r.chains.slice(0, CEP_MAX_CHAINS).map((ch) => chainRow(g, ch, filters));
     if (anomalyEnabled) {
+      const wins = anomalySummary?.windows ?? [];
       for (const ev of r.uncoveredEvents.slice(0, CEP_MAX_CHAINS)) {
+        const w = windowAt(wins, ev.ts);
         rows.push({
           count: 0,
           startTs: ev.ts,
@@ -108,6 +148,7 @@ function buildBlocks(
           kind: 'anomaly',
           chainIndex: 0,
           nodes: [{ eventId: ev.id, color: 'var(--anomaly, #cf222e)', stepNo: 1, anomaly: true }],
+          note: w ? `连发 ${fmtCount(w.count)} 条 · ${LEVEL_LABEL[w.level]}` : undefined,
         });
       }
     }
@@ -142,7 +183,7 @@ function buildBlocks(
     let anomalyCount = 0;
     if (anomalyEnabled) {
       const filtered = inRange.filter((row) => row.kind === 'anomaly').length;
-      anomalyCount = cepRange ? filtered : (r.totalUncovered ?? filtered);
+      anomalyCount = cepRange ? filtered : anomalyTrueTotal;
     }
     const overLimit = (r.totalChains ?? r.chains.length) > CEP_MAX_CHAINS;
     // 诊断只按**总链数**判定，不受面板内时间窗筛选影响——否则筛选掉几行就
@@ -159,6 +200,8 @@ function buildBlocks(
       rows: inRange,
       threadHint: g.sequence?.scope === 'thread' ? threadHint(r) : null,
       diagnoses: totalChains === 0 && g.sequence ? explainNoMatch(g.sequence, matches, true) : null,
+      anomalySummary,
+      anomalyTrueTotal,
     });
   }
   return out;
@@ -167,7 +210,8 @@ function buildBlocks(
 function rowTitle(row: CepRow): string {
   if (row.kind === 'chain') return `链 ${row.chainIndex} · ${row.nodes.length} 节点`;
   if (row.kind === 'violation') return `NOT 违规 · A 窗口内出现禁止事件`;
-  return `异常 · 未被任何链覆盖`;
+  // 异常行带所属窗口标注——否则密密麻麻的异常列表里看不出哪几条是一伙的
+  return row.note ? `异常 · 未被任何链覆盖（${row.note}）` : `异常 · 未被任何链覆盖`;
 }
 
 /** CEP 规则筛选结果面板：每行一条匹配链/异常（独立时间纵轴，仅在有结果时显示） */
@@ -288,14 +332,12 @@ export function CepTimelinePanel() {
             <div className={styles.blockHeader} style={{ borderLeftColor: b.color }}>
               <span className={styles.blockDot} style={{ background: b.color }} />
               <span className={styles.blockTitle} title={b.label}>{b.label}</span>
-              <span
-                className={styles.blockStat}
-                title={`${fmtCount(b.chainCount)} 条链${
-                  b.anomalyCount > 0 ? ` · ${fmtCount(b.anomalyCount)} 条异常` : ''
-                }${b.overLimit ? '\n（明细按上限回传，此处为完整统计）' : ''}`}
-              >
+              <span className={styles.blockStat} title={blockStatTitle(b)}>
                 {fmtCompact(b.chainCount)} 链
-                {b.anomalyCount > 0 ? ` · ${fmtCompact(b.anomalyCount)} 异常` : ''}
+                {/* 逐条报异常在大目录下是纯噪声，这里报**段**而不是条 */}
+                {b.anomalySummary && b.anomalySummary.windows.length > 0
+                  ? ` · ${fmtCompact(b.anomalySummary.windows.length)} 段异常`
+                  : ''}
               </span>
               {b.threadHint && (
                 <span
@@ -309,14 +351,18 @@ export function CepTimelinePanel() {
                 className={`${styles.anomalyToggle} ${b.anomalyEnabled ? styles.anomalyToggleActive : ''}`}
                 title={
                   b.anomalyEnabled
-                    ? `异常高亮已开启：${fmtCount(b.anomalyCount)} 个未覆盖事件标红`
+                    ? `异常高亮已开启：${fmtCount(b.anomalyTrueTotal)} 个未覆盖事件` +
+                      `（聚成 ${fmtCount(b.anomalySummary?.windows.length ?? 0)} 段）标红`
                     : '异常高亮已关闭：点击开启'
                 }
                 onClick={() => toggleSequenceAnomaly(b.groupId)}
               >
                 <AlertTriangle size={13} />
-                {b.anomalyEnabled && b.anomalyCount > 0 && (
-                  <span className={styles.anomalyBadge}>{fmtCompact(b.anomalyCount)}</span>
+                {/* 徽标也报段数：33 万条挤不进徽标，段数才是有用的信号 */}
+                {b.anomalyEnabled && b.anomalySummary && b.anomalySummary.windows.length > 0 && (
+                  <span className={styles.anomalyBadge}>
+                    {fmtCompact(b.anomalySummary.windows.length)}
+                  </span>
                 )}
               </button>
               {b.diagnoses && b.diagnoses.length > 0 && (
