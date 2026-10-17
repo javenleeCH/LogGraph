@@ -1,0 +1,61 @@
+name: Release
+
+# 目的：发第一个对外 release——把桌面端 NSIS 安装包自动打到 GitHub Release。
+# 触发：打 `v*` tag（如 v0.2.0）或手动 workflow_dispatch。
+# 说明：
+#   - 当前仅出 Windows NSIS（tauri.conf.json bundle.targets=["nsis"]）。
+#   - 未配置代码签名 / updater：产物是未签名安装包，用户首次安装可能需放行 SmartScreen。
+#     签名（Windows 代码签名证书 / 上游 updater 公钥）是后续独立一轮，需 secrets。
+#   - tauri-action 直接跑 `tauri build`（带打包），不绕开 package.json 的 --no-bundle 本地脚本。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布桌面安装包
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      # 发布前先过测试关，避免把红状态的构建发出去
+      - name: 引擎 / CLI 单测
+        run: cargo test -p loggraph-engine -p loggraph-cli
+
+      - name: 前端类型检查 + 单测
+        run: npx tsc -b && npm test
+
+      - name: 构建并发布（tauri-action）
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'logGraph ${{ github.ref_name }}'
+          releaseBody: '自动构建的桌面安装包。详见 commit 历史与 CHANGELOG。'
+          releaseDraft: true
+          prerelease: false
+          args: ''
