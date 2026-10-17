@@ -36,3 +36,5 @@ perf-data/
 
 # Cargo workspace 锁文件不入库（版本以各 Cargo.toml 钉死；filter-wasm/ 例外，regex="1" 宽松要求靠 lock 锁定）
 /Cargo.lock
+
+_t/

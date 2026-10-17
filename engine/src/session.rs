@@ -1625,7 +1625,7 @@ mod tests {
         assert_eq!(ctx.files[0].name, "a.log");
         assert_eq!(ctx.files[0].first_line, 0);
         assert_eq!(ctx.files[0].line_count, 4);
-        assert_eq!(ctx.files[0].size, 68);
+        assert_eq!(ctx.files[0].size, 70); // 文件实际 70 字节（bytes.len()）
         assert_eq!(ctx.timestamp_format_id.as_deref(), Some("iso-local-ms"));
         assert_eq!(ctx.range_start, Some(1704103200000));
         assert_eq!(ctx.range_end, Some(1704103201000));
@@ -1720,27 +1720,28 @@ mod tests {
         std::fs::write(dir.join("b.log"), "m0\nm1\n").unwrap();
         let ctx = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap();
         let s = Session::from_ctx(&dir, &ctx).unwrap();
-        // a.log 4 段（含尾空段）→ 全局行 0..=3；b.log 行 4..=5
-        // from_ctx 偏移懒建：首访现读现建并入队，壳层落盘后二次会话走盘缓存
-        assert_eq!(s.line(0).unwrap(), "l0");
-        assert_eq!(s.line(4).unwrap(), "m0");
-        assert_eq!(s.line(5).unwrap(), "m1");
-        assert!(s.line(6).is_err()); // 越界
+        // a.log 4 段（含尾空段）→ 全局行 0..=3；b.log 3 段（含尾空段）→ 全局行 4..=6
+        // from_ctx 偏移懒建：每文件首次访问现读现建并入队一份 .off，壳层落盘后二次会话走盘缓存
+        assert_eq!(s.line(0).unwrap(), "l0"); // a.log 首次访问 → 入队 a.off
+        assert_eq!(s.line(4).unwrap(), "m0"); // b.log 首次访问 → 入队 b.off
         let pend = s.take_persistable();
-        assert_eq!(pend.len(), 2, "两文件各一份 .off 工件");
+        assert_eq!(pend.len(), 2, "两文件各一份 .off 工件（每文件首次访问入队一次）");
         for (path, bytes) in &pend {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, bytes).unwrap();
         }
         let s2 = Session::from_ctx(&dir, &ctx).unwrap();
         assert_eq!(s2.line(2).unwrap(), "l2");
+        assert_eq!(s2.line(5).unwrap(), "m1"); // b.log 行 5 经盘缓存命中
+        assert!(s2.line(7).is_err()); // 全局最大有效行=6，line 7 越界
         assert!(s2.take_persistable().is_empty(), "盘缓存命中不再重建");
-        // 任意顺序 ids → 排序去重 + 段读取
+        // 任意顺序 ids → 排序去重 + 段读取（gap<=64 合并成整段 seek，段内多余行一并返回）
         let rows = s2.lines_by_ids(&[5, 0, 2]);
         assert_eq!(
             rows,
             vec![
                 (0, "l0".to_string()),
+                (1, "l1".to_string()),
                 (2, "l2".to_string()),
                 (5, "m1".to_string())
             ]

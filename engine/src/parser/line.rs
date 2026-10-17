@@ -12,10 +12,11 @@ pub fn js_trim(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
 
-/// 对齐 LogParser.LEVELS（裸写比较大小写敏感；括号形式比较 upper 后的值）
+/// 对齐 LogParser.LEVELS（裸写比较大小写敏感；括号形式比较 upper 后的值）。
+/// 含 TS 端的单字母级别 I/D/W/E/F 与 VERBOSE/EMERGENCY；ERR/PANIC 为 Rust 端额外同义词。
 const LEVELS: &[&str] = &[
-    "TRACE", "DEBUG", "INFO", "NOTICE", "WARN", "WARNING", "ERROR", "ERR", "FATAL", "CRITICAL",
-    "CRIT", "ALERT", "EMERG", "PANIC",
+    "VERBOSE", "TRACE", "DEBUG", "INFO", "NOTICE", "WARN", "WARNING", "ERROR", "ERR", "FATAL",
+    "CRIT", "CRITICAL", "EMERG", "EMERGENCY", "ALERT", "PANIC", "I", "D", "W", "E", "F",
 ];
 
 // JS: /^\[([^\]]+)\]\s*/ —— 锚定行首的 [Thread] 段

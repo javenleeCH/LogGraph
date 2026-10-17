@@ -21,7 +21,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
+          # 不指定 cache：package-lock.json 按 .gitignore 不入库，
+          # setup-node 的 cache: 'npm' 会因找不到 lock 文件而直接失败
 
       - name: 安装依赖
         # 不依赖 package-lock.json（该锁文件按 .gitignore 不入库），故用 npm install
