@@ -39,7 +39,8 @@ jobs:
           workspaces: '. -> target'
 
       - name: 安装前端依赖
-        run: npm ci
+        # 不依赖 package-lock.json（该锁文件按 .gitignore 不入库），故用 npm install
+        run: npm install
 
       # 发布前先过测试关，避免把红状态的构建发出去
       - name: 引擎 / CLI 单测

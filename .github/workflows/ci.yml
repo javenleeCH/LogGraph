@@ -24,7 +24,8 @@ jobs:
           cache: 'npm'
 
       - name: 安装依赖
-        run: npm ci
+        # 不依赖 package-lock.json（该锁文件按 .gitignore 不入库），故用 npm install
+        run: npm install
 
       - name: 类型检查
         run: npx tsc -b
