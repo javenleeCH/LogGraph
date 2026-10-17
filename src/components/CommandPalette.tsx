@@ -36,6 +36,7 @@ import {
   exportRulesFile,
   importRulesFile,
 } from '../io/exportActions';
+import { RULE_TEMPLATES, createGroupFromTemplate } from '../sequence/templates';
 import { OPEN_TS_FORMAT_EVENT } from './TimestampFormatEditor';
 import styles from './CommandPalette.module.css';
 
@@ -325,6 +326,22 @@ function buildCommands(ctx: { closeAll: () => void }): Command[] {
       ctx.closeAll();
       void importRulesFile();
     },
+  });
+
+  /* —— 规则模板（P1⑥：引导式创建，削平 CEP 门槛） —— */
+  RULE_TEMPLATES.forEach((tpl) => {
+    commands.push({
+      id: `template.${tpl.id}`,
+      group: '规则模板',
+      label: `从模板创建：${tpl.name}`,
+      hint: tpl.description,
+      keywords: `template ${tpl.name} 模板 规则 创建 cep`,
+      icon: <Plus size={14} />,
+      run: () => {
+        ctx.closeAll();
+        createGroupFromTemplate(tpl);
+      },
+    });
   });
 
   /* —— 视图 —— */
