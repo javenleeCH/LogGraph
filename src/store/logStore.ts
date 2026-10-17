@@ -7,7 +7,7 @@ import { create } from 'zustand';
 import { toast } from './uiStore';
 import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, SavedRange, SequenceConfig, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
 import type { FullParseResult } from '../parser/parseBridge';
-import { FilterEngine } from '../filters/FilterEngine';
+import { FilterEngine, splitSubConditions } from '../filters/FilterEngine';
 import { runSequenceMatching } from '../sequence/SequenceMatcher';
 import {
   openWorkspaceDir,
@@ -843,13 +843,17 @@ export const useLogStore = create<LogState>((set, get) => ({
     // dbMode：优先下推 Rust（PR-4 CEP 加速路径），不支持的特性整体回退 TS 引擎
     if (dbMode) {
       void (async () => {
-        // 多行 filter 的命中聚合只存在于前端（Rust 缓存仅有 fid\0i 子条件条目），
-        // 含多行 filter 的 group 整组用 TS 引擎跑，其余组下推
+        // engine ≥ 0.2.2 起引擎自带跨行聚合（拆分下推 fid\0i + 引擎内取交集），
+        // 含跨行 filter 的 group 也能下推；仅「全排除」仍需回退——它需要全量
+        // 行基集，目录模式拿不到（与 dbStore 的全排除提示同源）。
         const seqGroups = groups.filter((g) => g.sequence && g.sequence.edges.length > 0);
         const tsGroups = seqGroups.filter((g) =>
-          g.filterIds.some((fid) =>
-            (filters.find((f) => f.id === fid)?.pattern ?? '').includes('\n'),
-          ),
+          g.filterIds.some((fid) => {
+            const p = filters.find((f) => f.id === fid)?.pattern ?? '';
+            if (!p.includes('\n')) return false;
+            const subs = splitSubConditions(p);
+            return subs.length > 0 && subs.every((s) => s.negate);
+          }),
         );
         const rustGroups = seqGroups.filter((g) => !tsGroups.includes(g));
         let results: Record<string, SequenceMatchResult> = {};

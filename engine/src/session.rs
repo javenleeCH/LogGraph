@@ -34,7 +34,7 @@ use std::time::Instant;
 // ---- DTO ----
 
 /// 命中条目（line + ts）：过滤扫描内联解析写入命中缓存（ts = NO_TS 表示该行无 ts）
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HitEntry {
     pub line: u32,
@@ -51,6 +51,37 @@ pub struct FilterQuery {
     pub case_sensitive: bool,
     /// raw=整行；message=时间戳后正文
     pub scope: String,
+}
+
+/// 多行 filter 子条件的下推 id 分隔符（`fid\0i`）——与前端
+/// `src/io/dbStore.ts::SUB_ID_SEP` 必须**逐字节一致**：引擎命中缓存按子条件
+/// 独立存，两端同分隔符才能共享同一份缓存条目，不重复扫描；改任一侧都会
+/// 导致命中错位（表现为「多行 filter 在引擎里零命中」）。
+const SUB_ID_SEP: char = '\u{0}';
+
+/// 多行 filter 的单行子条件：negate=该行以 `!` 开头（排除语义）
+struct SubCond {
+    source: String,
+    negate: bool,
+}
+
+/// 展开计划里的单个子条件下推条目
+struct SubPlan {
+    id: String,
+    negate: bool,
+}
+
+/// 一个多行 filter 的展开计划：原始 id + 定义指纹 + 子条件清单。
+/// 持有原始指纹是为了聚合完成后按原始 id 落缓存，使下次整条命中。
+struct MultiPlan {
+    filter_id: String,
+    fp: String,
+    subs: Vec<SubPlan>,
+}
+
+/// 行号升序命中数组的二分包含判断（命中扫描按行号升序写入）
+fn hits_contains_line(hits: &[HitEntry], line: u32) -> bool {
+    hits.binary_search_by_key(&line, |h| h.line).is_ok()
 }
 
 /// ctx 文件表条目：行号 → 文件定位的最小描述（客户端不透明持有、原样回传）
@@ -305,17 +336,112 @@ impl Session {
             .collect()
     }
 
+    // ---- 多行 filter 子条件（与前端 dbStore.ts / FilterEngine.ts 逐字对齐）----
+
+    /// pattern → 子条件列表（端口自 `src/filters/FilterEngine.ts::splitSubConditions`）。
+    /// 语义必须逐字一致——剥 `!` 前缀、去首尾空白、跳过空行、纯 `!` 无内容丢弃。
+    /// 两端一旦分叉，同一个 filter 会在 UI 与引擎算出不同命中，且极难排查。
+    fn split_sub_conditions(pattern: &str) -> Vec<SubCond> {
+        let mut out = Vec::new();
+        for raw in pattern.split('\n') {
+            let line = raw.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match line.strip_prefix('!') {
+                Some(rest) => {
+                    let source = rest.trim();
+                    if !source.is_empty() {
+                        out.push(SubCond { source: source.to_string(), negate: true });
+                    }
+                }
+                None => out.push(SubCond { source: line.to_string(), negate: false }),
+            }
+        }
+        out
+    }
+
+    /// 多行 filter 展开为单行子条件（端口自 `src/io/dbStore.ts::runDbFiltersBatch`
+    /// 的拆分下推）。返回 (下推用的子条件 queries, 聚合计划)。
+    ///
+    /// 单行 pattern 直通（与旧行为逐字节一致）；含 `\n` 的按子条件展开，
+    /// 下推 id 为 `fid\0i`——与前端 `SUB_ID_SEP` 同分隔符，故与前端 ws_filters
+    /// 路径产出的子条件条目**共享同一份命中缓存**，不重复扫描。
+    /// 全排除（无正向锚，需全量行基集）与全空白一律跳过，与前端同为「无命中」。
+    fn expand_multi_queries(queries: &[FilterQuery]) -> (Vec<FilterQuery>, Vec<MultiPlan>) {
+        let mut expanded = Vec::with_capacity(queries.len());
+        let mut plans = Vec::new();
+        for q in queries {
+            if !q.pattern.contains('\n') {
+                expanded.push(q.clone());
+                continue;
+            }
+            let subs = Self::split_sub_conditions(&q.pattern);
+            if subs.is_empty() || subs.iter().all(|s| s.negate) {
+                continue;
+            }
+            let mut plan = MultiPlan {
+                filter_id: q.filter_id.clone(),
+                fp: filter_def_fp(q),
+                subs: Vec::with_capacity(subs.len()),
+            };
+            for (i, s) in subs.iter().enumerate() {
+                let sub_id = format!("{}{}{}", q.filter_id, SUB_ID_SEP, i);
+                expanded.push(FilterQuery {
+                    filter_id: sub_id.clone(),
+                    pattern: s.source.clone(),
+                    is_regex: q.is_regex,
+                    case_sensitive: q.case_sensitive,
+                    scope: q.scope.clone(),
+                });
+                plan.subs.push(SubPlan { id: sub_id, negate: s.negate });
+            }
+            plans.push(plan);
+        }
+        (expanded, plans)
+    }
+
+    /// 子条件命中聚合（端口自 `src/io/dbStore.ts::aggregateSubHits`）：
+    /// 正向 sub 行集交集 − 排除 sub 行集并集。以最短正向 sub 为基（候选最少），
+    /// ts 取基列表的同行值（同一物理行的 ts 由 line_ts 解析，各 sub 一致）。
+    fn aggregate_sub_hits(pos: &[Arc<Vec<HitEntry>>], neg: &[Arc<Vec<HitEntry>>]) -> Vec<HitEntry> {
+        if pos.is_empty() {
+            return Vec::new();
+        }
+        let mut order: Vec<usize> = (0..pos.len()).collect();
+        order.sort_by_key(|&i| pos[i].len());
+        let base = &pos[order[0]];
+        let mut out = Vec::with_capacity(base.len());
+        'next: for e in base.iter() {
+            for &i in order.iter().skip(1) {
+                if !hits_contains_line(&pos[i], e.line) {
+                    continue 'next;
+                }
+            }
+            for n in neg {
+                if hits_contains_line(n, e.line) {
+                    continue 'next;
+                }
+            }
+            out.push(*e);
+        }
+        out
+    }
+
     /// 批量运行过滤器（recomputeMatches / 单 filter 编辑共用）：
     /// 1. 逐个比对定义指纹——命中的直接取内存命中（不扫描）；
     /// 2. miss 查 `.logGraph` 命中盘缓存（键 = ctx_sig + 定义指纹，内容寻址）；
     /// 3. 仍 miss 的单遍批量直扫原文件，结果写入内存命中 + 待落盘队列；
     /// 4. 返回 (filter_id, (line, ts)[] 按 ts 升序，无 ts 命中被丢弃)。
     pub fn filters_batch(&self, queries: &[FilterQuery]) -> EngineResult<FiltersBatchOutcome> {
+        // 含跨行 pattern 的 filter 展开成单行子条件下推——否则引擎侧只有
+        // `fid\0i` 子条目、拿不到整条命中，前端只能把整组 CEP 回退 TS 引擎。
+        let (expanded, plans) = Self::expand_multi_queries(queries);
         let mut out: FilterBatchOut = Vec::new();
         let mut miss: Vec<FilterQuery> = Vec::new();
         {
             let fc = self.filters.lock();
-            for q in queries {
+            for q in &expanded {
                 let hit = fc
                     .fps
                     .get(&q.filter_id)
@@ -329,7 +455,7 @@ impl Session {
                 }
             }
         }
-        let cached = queries.len() - miss.len();
+        let cached = expanded.len() - miss.len();
         let mut miss = miss; // 盘缓存命中出队后的剩余（真正要扫的）
         let mut scan_perf = Vec::new();
         // ---- 盘缓存层：RAM miss → `.logGraph/cache/filters/<hex(key)>.bin` ----
@@ -350,7 +476,8 @@ impl Session {
                 }
             });
         }
-        let disk_cached = cached + (queries.len() - cached - miss.len());
+        // 计数按展开后的子条件计（一个多行 filter 贡献 K 个子条件条目）
+        let disk_cached = cached + (expanded.len() - cached - miss.len());
         if !miss.is_empty() {
             let (mut per_filter, perf) =
                 scan_filters_once(&self.root, &self.files, &miss, self.fmt)?;
@@ -366,10 +493,34 @@ impl Session {
                 out.push((q.filter_id.clone(), hits_with_ts(&hits)));
             }
         }
+        // ---- 聚合：子条件命中 → 整条 filter 命中 ----
+        // 必须在子条件全部落位后（内存/盘/扫描任一路径）执行，故放最后。
+        if !plans.is_empty() {
+            let mut fc = self.filters.lock();
+            for plan in &plans {
+                let mut pos = Vec::new();
+                let mut neg = Vec::new();
+                for s in &plan.subs {
+                    if let Some(h) = fc.hits.get(&s.id).cloned() {
+                        if s.negate {
+                            neg.push(h);
+                        } else {
+                            pos.push(h);
+                        }
+                    }
+                }
+                let agg = Arc::new(Self::aggregate_sub_hits(&pos, &neg));
+                // 按原始 id 落缓存 + 记原始指纹：下次 filters_batch 直接在
+                // 内存层整条命中，不再展开聚合。
+                fc.fps.insert(plan.filter_id.clone(), plan.fp.clone());
+                fc.hits.insert(plan.filter_id.clone(), Arc::clone(&agg));
+                out.push((plan.filter_id.clone(), hits_with_ts(&agg)));
+            }
+        }
         Ok(FiltersBatchOutcome {
             out,
             cached: disk_cached,
-            miss: queries.len() - disk_cached,
+            miss: expanded.len() - disk_cached,
             scan_perf,
         })
     }
@@ -1712,6 +1863,135 @@ mod tests {
         assert_eq!(o4.out[0].1.len(), 2);
         assert!(o4.scan_perf.is_empty(), "盘缓存命中应免重扫");
         assert!(s2.take_persistable().is_empty(), "盘命中不应再排队落盘");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- 多行 filter 跨行聚合（端口自前端，两端语义必须一致）----
+
+    #[test]
+    fn split_sub_conditions_matches_frontend() {
+        use crate::session::SubCond;
+        let flat = |p: &str| -> Vec<(String, bool)> {
+            Session::split_sub_conditions(p)
+                .into_iter()
+                .map(|s: SubCond| (s.source, s.negate))
+                .collect()
+        };
+        // 单行直通（与旧行为一致）
+        assert_eq!(flat("abc"), vec![("abc".to_string(), false)]);
+        // 换行 AND
+        assert_eq!(
+            flat("abc\ndef"),
+            vec![("abc".to_string(), false), ("def".to_string(), false)]
+        );
+        // `!` 前缀 → 排除
+        assert_eq!(
+            flat("abc\n!def"),
+            vec![("abc".to_string(), false), ("def".to_string(), true)]
+        );
+        // 首尾空白 + 空行跳过（含纯换行的空段）
+        assert_eq!(flat("  abc  \n\n  def\n"), vec![
+            ("abc".to_string(), false),
+            ("def".to_string(), false)
+        ]);
+        // `!` 后空白也 trim；纯 `!` 行被丢弃
+        assert_eq!(flat("abc\n!   def"), vec![
+            ("abc".to_string(), false),
+            ("def".to_string(), true)
+        ]);
+        assert_eq!(flat("abc\n!"), vec![("abc".to_string(), false)]);
+        // 全空白 → 空（视同空 pattern，无命中）
+        assert!(flat("\n  \n").is_empty());
+    }
+
+    #[test]
+    fn multi_line_filter_aggregates_in_engine() {
+        let dir = tmp_dir("multi_line");
+        // 行 0: boot   行 1: alpha   行 2: alpha gamma
+        std::fs::write(
+            dir.join("a.log"),
+            "2024-01-01 10:00:00.000 boot\n2024-01-01 10:00:01.000 alpha\n2024-01-01 10:00:02.000 alpha gamma\n",
+        )
+        .unwrap();
+        let ctx = Session::build_ctx(&dir, None, |_, _, _| {}).unwrap();
+        let s = Session::from_ctx(&dir, &ctx).unwrap();
+        let q = |id: &str, pattern: &str| FilterQuery {
+            filter_id: id.into(),
+            pattern: pattern.into(),
+            is_regex: false,
+            case_sensitive: false,
+            scope: "raw".into(),
+        };
+        let lines_of = |o: &FiltersBatchOutcome, id: &str| -> Vec<u32> {
+            o.out
+                .iter()
+                .find(|(fid, _)| fid == id)
+                .map(|(_, v)| v.iter().map(|h| h.line).collect())
+                .unwrap_or_default()
+        };
+
+        // 换行 AND：alpha(1,2) ∩ gamma(2) = 行 2
+        let o = s.filters_batch(&[q("mf", "alpha\ngamma")]).unwrap();
+        assert_eq!(lines_of(&o, "mf"), vec![2], "跨行 AND 应取交集");
+        // 子条件条目同样落缓存（与前端 ws_filters 路径共享，不重复扫描）
+        assert_eq!(lines_of(&o, &format!("mf{}0", SUB_ID_SEP)), vec![1, 2]);
+        assert_eq!(lines_of(&o, &format!("mf{}1", SUB_ID_SEP)), vec![2]);
+
+        // 排除：alpha(1,2) − gamma(2) = 行 1
+        let o = s.filters_batch(&[q("mn", "alpha\n!gamma")]).unwrap();
+        assert_eq!(lines_of(&o, "mn"), vec![1], "! 前缀应排除");
+
+        // 单行的 `!` 前缀**不是**排除语义（不含 \n → 直通，按字面量匹配），
+        // 与前端 `!pattern.includes('\n')` 的直通分支一致
+        let o = s.filters_batch(&[q("mx", "!alpha")]).unwrap();
+        assert!(lines_of(&o, "mx").is_empty(), "单行 ! 按字面量处理 → 无命中");
+        // 含 \n 且全为排除（无正向锚，需全量行基集）→ 跳过
+        let o = s.filters_batch(&[q("mx2", "!alpha\n!beta")]).unwrap();
+        assert!(o.out.is_empty(), "全排除无正向锚 → 无命中");
+
+        // 二次同定义：整条命中（RAM 指纹），不再展开聚合
+        let o = s.filters_batch(&[q("mf", "alpha\ngamma")]).unwrap();
+        assert_eq!(lines_of(&o, "mf"), vec![2]);
+        assert!(o.scan_perf.is_empty(), "整条应在 RAM 命中");
+
+        // 聚合结果供 run_sequences 使用：整条命中进了 fid 键
+        {
+            let fc = s.filters.lock();
+            let hits = fc.hits.get("mf").expect("整条命中必须落在 fid 键下");
+            assert_eq!(hits.iter().map(|h| h.line).collect::<Vec<_>>(), vec![2]);
+        }
+
+        // ---- 端到端：跨行 filter 作为 CEP 节点事件源 ----
+        // f1(单行 boot, 行0) → f2(跨行 alpha+gamma, 行2)，间隔 2s 内成链。
+        // 注意两个 filter 的命中行刻意不重叠：若 A 与 B 命中同一行，CEP 的
+        // 「B 须早于 A 的下一个 A」判据会（正确地）拒绝，那是语义而非缺陷。
+        let edge = crate::cep::EdgeSpec {
+            id: "e".into(),
+            from_filter_id: "f1".into(),
+            to_filter_id: Some("f2".into()),
+            to_filter_ids: None,
+            kind: Some("seq".into()),
+            max_gap_ms: 5000,
+            period_ms: None,
+        };
+        let spec = GroupSpec {
+            group_id: "g".into(),
+            filter_ids: vec!["f1".into(), "f2".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![edge],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        s.filters_batch(&[q("f1", "boot")]).unwrap();
+        s.filters_batch(&[q("f2", "alpha\ngamma")]).unwrap();
+        let r = s.run_sequences(&[spec]);
+        assert!(!r.fallback, "跨行 filter 不应再触发 fallback");
+        let res = &r.results["g"];
+        assert_eq!(res.chains.len(), 1, "跨行 filter 应提供行 2 的事件");
+        assert_eq!(res.chains[0].steps[0].event.id, 0);
+        assert_eq!(res.chains[0].steps[1].event.id, 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

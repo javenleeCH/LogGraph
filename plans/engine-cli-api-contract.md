@@ -898,6 +898,39 @@ Logback 两种主流写法、以及 nginx / syslog / Python logging 全部解析
 前端展示位：CEP 面板每个分组块的头部（`scope === 'thread'` 时才显示，全局作用域下
 分桶不生效、提示纯属噪音），实现见 `src/sequence/threadHint.ts`。
 
+### 3.14 跨行 filter（✅ engine ≥ 0.2.2 起引擎内自聚合并下推）
+
+`FilterQuery.pattern` **允许含 `\n`**：多行 filter 即"同一行必须同时满足多个条件"
+（换行分隔 AND，行首 `!` 表示排除）。引擎侧处理分三步：
+
+1. **拆分**（`session.rs::split_sub_conditions`，端口自前端
+   `src/filters/FilterEngine.ts::splitSubConditions`）：剥 `!` 前缀、
+   trim 首尾空白、跳过空行、纯 `!` 行丢弃。
+2. **下推**：每个子条件作为独立 `FilterQuery` 参与扫描，id 为 `fid\0i`
+   （分隔符 `SUB_ID_SEP = '\0'`，与前端 `dbStore.ts::SUB_ID_SEP` **逐字节一致**）。
+   —— 正因分隔符一致，引擎的条目与前端 ws_filters 路径产出的条目**共享同一份
+   命中缓存**，不重复扫描。
+3. **聚合**（`session.rs::aggregate_sub_hits`，端口自 `dbStore.ts::aggregateSubHits`）：
+   正向子条件行集取交集 − 排除子条件行集并集；以最短正向子条件为基，ts 取基列表同行值。
+   结果按原始 `fid` 入缓存 ⇒ `ws_sequences` 直接用 `fid` 取命中。
+
+| 输入 | 引擎行为 | 与前端一致性 |
+| --- | --- | --- |
+| 单行 pattern | 直通（不拆分，逐字节同旧行为） | ✅ |
+| `abc\ndef` | 交集：同时含 abc 与 def 的行 | ✅ |
+| `abc\n!def` | 含 abc 但不含 def 的行 | ✅ |
+| 含 `\n` 但拆分后全为排除（无正向锚） | 跳过，视为无命中 | ✅ 与前端同源（需全量行基集，目录模式拿不到） |
+| 全空白 pattern | 跳过，视为无命中 | ✅ |
+
+**为什么这条重要**：此前含跨行 filter 的 group 只能整组回退前端 TS 引擎
+（引擎只有 `fid\0i` 子条目、拿不到整条命中），CEP 在 dbMode 下因此有整块能力缺口。
+引擎内聚合后，`ws_sequences` 的 `queries` 可直接提交原始跨行 pattern。
+
+**改动约束**：`splitSubConditions` / `aggregateSubHits` 在两端各有一份实现
+（引擎 `session.rs` ↔ 前端 `FilterEngine.ts`+`dbStore.ts`），
+**改任一侧都必须同步改另一侧并两端补测试**——分叉会让同一 filter 在 UI 与
+引擎算出不同命中，且表现为"某几条链莫名对不上"，极难定位。
+
 ***
 
 ## 4. CLI 命令面（`loggraph`，D7）
@@ -1345,7 +1378,7 @@ Tauri 与 CLI 是同一引擎 API 的两种传输层，任何 UI 动作都可从
 | --- | --- | --- |
 | `ws_info {dir, files?}` | `loggraph ws info <DIR> [--file <REL>]...` | 回 WsCtx JSON（唯一付整读价入口；进度事件 `ws_build_progress` 仅 IPC 有） |
 | `ws_filters {dir, ctx, queries}` | `loggraph ws filters <DIR> -q <FILE\|-> [--ctx <FILE\|->]` | 回 `{"filters":[{filterId,hits:[{line,ts}]}]}`；总命中 0 → 退出码 1；二进制 SoA 编码是 IPC 专属输出格式化，CLI 输出 JSON |
-| `ws_sequences {dir, ctx, queries, groups}` | `loggraph ws sequences <DIR> -q <Q> -g <G> [--ctx]` | queries 先行 warm 命中缓存再跑 CEP；回 RunSeqResponse |
+| `ws_sequences {dir, ctx, queries, groups}` | `loggraph ws sequences <DIR> -q <Q> -g <G> [--ctx]` | queries 先行 warm 命中缓存再跑 CEP；回 RunSeqResponse。**queries 可直接传跨行 pattern**（见 §3.14） |
 | `ws_line {dir, ctx, no}` | `loggraph ws line <DIR> --no <N> [--ctx]` | 回行文本 |
 | `ws_lines {dir, ctx, ids}` | `loggraph ws lines <DIR> --ids 3,17,42 [--ctx]` | 回 `[{line,text}]` |
 | （已删 `db_corr_ids`） | `loggraph ws corr <DIR> -q <Q> -f <IDS> --start <MS> --end <MS> [--ctx]` | 引擎 `corr_ids` 保留供 CLI；回行号数组，空 → 退出码 1 |
