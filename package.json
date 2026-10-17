@@ -1,7 +1,7 @@
 {
   "name": "loggraph",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "description": "Perfetto-style log timeline analyzer with multi-filter correlation",
   "scripts": {
