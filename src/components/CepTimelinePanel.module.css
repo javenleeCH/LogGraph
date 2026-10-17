@@ -382,3 +382,68 @@
   line-height: 14px;
   text-align: center;
 }
+
+/* 「为何没匹配」诊断：零链时才出现的入口，展开后列出最可能的卡点。
+   配色沿用既有语义——blocker 用 --danger（需要用户动手改的严重提示），
+   hint 用 faint（仅供参考）。刻意不用 --anomaly：那是引擎判定的数据异常，
+   这里说的是规则配置问题，混色会让人以为日志本身有毛病。 */
+.whyToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-muted, #57606a);
+  font-size: 11px;
+  font-family: var(--font-ui);
+  cursor: pointer;
+}
+.whyToggle:hover {
+  border-color: var(--danger, #cf222e);
+  color: var(--danger, #cf222e);
+  background: var(--cep-bg-hover);
+}
+.whyToggleOpen {
+  border-color: var(--danger, #cf222e);
+  color: var(--danger, #cf222e);
+}
+.whyToggleOpen svg {
+  transform: rotate(90deg);
+}
+.whyList {
+  margin: 0;
+  padding: 6px 10px 8px 12px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-bottom: 1px solid var(--border-subtle, #eaeef2);
+}
+.whyBlocker,
+.whyHint {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 7px;
+  border-left: 2px solid var(--border, #d0d7de);
+}
+.whyBlocker {
+  border-left-color: var(--danger, #cf222e);
+}
+.whyText {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg, #1f2328);
+}
+.whyBlocker .whyText {
+  font-weight: 600;
+  color: var(--danger, #cf222e);
+}
+.whyDetail {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--fg-muted, #57606a);
+}

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CEP_MAX_CHAINS, useLogStore } from '../store/logStore';
 import { formatTime, formatDateTime, parseDateTime } from '../utils/timeFormat';
-import type { Filter, FilterGroup, LogEvent, SequenceMatchResult } from '../types';
+import type { Filter, FilterGroup, FilterMatch, LogEvent, SequenceMatchResult } from '../types';
 import styles from './CepTimelinePanel.module.css';
 import { ChevronLeft, ChevronRight, AlertTriangle } from './Icon';
 import { fmtCompact, fmtCount } from '../utils/counts';
 import { threadHint, type ThreadHint } from '../sequence/threadHint';
+import { explainNoMatch, type Diagnosis } from '../sequence/explain';
 
 interface CepNode {
   eventId: number;
@@ -48,6 +49,9 @@ interface CepBlock {
   rows: CepRow[];
   /** 仅按线程作用域时给出：thread 解析质量提示（无提示=null） */
   threadHint: ThreadHint | null;
+  /** 仅零链时给出：「为何没匹配」诊断（无诊断=null）。基于各 filter 的实际
+   *  命中反推，不参与匹配语义，故永远不会改变结果 */
+  diagnoses: Diagnosis[] | null;
 }
 
 /** 渲染批次：首屏渲染 200 行，滚动到底部（哨兵进入视口）自动续一批。
@@ -85,6 +89,7 @@ function buildBlocks(
   groups: FilterGroup[],
   sequenceResults: Record<string, SequenceMatchResult>,
   filters: Map<string, Filter>,
+  matches: FilterMatch[],
   cepRange: { start: number; end: number } | null,
 ): CepBlock[] {
   const out: CepBlock[] = [];
@@ -140,6 +145,9 @@ function buildBlocks(
       anomalyCount = cepRange ? filtered : (r.totalUncovered ?? filtered);
     }
     const overLimit = (r.totalChains ?? r.chains.length) > CEP_MAX_CHAINS;
+    // 诊断只按**总链数**判定，不受面板内时间窗筛选影响——否则筛选掉几行就
+    // 弹出「为何没匹配」，纯属误导。
+    const totalChains = r.totalChains ?? r.chains.length;
     out.push({
       groupId: g.id,
       label: g.label,
@@ -150,6 +158,7 @@ function buildBlocks(
       overLimit,
       rows: inRange,
       threadHint: g.sequence?.scope === 'thread' ? threadHint(r) : null,
+      diagnoses: totalChains === 0 && g.sequence ? explainNoMatch(g.sequence, matches, true) : null,
     });
   }
   return out;
@@ -166,6 +175,7 @@ export function CepTimelinePanel() {
   const groups = useLogStore((s) => s.groups);
   const sequenceResults = useLogStore((s) => s.sequenceResults);
   const filters = useLogStore((s) => s.filters);
+  const matches = useLogStore((s) => s.matches);
   const selectedEventId = useLogStore((s) => s.selectedEventId);
   const focusEvent = useLogStore((s) => s.focusEvent);
   // 异常高亮开关（从 group 编辑器迁入）：按组控制未覆盖事件标红
@@ -175,6 +185,8 @@ export function CepTimelinePanel() {
   // 每组渐进渲染上限（groupId → 已加载行数）：首屏 RENDER_BATCH 批，
   // 滚动到块底哨兵自动续一批；数据重建（重算/改规则）时全部复位
   const [limits, setLimits] = useState<Record<string, number>>({});
+  // 「为何没匹配」诊断展开态（groupId → 是否展开）
+  const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
   // CEP 面板内时间窗筛选（仅本面板生效，不动全局 viewRange）
   const [cepRange, setCepRange] = useState<{ start: number; end: number } | null>(null);
   const [rangeOpen, setRangeOpen] = useState(false);
@@ -202,8 +214,8 @@ export function CepTimelinePanel() {
 
   const blocks = useMemo(() => {
     const filterMap = new Map(filters.map((f) => [f.id, f] as const));
-    return buildBlocks(groups, sequenceResults, filterMap, cepRange);
-  }, [groups, sequenceResults, filters, cepRange]);
+    return buildBlocks(groups, sequenceResults, filterMap, matches, cepRange);
+  }, [groups, sequenceResults, filters, matches, cepRange]);
 
   useEffect(() => {
     setLimits({});
@@ -307,9 +319,36 @@ export function CepTimelinePanel() {
                   <span className={styles.anomalyBadge}>{fmtCompact(b.anomalyCount)}</span>
                 )}
               </button>
+              {b.diagnoses && b.diagnoses.length > 0 && (
+                <button
+                  className={`${styles.whyToggle} ${whyOpen[b.groupId] ? styles.whyToggleOpen : ''}`}
+                  title="这条规则一条链都没匹配上，点开看最可能的卡点"
+                  onClick={() => setWhyOpen((p) => ({ ...p, [b.groupId]: !p[b.groupId] }))}
+                >
+                  <ChevronRight size={12} />
+                  为何没匹配
+                </button>
+              )}
             </div>
+            {b.diagnoses && b.diagnoses.length > 0 && whyOpen[b.groupId] && (
+              <ul className={styles.whyList}>
+                {b.diagnoses.map((d, i) => (
+                  <li
+                    key={i}
+                    className={d.severity === 'blocker' ? styles.whyBlocker : styles.whyHint}
+                  >
+                    <span className={styles.whyText}>{d.text}</span>
+                    {d.detail && <span className={styles.whyDetail}>{d.detail}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
             {b.rows.length === 0 ? (
-              <div className={styles.blockEmpty}>无匹配结果</div>
+              <div className={styles.blockEmpty}>
+                {b.diagnoses && b.diagnoses.length > 0
+                  ? '零匹配 —— 展开上方「为何没匹配」看卡点'
+                  : '无匹配结果'}
+              </div>
             ) : (
               visible.map((row, ri) => (
                 <div
