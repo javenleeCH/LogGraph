@@ -92,6 +92,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 自签更新通道：minisign 密钥对自生成，**不需要付费代码签名证书**。
+          # 私钥存于仓库 Secrets；tauri-action 用它给产物签名并生成 latest.json，
+          # 客户端用 tauri.conf.json 里的公钥校验。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'logGraph ${{ github.ref_name }}'
@@ -108,5 +113,8 @@ jobs:
 
             未做代码签名，故标记为 Pre-release。详见 commit 历史。
           releaseDraft: false
-          # 未签名 ⇒ 不宣称正式版；发布即可下载，但 GitHub 会打上 Pre-release 标签
-          prerelease: true
+          # 必须是正式版（prerelease: false）：自签 updater 的 endpoint 指向
+          # /releases/latest/download/latest.json，而 Pre-release 不进 latest，
+          # 会让更新通道直接 404。未做代码签名证书是分发层面的放行问题（已写在
+          # body 里），与版本成熟度无关，不该用 Pre-release 表示。
+          prerelease: false

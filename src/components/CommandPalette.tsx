@@ -28,6 +28,7 @@ import {
   Search,
   Type,
   Copy,
+  ChevronUp,
 } from './Icon';
 import {
   copySelectedChainMarkdown,
@@ -37,6 +38,7 @@ import {
   importRulesFile,
 } from '../io/exportActions';
 import { RULE_TEMPLATES, createGroupFromTemplate } from '../sequence/templates';
+import { checkForUpdate } from '../io/updater';
 import { OPEN_TS_FORMAT_EVENT } from './TimestampFormatEditor';
 import styles from './CommandPalette.module.css';
 
@@ -342,6 +344,20 @@ function buildCommands(ctx: { closeAll: () => void }): Command[] {
         createGroupFromTemplate(tpl);
       },
     });
+  });
+
+  /* —— 更新（自签通道，桌面端） —— */
+  commands.push({
+    id: 'app.checkUpdate',
+    group: '更新',
+    label: '检查更新…',
+    hint: '从 GitHub Releases 拉取签名更新清单（minisign 自签，非代码签名证书）',
+    keywords: 'update upgrade 更新 升级 版本',
+    icon: <ChevronUp size={14} />,
+    run: () => {
+      ctx.closeAll();
+      void checkForUpdate(true);
+    },
   });
 
   /* —— 视图 —— */

@@ -931,6 +931,30 @@ Logback 两种主流写法、以及 nginx / syslog / Python logging 全部解析
 **改任一侧都必须同步改另一侧并两端补测试**——分叉会让同一 filter 在 UI 与
 引擎算出不同命中，且表现为"某几条链莫名对不上"，极难定位。
 
+### 3.15 自签更新通道（✅ engine ≥ 0.2.2，桌面端）
+
+用户装了之后感知不到新版本是真问题，但**代码签名证书要花钱且与代码质量无关**，
+那条路明确不做。二者并不冲突：Tauri updater 用 **minisign 密钥对自签名**，
+密钥自生成、零成本，与操作系统信任链的代码签名是两回事。
+
+| 角色 | 存放位置 | 说明 |
+| --- | --- | --- |
+| 公钥 | `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` | 可公开，客户端用它校验产物签名 |
+| 私钥 | GitHub Secrets `TAURI_SIGNING_PRIVATE_KEY` | **绝不可进仓库**；丢失即无法再签名，更新通道永久失效 |
+| 清单 | tauri-action 随 release 产出 `latest.json` | 含各平台产物 URL 与签名 |
+
+**为什么 release 不能是 Pre-release**：updater 的 endpoint 是
+`https://github.com/javenleeCH/LogGraph/releases/latest/download/latest.json`，
+而 Pre-release **不进 `latest`**——标记成 Pre-release 会让更新清单 404。
+未签名是分发层面的放行问题（已写入 release notes），不是版本成熟度问题，
+两者不要混为一谈，故 `prerelease: false`。
+
+**刻意不自动重启**：下载安装完成后只提示重启，不调用 relaunch。用户可能正
+开着日志在分析，中途重启会打断工作——让他们自己决定何时重启。
+
+入口：⌘K 命令面板 → 「更新」→「检查更新…」（实现 `src/io/updater.ts`）。
+Web 版无更新通道（刷新即最新），调用时明确提示而非静默失败。
+
 ***
 
 ## 4. CLI 命令面（`loggraph`，D7）
@@ -1222,6 +1246,9 @@ v1 无流式进度 / 取消命令（引擎单次调用同步完成；大目录�
 
 | 项 | 状态 | 备注 |
 | --- | --- | --- |
+| 跨行 filter 下推 CEP | ✅ 支持（engine ≥ 0.2.2，引擎内拆分 + 聚合，见 §3.14） |
+| 自签更新通道（updater） | ✅ 支持（engine ≥ 0.2.2，minisign 自签，见 §3.15） |
+| **代码签名证书** | ❌ | Authenticode / Developer ID 要花钱且与代码质量无关，不做。代价是首次运行需人工放行 SmartScreen / Gatekeeper（已写入 release notes） |
 | 线程域序列（`scope:"thread"`） | ✅ 支持（engine ≥ 0.2.1，按 thread 分桶隔离匹配） |
 | thread 字段的格式自适应解析 | ❌ | 位置启发式：只认紧跟时间戳的 `[...]`。多数格式解析不出 ⇒ 分桶退化为全局，**质量回传 `threadStats`（§3.13）而非自动适配** |
 | `opt` 边 | ✅ 支持（engine ≥ 0.2.0，复用 seq 推进，缺失即跳过） |
