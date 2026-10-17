@@ -766,7 +766,7 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 | 码 | 触发 | 处理 |
 | --- | --- | --- |
 | W01 | `scope: "thread"` | 该 group 不计算（uncovered 空），`fallback=true` |
-| W02 | `kind: "opt"` 边 | 同上 |
+| W02 | `kind: "opt"` 边 | ⚠️ 已支持：engine ≥ 0.2.0 支持 opt 边（复用 seq 推进，缺失即跳过），不再触发 fallback |
 | W03 | `kind: "periodic"` 边 | 同上 |
 | W04 | `nodeCounts` 非空 | 同上 |
 | W05 | `nodeConditions` 非空 | 同上 |
@@ -1142,7 +1142,7 @@ v1 无流式进度 / 取消命令（引擎单次调用同步完成；大目录�
 | 项 | 状态 | 备注 |
 | --- | --- | --- |
 | 线程域序列（`scope:"thread"`） | ❌ W01 | 文件可写，运行 fallback |
-| `opt` 边 | ❌ W02 | 同上 |
+| `opt` 边 | ✅ 支持（engine ≥ 0.2.0，复用 seq 推进，缺失即跳过） |
 | `periodic` 边 /heartbeats | ❌ W03 | `heartbeats` 恒空数组 |
 | nodeCounts / nodeConditions | ❌ W04/W05 | schema 保留字段 |
 | 多文件跨行窗口（按文件分桶） | ❌ | v1 全局时间轴（文件按 walk 序拼接） |

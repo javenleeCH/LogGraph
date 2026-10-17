@@ -880,15 +880,7 @@ fn validate_semantics(
                 );
             }
 
-            // W02
-            if kind == "opt" {
-                warn(
-                    warnings,
-                    "W02",
-                    format!("{epath}.kind"),
-                    "kind=opt 引擎 v1 不支持，该 group 将不计算（fallback）".to_string(),
-                );
-            }
+            // W02（kind=opt）：engine ≥ 0.2.0 已支持，不再告警/回退
         }
     }
 }
@@ -1141,7 +1133,8 @@ mod tests {
         );
         assert!(r.valid, "errors: {:?}", r.errors);
         let codes: BTreeSet<&str> = r.warnings.iter().filter_map(|w| w.rule).collect();
-        assert_eq!(codes, BTreeSet::from(["W01", "W02", "W04", "W05"]));
+        // opt（W02）已在 engine ≥ 0.2.0 支持，不再告警；剩余 W01/W04/W05 仍触发
+        assert_eq!(codes, BTreeSet::from(["W01", "W04", "W05"]));
     }
 
     #[test]

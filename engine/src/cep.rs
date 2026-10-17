@@ -4,8 +4,8 @@
 //! 事件源由调用方以 `filter_id -> 事件流` 的形式提供（引擎层可接 rg 直扫结果、
 //! 内存数组或瘦 SQL 查询）。
 //!
-//! 当前覆盖（global 作用域）：`seq` / `not` / `and` / `or` 四类边。
-//! 未覆盖（调用方应回退/后续迭代）：`thread` 分桶、`opt`、`periodic`、
+//! 当前覆盖（global 作用域）：`seq` / `not` / `and` / `or` / `opt` 五类边。
+//! 未覆盖（调用方应回退/后续迭代）：`thread` 分桶、`periodic`、
 //! 节点循环计数、节点条件表达式——见 [`GroupSpec::is_supported`]。
 //! DTO 形状按契约 §2.4/§3：camelCase + `deny_unknown_fields`，
 //! `toFilterId` 对 and/or 边不提供（S06），多目标走 `toFilterIds`。
@@ -468,8 +468,8 @@ impl GroupSpec {
             return false;
         }
         for e in &self.edges {
-            let k = edge_kind(e);
-            if k == "opt" || k == "periodic" {
+            // opt 已在 engine 0.2.0 支持；periodic 仍不支持 → 回退
+            if edge_kind(e) == "periodic" {
                 return false;
             }
         }
@@ -568,6 +568,40 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
             for edge in chain {
                 let kind = edge_kind(edge);
                 let from_events = get_slice(&edge.from_filter_id);
+
+                // opt 边：复用 seq 推进；命中则消耗推进，否则跳过（cur 不动，不断链）。
+                // 与前端 SequenceMatcher 的 opt 语义对齐（P0① 引擎下沉第一步）。
+                if kind == "opt" {
+                    let seq_edge = EdgeSpec {
+                        kind: Some("seq".into()),
+                        ..edge.clone()
+                    };
+                    match advance_edge(&seq_edge, from_events, &slices, &consumed, &cur) {
+                        Advance::Ok(moved_to) => {
+                            if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
+                                st.matched_count += 1;
+                            }
+                            if let Some((mt, mt_target)) = moved_to {
+                                let t_fid = mt_target.unwrap_or_else(|| anchor_of(edge));
+                                steps.push(Step {
+                                    edge_id: Some(edge.id.clone()),
+                                    filter_id: t_fid,
+                                    event: mt.clone(),
+                                });
+                                cur = mt;
+                            }
+                        }
+                        Advance::Break => {
+                            // 目标缺失/超窗/插队：opt 容错，跳过此边，cur 不动（不计断裂）
+                            if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
+                                st.miss_count += 1;
+                            }
+                        }
+                        Advance::Violation(_) => { /* seq 不会产生 violation */ }
+                    }
+                    continue;
+                }
+
                 let r = advance_edge(edge, from_events, &slices, &consumed, &cur);
                 match r {
                     Advance::Break => {
@@ -921,5 +955,172 @@ mod tests {
         assert_eq!(r.chains.len(), 1, "应成一条 A→(B∧C)→D 链");
         let ids: Vec<u32> = r.chains[0].steps.iter().map(|st| st.event.id).collect();
         assert_eq!(ids, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn opt_group_is_supported() {
+        let spec = GroupSpec {
+            group_id: "g".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![EdgeSpec {
+                id: "e".into(),
+                from_filter_id: "A".into(),
+                to_filter_id: Some("B".into()),
+                to_filter_ids: None,
+                kind: Some("opt".into()),
+                max_gap_ms: 1000,
+                period_ms: None,
+            }],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        assert!(spec.is_supported(), "opt 组现在应被引擎支持（engine ≥ 0.2.0）");
+    }
+
+    #[test]
+    fn opt_edge_matches_when_present() {
+        let s = store(&[("A", &[(1, 100)]), ("B", &[(2, 150)])]);
+        let spec = GroupSpec {
+            group_id: "g_opt1".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![EdgeSpec {
+                id: "e_opt".into(),
+                from_filter_id: "A".into(),
+                to_filter_id: Some("B".into()),
+                to_filter_ids: None,
+                kind: Some("opt".into()),
+                max_gap_ms: 1000,
+                period_ms: None,
+            }],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.chains.len(), 1, "A→B(opt) 命中应成链");
+        assert_eq!(r.chains[0].steps.len(), 2);
+        assert_eq!(r.chains[0].steps[1].event.id, 2);
+        assert_eq!(r.edge_stats[0].matched_count, 1);
+        assert_eq!(r.uncovered_events.len(), 0);
+    }
+
+    #[test]
+    fn opt_edge_skips_when_absent() {
+        // B 在窗口外（5000 > 100+1000）：opt 跳过，cur 不动，不断链（与前端对齐）
+        let s = store(&[("A", &[(1, 100)]), ("B", &[(2, 5000)])]);
+        let spec = GroupSpec {
+            group_id: "g_opt2".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![EdgeSpec {
+                id: "e_opt".into(),
+                from_filter_id: "A".into(),
+                to_filter_id: Some("B".into()),
+                to_filter_ids: None,
+                kind: Some("opt".into()),
+                max_gap_ms: 1000,
+                period_ms: None,
+            }],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.chains.len(), 1, "opt 跳过仍应产出（仅含 A 的一步链，与前端对齐）");
+        assert_eq!(r.chains[0].steps.len(), 1);
+        assert_eq!(r.chains[0].steps[0].event.id, 1);
+        assert_eq!(r.edge_stats[0].matched_count, 0);
+        assert_eq!(r.edge_stats[0].miss_count, 1);
+        assert_eq!(r.uncovered_events.len(), 1, "B 未被任何链覆盖");
+    }
+
+    #[test]
+    fn opt_edge_intermediate_skipped_still_chains_ac() {
+        // A@100, C@400，B 缺失：opt A→B 跳过，链推进到 A→C（两步）
+        let s = store(&[("A", &[(1, 100)]), ("C", &[(3, 400)])]);
+        let spec = GroupSpec {
+            group_id: "g_opt3".into(),
+            filter_ids: vec!["A".into(), "B".into(), "C".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![
+                EdgeSpec {
+                    id: "e_ab".into(),
+                    from_filter_id: "A".into(),
+                    to_filter_id: Some("B".into()),
+                    to_filter_ids: None,
+                    kind: Some("opt".into()),
+                    max_gap_ms: 1000,
+                    period_ms: None,
+                },
+                EdgeSpec {
+                    id: "e_bc".into(),
+                    from_filter_id: "B".into(),
+                    to_filter_id: Some("C".into()),
+                    to_filter_ids: None,
+                    kind: Some("seq".into()),
+                    max_gap_ms: 1000,
+                    period_ms: None,
+                },
+            ],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.chains.len(), 1);
+        let ids: Vec<u32> = r.chains[0].steps.iter().map(|st| st.event.id).collect();
+        assert_eq!(ids, vec![1, 3], "B 缺失时应为 A→C 两步链（B 为可选中间节点）");
+        assert_eq!(r.edge_stats[0].miss_count, 1);
+        assert_eq!(r.edge_stats[1].matched_count, 1);
+    }
+
+    #[test]
+    fn opt_edge_intermediate_present_chains_abc() {
+        let s = store(&[
+            ("A", &[(1, 100)]),
+            ("B", &[(2, 150)]),
+            ("C", &[(3, 400)]),
+        ]);
+        let spec = GroupSpec {
+            group_id: "g_opt4".into(),
+            filter_ids: vec!["A".into(), "B".into(), "C".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![
+                EdgeSpec {
+                    id: "e_ab".into(),
+                    from_filter_id: "A".into(),
+                    to_filter_id: Some("B".into()),
+                    to_filter_ids: None,
+                    kind: Some("opt".into()),
+                    max_gap_ms: 1000,
+                    period_ms: None,
+                },
+                EdgeSpec {
+                    id: "e_bc".into(),
+                    from_filter_id: "B".into(),
+                    to_filter_id: Some("C".into()),
+                    to_filter_ids: None,
+                    kind: Some("seq".into()),
+                    max_gap_ms: 1000,
+                    period_ms: None,
+                },
+            ],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.chains.len(), 1);
+        let ids: Vec<u32> = r.chains[0].steps.iter().map(|st| st.event.id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(r.edge_stats[0].matched_count, 1);
     }
 }
