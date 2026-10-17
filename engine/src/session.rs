@@ -173,7 +173,9 @@ impl Session {
     pub fn build_ctx(
         root: &Path,
         files: Option<&[String]>,
-        mut emit: impl FnMut(usize, usize, &str) + Send,
+        // 不标 mut：emit 在本函数内只被**转发**给 build_session（移动所有权），
+        // 从不在此处调用，故无需可变绑定。
+        emit: impl FnMut(usize, usize, &str) + Send,
     ) -> EngineResult<WsCtx> {
         if !root.is_dir() {
             return Err(EngineError::Usage {
@@ -1294,9 +1296,9 @@ fn load_offsets_cache(root: &Path, path: &Path, fe: &FileEntry) -> Option<Vec<u6
     if bytes.len() < 32 || &bytes[..8] != OFF_MAGIC {
         return None;
     }
-    let mut rd = |o: usize| -> u64 {
-        u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap())
-    };
+    // 不标 mut：闭包只不可变借用 bytes、不改动捕获状态，且下面的 map 里
+    // 通过 &rd 调用即可（Fn 而非 FnMut），可变绑定是多余的。
+    let rd = |o: usize| -> u64 { u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap()) };
     let size = rd(8);
     let mt = rd(16);
     let count = u32::from_le_bytes(bytes[24..28].try_into().unwrap()) as usize;
