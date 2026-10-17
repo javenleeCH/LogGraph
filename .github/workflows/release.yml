@@ -95,6 +95,18 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'logGraph ${{ github.ref_name }}'
-          releaseBody: '自动构建的桌面安装包（Windows NSIS / macOS dmg / Linux AppImage+deb）。详见 commit 历史。'
-          releaseDraft: true
-          prerelease: false
+          # 注意：releaseDraft 曾为 true，导致产物构建出来却躺在草稿里、公开页面
+          # 一个都看不到（"跑通 CI" ≠ "用户拿得到"）。改 false 后 tag 一推即发布。
+          releaseBody: |
+            logGraph 桌面版安装包，由 CI 自动构建。
+
+            | 平台 | 产物 | 说明 |
+            |---|---|---|
+            | Windows | `*_x64-setup.exe`（NSIS） / `*.msi` | 未签名：首次运行可能被 SmartScreen 拦截，点「仍要运行」 |
+            | macOS | `*.dmg`（aarch64） | 未签名：右键 → 打开，绕过 Gatekeeper |
+            | Linux | `*.AppImage` / `*.deb` | AppImage 需 `chmod +x` 后执行 |
+
+            未做代码签名，故标记为 Pre-release。详见 commit 历史。
+          releaseDraft: false
+          # 未签名 ⇒ 不宣称正式版；发布即可下载，但 GitHub 会打上 Pre-release 标签
+          prerelease: true
