@@ -4,6 +4,7 @@
 use crate::cep::{self, GroupSpec, RunSeqResponse, SeqEvent};
 use crate::error::EngineResult;
 use crate::parser::timestamp::{detect_timestamp_format, extract_timestamp, TsFormat};
+use crate::parser::parse_rest;
 use crate::search::{self, Pattern};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -102,12 +103,18 @@ pub fn run_cep(
                 let extracted = extract_timestamp(&h.text, format)
                     .or_else(|| extract_timestamp(&h.text, None));
                 if let Some(ts) = extracted {
+                    // 解析时间戳之后的剩余段：抽出 thread / level / message
+                    // （对齐前端 parseRest，使 nodeConditions 表达式的 level/msg/thread
+                    // 字段能与 GUI 视图等价求值）
+                    let parsed = parse_rest(&h.text[ts.end..]);
                     events.push(SeqEvent {
                         id,
                         ts: ts.ts,
                         raw: h.text.clone(),
-                        message: String::new(),
-                        thread: None,
+                        message: parsed.message,
+                        thread: parsed.thread,
+                        level: parsed.level,
+                        source_file: Some(file.path.to_string_lossy().into_owned()),
                     });
                 } else {
                     no_ts += 1;

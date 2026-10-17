@@ -370,7 +370,7 @@ pub struct MatchedChain{ pub chain_index: u32, pub steps: Vec<Step>,
 pub struct EdgeStat    { pub edge_id: String, pub matched_count: u32, pub miss_count: u32,
                          pub late_count: Option<u32>, pub jitter_count: Option<u32> }
 pub struct NotViolation{ pub edge_id: String, pub from_event: SeqEvent, pub to_event: SeqEvent }
-pub struct Heartbeat   { /* periodic 用，v1 恒空数组 */ }
+pub struct Heartbeat   { /* periodic 心跳断言（engine ≥ 0.2.1 起填充 segments/gaps/jitters） */ }
 pub struct SeqResult {
     pub group_id: String,
     pub chains: Vec<MatchedChain>,
@@ -547,11 +547,11 @@ pub fn parse_rules(json: &str) -> EngineResult<RulesFile>;
 | --- | --- | --- | --- | --- |
 | `groupId` | string | **是** | — | id 格式同上，全局唯一（S02） |
 | `label` | string ≤64 | 否 | — | 展示名，引擎忽略 |
-| `scope` | enum | 否 | `"global"` | `global` \| `thread`。`thread` = 按 `thread` 字段分桶隔离匹配（v1 不支持 → W01） |
+| `scope` | enum | 否 | `"global"` | `global` \| `thread`。`thread` = 按 `thread` 字段分桶隔离匹配（engine ≥ 0.2.1 起支持） |
 | `filterIds` | string[] | **是** | — | 1..256 项，去重；每项 ∈ `filters[].id`（S03）。**边只能引用这里声明的 filter**（S04） |
 | `edges` | Edge[] | **是** | — | 0..256 条；可为空（该 group 只产出 uncovered 事件清单） |
-| `nodeCounts` | map | 否 | `{}` | 见 §3.6（v1 不支持 → W04） |
-| `nodeConditions` | map | 否 | `{}` | 见 §3.6（v1 不支持 → W05） |
+| `nodeCounts` | map | 否 | `{}` | 见 §3.6（engine ≥ 0.2.1 起支持） |
+| `nodeConditions` | map | 否 | `{}` | 见 §3.6（engine ≥ 0.2.1 起支持） |
 | `maxChains` | integer ≥1 | 否 | —（不限） | 返回链数上限（UI 防大目录载荷爆炸）。截断时 `totalChains`/`totalUncovered` 仍报全量真值，`coveredMarks` 回传全量 lane 标记 |
 
 ### 3.5 `groups[].edges[]`（边定义与 kind 语义）
@@ -575,9 +575,9 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 | `and` | `A -> B and C within W` | 窗口内 B、C **都**出现才推进（各自消耗） | ✅ |
 | `or` | `A -> (B or C) within W` | 窗口内任一出现即推进（取最早就绪者） | ✅ |
 | `opt` | `A -> B? -> C` | B 可缺省：链可直接跳过（有 B 用 B，贪心长路径） | ❌ W02 |
-| `periodic` | `every A where timer:within(P±δ)` | 期望周期 P 的心跳断言：间隔 ∈ [P−δ, P+δ] 为正常 | ❌ W03 |
+| `periodic` | `every A where timer:within(P±δ)` | 期望周期 P 的心跳断言：间隔 ∈ [P−δ, P+δ] 为正常；缺口/抖动入 `heartbeats` | ✅ engine ≥ 0.2.1 |
 
-### 3.6 `nodeCounts` / `nodeConditions`（节点级约束，v1 保留字段）
+### 3.6 `nodeCounts` / `nodeConditions`（节点级约束，engine ≥ 0.2.1 起支持）
 
 ```json
 {
@@ -596,8 +596,8 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
   二次过滤；表达式语法子集见 `plans/epl-cep-spec.md` P2-B（TS 侧
   `src/sequence/expr.ts` 为参照实现）。
 * 两者的键 ∈ 所在 group 的 `filterIds`（S09）。
-* **v1 引擎不支持**（W04/W05）：文件里允许写（前向兼容），该 group 不计算、
-  `fallback = true`，`validate` 报警告不报错误。
+* **engine ≥ 0.2.1 起支持**：文件允许写（前向兼容），引擎按语义计算；
+  `validate` 不再对这两个字段（及 `scope:thread` / `kind:periodic`）报 W01/W03/W04/W05。
 
 ### 3.7 完整 JSON Schema（draft 2020-12）
 
@@ -765,15 +765,15 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 
 | 码 | 触发 | 处理 |
 | --- | --- | --- |
-| W01 | `scope: "thread"` | 该 group 不计算（uncovered 空），`fallback=true` |
+| W01 | `scope: "thread"` | ⚠️ 已支持：engine ≥ 0.2.1 按 thread 分桶隔离匹配，不再触发 fallback / 告警 |
 | W02 | `kind: "opt"` 边 | ⚠️ 已支持：engine ≥ 0.2.0 支持 opt 边（复用 seq 推进，缺失即跳过），不再触发 fallback |
-| W03 | `kind: "periodic"` 边 | 同上 |
-| W04 | `nodeCounts` 非空 | 同上 |
-| W05 | `nodeConditions` 非空 | 同上 |
+| W03 | `kind: "periodic"` 边 | ⚠️ 已支持：engine ≥ 0.2.1 起心跳断言填入 `heartbeats`，不再触发 fallback / 告警 |
+| W04 | `nodeCounts` 非空 | ⚠️ 已支持：engine ≥ 0.2.1 起节点循环计数生效，不再触发 fallback / 告警 |
+| W05 | `nodeConditions` 非空 | ⚠️ 已支持：engine ≥ 0.2.1 起节点条件表达式生效，不再触发 fallback / 告警 |
 
 * 警告不进 `RuleReport.errors`，不阻断 parse；`cep` 运行时 stderr 提示一次
   并在 `--json` 顶层带 `"fallback": true`。
-* 消息模板（示例）：`nodeCounts 引擎 v1 不支持，该 group 将不计算（fallback）`。
+* 消息模板（历史示例，engine ≥ 0.2.1 起不再产生）：`nodeCounts 引擎 v1 不支持，该 group 将不计算（fallback）`。
 
 ### 3.10 RuleIssue 与错误码总表
 
@@ -836,8 +836,9 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 }
 ```
 
-上面第二个 group 触发 W02 + W04 + W05 三条警告：文件合法可保存、可交换，
-引擎 v1 跳过该 group，`fallback=true`。**支持性写法与合法性写法分开**，
+上面第二个 group 在 engine ≥ 0.2.1 下完全受支持：文件合法可保存、可交换，
+引擎按 `nodeCounts`/`nodeConditions`/`opt` 语义计算，不再触发 W02/W04/W05 告警、
+也不会 `fallback`。**支持性写法与合法性写法分开**（旧版 v1 才需要担心告警），
 这正是 v1 文件能前向迁移到 v2 的原因。
 
 ### 3.12 UI 映射（导入导出）
@@ -850,8 +851,8 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 | Filter 大小写 | `caseSensitive` | UI 默认不敏感 = `.cep` 缺省一致 |
 | Group / 头节点 | `groups[]` | UI 拓扑图邻接表展开为 `edges[]` |
 | Edge kind | `kind` | UI 创建 and/or 边时只填 `toFilterIds` |
-| 节点数量约束（如 3..5） | `nodeCounts` | v1 导入可保留（文件合法），运行时 W04 |
-| 表达式条件 | `nodeConditions` | 同上 W05 |
+| 节点数量约束（如 3..5） | `nodeCounts` | engine ≥ 0.2.1 起运行时生效，无需降级 |
+| 表达式条件 | `nodeConditions` | 同上，engine ≥ 0.2.1 起生效 |
 | 颜色 / 折叠 / 视图 | —（不进 `.cep`） | 存 UI 工程文件（如 `.lgui.json`，v1 不定） |
 
 ***
@@ -1024,7 +1025,7 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
 * `results` 是 **groupId → SeqResult** 的 map；JSON 里按 groupId 字典序输出
   （Rust `BTreeMap`），agent 可依赖。
 * `thread: null` / `lateCount: null`：null 与缺省不同（字段存在、值未知 / 无）。
-  `heartbeats` v1 恒 `[]`（periodic 保留位，W03）。
+  `heartbeats` 由 periodic 边填充（engine ≥ 0.2.1 起支持；更早版本恒 `[]`）。
 * `totalChains`/`totalUncovered`：全量真值。未设 `maxChains` 时分别等于
   `chains.length`/`uncoveredEvents.length`；截断后链表被裁但统计保真。
 * `coveredMarks`：仅设 `maxChains` 截断时非空——`filterId → [[事件id, 链号], …]`
@@ -1043,11 +1044,9 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
       "path": "$.groups[0].edges[1].toFilterId",
       "message": "边端点 \"Z\" 不在 group \"startup\" 的 filterIds 中" }
   ],
-  "warnings": [
-    { "code": "W_RULES_UNSUPPORTED", "rule": "W04",
-      "path": "$.groups[1].nodeCounts",
-      "message": "nodeCounts 引擎 v1 不支持，该 group 将不计算（fallback）" }
-  ]
+  "warnings": [ ]
+  // engine ≥ 0.2.1 起 W01/W03/W04/W05 不再产生：上面 group[1] 的
+  // scope=thread / periodic / nodeCounts / nodeConditions 均正常计算，无告警。
 }
 ```
 
@@ -1141,10 +1140,10 @@ v1 无流式进度 / 取消命令（引擎单次调用同步完成；大目录�
 
 | 项 | 状态 | 备注 |
 | --- | --- | --- |
-| 线程域序列（`scope:"thread"`） | ❌ W01 | 文件可写，运行 fallback |
+| 线程域序列（`scope:"thread"`） | ✅ 支持（engine ≥ 0.2.1，按 thread 分桶隔离匹配） |
 | `opt` 边 | ✅ 支持（engine ≥ 0.2.0，复用 seq 推进，缺失即跳过） |
-| `periodic` 边 /heartbeats | ❌ W03 | `heartbeats` 恒空数组 |
-| nodeCounts / nodeConditions | ❌ W04/W05 | schema 保留字段 |
+| `periodic` 边 /heartbeats | ✅ 支持（engine ≥ 0.2.1，缺口/抖动入 `heartbeats`） |
+| nodeCounts / nodeConditions | ✅ 支持（engine ≥ 0.2.1，节点循环计数 / 条件表达式） |
 | 多文件跨行窗口（按文件分桶） | ❌ | v1 全局时间轴（文件按 walk 序拼接） |
 | 流式进度 / 取消 | ❌ | §6.5 |
 | 输出重定向 / 文件监听（watch） | ❌ | CLI 一次一跑 |

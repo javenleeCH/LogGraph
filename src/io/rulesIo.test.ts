@@ -98,7 +98,7 @@ describe('buildCepJson', () => {
     expect(e.toFilterId).toBeUndefined();
   });
 
-  it('引擎 v1 不支持的特性逐条警告，不静默', () => {
+  it('engine ≥ 0.2.1 支持的特性静默导出，不再列 W01/W02/W04/W05 告警', () => {
     const g = group({
       id: 'g1',
       label: '会话',
@@ -114,12 +114,20 @@ describe('buildCepJson', () => {
         nodeConditions: { f2: "level == 'E'" },
       },
     });
-    const { warnings } = buildCepJson([F1, F2], [g]);
+    const { json, warnings } = buildCepJson([F1, F2], [g]);
+    // 特性全部由 engine ≥ 0.2.1 支持 → 不应再有 W01/W02/W04/W05 告警
     const all = warnings.join('\n');
-    expect(all).toContain('W01');
-    expect(all).toContain('W02');
-    expect(all).toContain('W04');
-    expect(all).toContain('W05');
+    expect(all).not.toContain('W01');
+    expect(all).not.toContain('W02');
+    expect(all).not.toContain('W04');
+    expect(all).not.toContain('W05');
+    // 且字段必须真的落到 .cep.json 里（防回归：不能一边不告警一边把字段丢了）
+    const data = JSON.parse(json);
+    const gg = data.groups[0];
+    expect(gg.scope).toBe('thread');
+    expect(gg.nodeCounts).toEqual({ f2: { min: 2, max: 5 } });
+    expect(gg.nodeConditions).toEqual({ f2: "level == 'E'" });
+    expect(gg.edges.some((e: any) => e.kind === 'opt')).toBe(true);
   });
 
   it('scope=message 的过滤器按契约 §3.3 提示', () => {
@@ -197,7 +205,7 @@ describe('parseRuleFile', () => {
     expect(parsed.filters[0].color).toBe('#4ea2ff');
   });
 
-  it('导入 cep 时把 v1 不支持的特性也报出来', () => {
+  it('导入 cep 时保留 engine ≥ 0.2.1 已支持的特性，不再报 W01/W04/W05', () => {
     const text = JSON.stringify({
       version: 1,
       filters: [{ id: 'A', pattern: 'a' }],
@@ -215,11 +223,14 @@ describe('parseRuleFile', () => {
     });
     const parsed = parseRuleFile(text);
     const all = parsed.warnings.join('\n');
-    expect(all).toContain('W01');
-    expect(all).toContain('W04');
-    expect(all).toContain('W05');
-    // 特性本身保留下来（UI 里能用，只是导出到 CLI 会 fallback）
-    expect(parsed.groups[0].sequence!.scope).toBe('thread');
+    expect(all).not.toContain('W01');
+    expect(all).not.toContain('W04');
+    expect(all).not.toContain('W05');
+    // 特性本身保留下来（engine ≥ 0.2.1 起这些特性确实会生效，不只是 UI 里能用）
+    const seq = parsed.groups[0].sequence!;
+    expect(seq.scope).toBe('thread');
+    expect(seq.nodeCounts).toEqual({ A: { min: 2, max: Number.POSITIVE_INFINITY } });
+    expect(seq.nodeConditions).toEqual({ A: "level == 'E'" });
   });
 
   it('and/or 边恢复成 toFilterIds', () => {

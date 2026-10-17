@@ -4,7 +4,8 @@
 //! 手写镜像 `schemas/cep-rules-1.schema.json`，不引 JSON-Schema 库）→ 语义
 //! （`E_RULES_SEMANTIC`，S01–S10；S08 用 `E_PATTERN`）。
 //! 每层内部聚合全部问题、不 fail-fast；前层失败则后层跳过。
-//! v1 不支持的能力不报错，产出 W01–W05 警告（§3.9），文件保持合法。
+//! engine ≥ 0.2.1 起 `thread`/`periodic`/`nodeCounts`/`nodeConditions` 均已支持，
+//! 不再产出 W01–W05 警告；文件保持合法，结构/语义问题仍报 S01–S10。
 
 use crate::cep::GroupSpec;
 use crate::error::{EngineError, EngineResult};
@@ -109,7 +110,7 @@ fn default_version() -> u32 {
 pub fn validate_rules(json: &str) -> RuleReport {
     let json = strip_bom(json);
     let mut errors = Vec::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
 
     let value: Value = match serde_json::from_str(json) {
         Ok(v) => v,
@@ -146,7 +147,7 @@ pub fn validate_rules(json: &str) -> RuleReport {
         // 结构已过（required/类型/未知键/边界全查过），typed 反序列化必然成功
         let file: RulesFile = serde_json::from_value(value)
             .expect("结构校验通过后 typed 反序列化不应失败");
-        validate_semantics(&file, &mut errors, &mut warnings);
+        validate_semantics(&file, &mut errors);
     }
 
     RuleReport { valid: errors.is_empty(), errors, warnings }
@@ -180,8 +181,7 @@ pub fn parse_rules(json: &str) -> EngineResult<RulesFile> {
     })?;
 
     let mut errors = Vec::new();
-    let mut warnings = Vec::new();
-    validate_semantics(&file, &mut errors, &mut warnings);
+    validate_semantics(&file, &mut errors);
     if !errors.is_empty() {
         return Err(EngineError::RulesSemantic { issues: errors });
     }
@@ -217,15 +217,6 @@ fn schema_err(errors: &mut Vec<RuleIssue>, path: String, message: String) {
 fn sem_err(errors: &mut Vec<RuleIssue>, rule: &'static str, path: String, message: String) {
     errors.push(RuleIssue {
         code: IssueCode::RulesSemantic,
-        rule: Some(rule),
-        path,
-        message,
-    });
-}
-
-fn warn(warnings: &mut Vec<RuleIssue>, rule: &'static str, path: String, message: String) {
-    warnings.push(RuleIssue {
-        code: IssueCode::Unsupported,
         rule: Some(rule),
         path,
         message,
@@ -626,14 +617,11 @@ fn check_node_conditions(v: Option<&Value>, path: String, errors: &mut Vec<RuleI
 }
 
 // ---------------------------------------------------------------------------
-// 语义层（S01–S10 + W01–W05）：typed 反序列化成功后执行
+// 语义层（S01–S10）：typed 反序列化成功后执行。
+// W01–W05 已于 engine ≥ 0.2.1 全部支持并移除，故不再产出 warning。
 // ---------------------------------------------------------------------------
 
-fn validate_semantics(
-    file: &RulesFile,
-    errors: &mut Vec<RuleIssue>,
-    warnings: &mut Vec<RuleIssue>,
-) {
+fn validate_semantics(file: &RulesFile, errors: &mut Vec<RuleIssue>) {
     // ---- S01 过滤器 id 唯一 / S08 正则可编译 ----
     let mut filter_first: HashMap<&str, usize> = HashMap::new();
     for (i, f) in file.filters.iter().enumerate() {
@@ -682,15 +670,8 @@ fn validate_semantics(
             group_first.insert(g.group_id.as_str(), gi);
         }
 
-        // W01
-        if g.scope == "thread" {
-            warn(
-                warnings,
-                "W01",
-                format!("{gpath}.scope"),
-                "scope=thread 引擎 v1 不支持，该 group 将不计算（fallback）".to_string(),
-            );
-        }
+        // W01/W04/W05：engine ≥ 0.2.1 起 scope=thread / nodeCounts / nodeConditions
+        // 均已支持，不再告警/回退。空 map = 未写，不影响。
 
         let members: HashSet<&str> = g.filter_ids.iter().map(|s| s.as_str()).collect();
 
@@ -704,24 +685,6 @@ fn validate_semantics(
                     format!("引用了未声明的过滤器 \"{fid}\""),
                 );
             }
-        }
-
-        // W04 / W05（非空才警告；空 map = 未写）
-        if g.node_counts.as_ref().is_some_and(|m| !m.is_empty()) {
-            warn(
-                warnings,
-                "W04",
-                format!("{gpath}.nodeCounts"),
-                "nodeCounts 引擎 v1 不支持，该 group 将不计算（fallback）".to_string(),
-            );
-        }
-        if g.node_conditions.as_ref().is_some_and(|m| !m.is_empty()) {
-            warn(
-                warnings,
-                "W05",
-                format!("{gpath}.nodeConditions"),
-                "nodeConditions 引擎 v1 不支持，该 group 将不计算（fallback）".to_string(),
-            );
         }
 
         // S09
@@ -865,12 +828,7 @@ fn validate_semantics(
                         "kind=periodic 必须提供 periodMs".to_string(),
                     );
                 }
-                warn(
-                    warnings,
-                    "W03",
-                    format!("{epath}.kind"),
-                    "kind=periodic 引擎 v1 不支持，该 group 将不计算（fallback）".to_string(),
-                );
+                // W03：engine ≥ 0.2.1 起 periodic 已支持，不再告警/回退。
             } else if e.period_ms.is_some() {
                 sem_err(
                     errors,
@@ -888,7 +846,6 @@ fn validate_semantics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
     const MINIMAL: &str = r#"{
         "version": 1,
@@ -1076,7 +1033,7 @@ mod tests {
                     { "id": "e", "kind": "periodic", "fromFilterId": "a", "toFilterId": "a", "maxGapMs": 100 } ] } ] }"#,
         );
         assert!(r.errors.iter().any(rules(IssueCode::RulesSemantic, Some("S07"))));
-        assert!(r.warnings.iter().any(rules(IssueCode::Unsupported, Some("W03"))));
+        // W03 已移除：engine ≥ 0.2.1 起 periodic 受支持，不再告警（仅 S07 校验 periodMs 必填）。
         // seq 带 periodMs
         let r = report(
             r#"{ "filters": [ { "id": "a", "pattern": "x" } ],
@@ -1123,7 +1080,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_features_warn_not_error() {
+    fn supported_features_no_warning() {
+        // engine ≥ 0.2.1：scope=thread / nodeCounts / nodeConditions / periodic
+        // 均已支持，规则应保持合法且不产生任何 W01–W05 告警。
         let r = report(
             r#"{ "filters": [ { "id": "a", "pattern": "x" }, { "id": "b", "pattern": "y" } ],
                 "groups": [ { "groupId": "g", "scope": "thread", "filterIds": ["a", "b"], "edges": [
@@ -1132,9 +1091,7 @@ mod tests {
                     "nodeConditions": { "b": "level == 'E'" } } ] }"#,
         );
         assert!(r.valid, "errors: {:?}", r.errors);
-        let codes: BTreeSet<&str> = r.warnings.iter().filter_map(|w| w.rule).collect();
-        // opt（W02）已在 engine ≥ 0.2.0 支持，不再告警；剩余 W01/W04/W05 仍触发
-        assert_eq!(codes, BTreeSet::from(["W01", "W04", "W05"]));
+        assert!(r.warnings.is_empty(), "不应有 W 码告警，实得: {:?}", r.warnings);
     }
 
     #[test]

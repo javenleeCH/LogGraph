@@ -4,13 +4,14 @@
 //! 事件源由调用方以 `filter_id -> 事件流` 的形式提供（引擎层可接 rg 直扫结果、
 //! 内存数组或瘦 SQL 查询）。
 //!
-//! 当前覆盖（global 作用域）：`seq` / `not` / `and` / `or` / `opt` 五类边。
-//! 未覆盖（调用方应回退/后续迭代）：`thread` 分桶、`periodic`、
-//! 节点循环计数、节点条件表达式——见 [`GroupSpec::is_supported`]。
+//! 当前覆盖：`seq` / `not` / `and` / `or` / `opt` 五类边；`thread` 作用域分桶；
+//! `periodic` 自环心跳断言；节点级 `nodeCounts`（EPL `A{min,max}`）与
+//! `nodeConditions`（条件表达式）。详见 [`GroupSpec::is_supported`]（现恒 `true`）。
 //! DTO 形状按契约 §2.4/§3：camelCase + `deny_unknown_fields`，
 //! `toFilterId` 对 and/or 边不提供（S06），多目标走 `toFilterIds`。
 
 use crate::error::EngineResult;
+use crate::expr::compile_expr;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -84,11 +85,25 @@ pub struct SeqEvent {
     pub message: String,
     #[serde(default)]
     pub thread: Option<String>,
+    /// 级别（解析自行后段；缺省 None。契约 §2.4 原本不含，nodeConditions 表达式求值需要）
+    #[serde(default)]
+    pub level: Option<String>,
+    /// 来源文件（多文件场景由解析流水线赋值；单文件 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
 }
 
 impl SeqEvent {
     pub fn new(id: u32, ts: i64) -> Self {
-        SeqEvent { id, ts, raw: String::new(), message: String::new(), thread: None }
+        SeqEvent {
+            id,
+            ts,
+            raw: String::new(),
+            message: String::new(),
+            thread: None,
+            level: None,
+            source_file: None,
+        }
     }
 }
 
@@ -456,70 +471,126 @@ fn stat_mut<'a>(stats: &'a mut Vec<EdgeStat>, id: &str) -> Option<&'a mut EdgeSt
 }
 
 impl GroupSpec {
-    /// 引擎当前是否支持该 group（不支持则调用方回退）
+    /// 引擎当前是否支持该 group（不支持则调用方回退）。
+    /// engine ≥ 0.2.1 起 `thread` / `periodic` / `nodeCounts` / `nodeConditions`
+    /// 均已支持，故恒为 `true`；保留该方法供调用方统一接口。
     pub fn is_supported(&self) -> bool {
-        if self.scope == "thread" {
-            return false;
-        }
-        if self.node_conditions.as_ref().map(|m| !m.is_empty()).unwrap_or(false) {
-            return false;
-        }
-        if self.node_counts.as_ref().map(|m| !m.is_empty()).unwrap_or(false) {
-            return false;
-        }
-        for e in &self.edges {
-            // opt 已在 engine 0.2.0 支持；periodic 仍不支持 → 回退
-            if edge_kind(e) == "periodic" {
-                return false;
-            }
-        }
+        let _ = self;
         true
     }
 }
 
 /// 对单个 group 跑序列匹配。事件流由 [`EventStore`] 提供（纯算法，不接触存储层）。
-pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<SeqResult> {
-    // 借用切片表：group 成员 filter + 边引用的 filter 全部入表，匹配全程按引用推进。
-    // 旧实现给每个头事件 to_vec() 克隆全部事件流（26 万头事件 × 33 万元素
-    // ≈ 千亿次拷贝），大数据集上直接挂死。
-    let mut lane_ids: HashSet<String> = spec.filter_ids.iter().cloned().collect();
-    for e in &spec.edges {
-        lane_ids.insert(e.from_filter_id.clone());
-        for t in targets_of(e) {
-            lane_ids.insert(t);
-        }
+/// 按 thread 分桶构造单桶事件表（orig，未应用 nodeConditions）。
+/// `thread=None` 表示全局（不过滤，含所有事件）；`Some("∅")` 取 thread 为 None 的事件；
+/// 其余精确匹配 `event.thread`。
+fn bucket_store<'a>(
+    slices: &EventSlices<'a>,
+    lane_ids: &HashSet<String>,
+    thread: Option<&str>,
+) -> HashMap<String, Vec<SeqEvent>> {
+    let mut m = HashMap::new();
+    for fid in lane_ids {
+        let evs = slices.get(fid.as_str()).copied().unwrap_or(&[]);
+        let filtered: Vec<SeqEvent> = match thread {
+            None => evs.to_vec(),
+            Some(t) if t == "\u{2205}" => evs
+                .iter()
+                .filter(|e| e.thread.is_none())
+                .cloned()
+                .collect(),
+            Some(t) => evs
+                .iter()
+                .filter(|e| e.thread.as_deref() == Some(t))
+                .cloned()
+                .collect(),
+        };
+        m.insert(fid.clone(), filtered);
     }
-    let slices: EventSlices<'_> = lane_ids
-        .iter()
-        .map(|fid| {
-            (
-                fid.as_str(),
-                store.get(fid).map(|v| v.as_slice()).unwrap_or(&[]),
-            )
-        })
-        .collect();
+    m
+}
+
+/// periodic 自环断言：间隔三态（正常段 / 缺口 / 抖动）。
+/// P = period_ms ?? max_gap_ms，容差 δ = max_gap_ms；间隔 ∈ [P−δ, P+δ] 为正常段。
+fn assert_heartbeat(edge: &EdgeSpec, events: &[SeqEvent], thread: Option<String>) -> Heartbeat {
+    let p = edge.period_ms.unwrap_or(edge.max_gap_ms);
+    let delta = edge.max_gap_ms;
+    let mut g = Heartbeat {
+        filter_id: edge.from_filter_id.clone(),
+        thread,
+        segments: Vec::new(),
+        gaps: Vec::new(),
+        jitters: Vec::new(),
+    };
+    if events.is_empty() {
+        return g;
+    }
+    let mut seg_start = events[0].ts;
+    let mut prev = events[0].clone();
+    for i in 1..events.len() {
+        let ev = &events[i];
+        let interval = ev.ts - prev.ts;
+        if interval > p + delta {
+            g.segments.push(Seg { start_ts: seg_start, end_ts: prev.ts });
+            g.gaps.push(Gap { after_ts: prev.ts, expected_ts: prev.ts + p });
+            seg_start = ev.ts;
+        } else if interval < p - delta {
+            g.jitters.push(Jitter { ts: ev.ts, interval });
+        }
+        prev = ev.clone();
+    }
+    g.segments.push(Seg { start_ts: seg_start, end_ts: prev.ts });
+    g
+}
+
+/// 单桶（一个 thread 或全局）内跑链匹配 + NOT 断言 + periodic 心跳。
+/// 结果就地累加到传入的 consumed / edge_stats / violations / chains / heartbeats。
+/// 对齐前端 `SequenceMatcher.matchBucket`：thread 分桶隔离、nodeConditions 二次过滤、
+/// nodeCounts 连续计数、periodic 独立断言。
+fn match_bucket(
+    spec: &GroupSpec,
+    bucket: &HashMap<String, Vec<SeqEvent>>,
+    thread: Option<String>,
+    consumed: &mut HashSet<u32>,
+    edge_stats: &mut Vec<EdgeStat>,
+    violations: &mut Vec<NotViolation>,
+    chains: &mut Vec<MatchedChain>,
+    heartbeats: &mut Vec<Heartbeat>,
+) {
+    // nodeConditions 过滤后的事件切片（仅用于链匹配 / NOT；uncovered / periodic 用原始 bucket）
+    let mut filtered: HashMap<String, Vec<SeqEvent>> = HashMap::new();
+    for (fid, evs) in bucket {
+        let cond_src = spec.node_conditions.as_ref().and_then(|m| m.get(fid));
+        let slice = match cond_src {
+            Some(c) if !c.trim().is_empty() => match compile_expr(c) {
+                Some(pred) => evs.iter().filter(|e| pred(e)).cloned().collect(),
+                None => evs.clone(),
+            },
+            _ => evs.clone(),
+        };
+        filtered.insert(fid.clone(), slice);
+    }
+    let slices: EventSlices<'_> = filtered.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
     let get_slice = |fid: &str| -> &[SeqEvent] { slices.get(fid).copied().unwrap_or(&[]) };
 
-    let mut edge_stats: Vec<EdgeStat> = spec
-        .edges
-        .iter()
-        .map(|e| EdgeStat {
-            edge_id: e.id.clone(),
-            matched_count: 0,
-            miss_count: 0,
-            late_count: None,
-            jitter_count: None,
-        })
-        .collect();
-
-    let mut violations: Vec<NotViolation> = Vec::new();
+    // periodic 心跳断言（用原始 bucket，不受 nodeConditions 影响）
+    for edge in &spec.edges {
+        if edge_kind(edge) != "periodic" {
+            continue;
+        }
+        let mut evs = bucket.get(&edge.from_filter_id).cloned().unwrap_or_default();
+        evs.sort_by_key(|e| (e.ts, e.id));
+        let hb = assert_heartbeat(edge, &evs, thread.clone());
+        if let Some(st) = stat_mut(edge_stats, &edge.id) {
+            st.late_count = Some(st.late_count.unwrap_or(0) + hb.gaps.len() as u32);
+            st.jitter_count = Some(st.jitter_count.unwrap_or(0) + hb.jitters.len() as u32);
+        }
+        heartbeats.push(hb);
+    }
 
     // NOT 边：纯断言（不消耗事件）
     for edge in &spec.edges {
         if edge_kind(edge) != "not" {
-            continue;
-        }
-        if edge.to_filter_id.is_none() {
             continue;
         }
         let from_events = get_slice(&edge.from_filter_id);
@@ -532,7 +603,7 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
                     from_event: fe.clone(),
                     to_event: tgt,
                 });
-                if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
+                if let Some(st) = stat_mut(edge_stats, &edge.id) {
                     st.miss_count += 1;
                 }
             }
@@ -541,15 +612,11 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
 
     // 推进链匹配
     let resolved = resolve_chains(&spec.edges);
-    let mut consumed: HashSet<u32> = HashSet::new();
-    let mut chains: Vec<MatchedChain> = Vec::new();
-    let mut chain_index = 0u32;
-
     for chain in &resolved {
         let head_fid = &chain[0].from_filter_id;
         let head_events = get_slice(head_fid);
         if head_events.is_empty() {
-            if let Some(st) = stat_mut(&mut edge_stats, &chain[0].id) {
+            if let Some(st) = stat_mut(edge_stats, &chain[0].id) {
                 st.miss_count += 1;
             }
             continue;
@@ -569,16 +636,15 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
                 let kind = edge_kind(edge);
                 let from_events = get_slice(&edge.from_filter_id);
 
-                // opt 边：复用 seq 推进；命中则消耗推进，否则跳过（cur 不动，不断链）。
-                // 与前端 SequenceMatcher 的 opt 语义对齐（P0① 引擎下沉第一步）。
+                // opt 边：复用 seq 推进；命中则消耗推进，否则跳过（cur 不动，不断链）
                 if kind == "opt" {
                     let seq_edge = EdgeSpec {
                         kind: Some("seq".into()),
                         ..edge.clone()
                     };
-                    match advance_edge(&seq_edge, from_events, &slices, &consumed, &cur) {
+                    match advance_edge(&seq_edge, from_events, &slices, consumed, &cur) {
                         Advance::Ok(moved_to) => {
-                            if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
+                            if let Some(st) = stat_mut(edge_stats, &edge.id) {
                                 st.matched_count += 1;
                             }
                             if let Some((mt, mt_target)) = moved_to {
@@ -592,8 +658,7 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
                             }
                         }
                         Advance::Break => {
-                            // 目标缺失/超窗/插队：opt 容错，跳过此边，cur 不动（不计断裂）
-                            if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
+                            if let Some(st) = stat_mut(edge_stats, &edge.id) {
                                 st.miss_count += 1;
                             }
                         }
@@ -602,10 +667,10 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
                     continue;
                 }
 
-                let r = advance_edge(edge, from_events, &slices, &consumed, &cur);
+                let r = advance_edge(edge, from_events, &slices, consumed, &cur);
                 match r {
                     Advance::Break => {
-                        if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
+                        if let Some(st) = stat_mut(edge_stats, &edge.id) {
                             st.miss_count += 1;
                         }
                         ok = false;
@@ -617,21 +682,21 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
                             from_event: cur.clone(),
                             to_event: tgt,
                         });
-                        if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
+                        if let Some(st) = stat_mut(edge_stats, &edge.id) {
                             st.miss_count += 1;
                         }
                         ok = false;
                         break;
                     }
                     Advance::Ok(moved_to) => {
-                        if let Some(st) = stat_mut(&mut edge_stats, &edge.id) {
+                        if let Some(st) = stat_mut(edge_stats, &edge.id) {
                             st.matched_count += 1;
                         }
                         if let Some((mt, mt_target)) = moved_to {
                             if kind == "and" {
                                 for t in targets_of(edge) {
                                     let evs = get_slice(&t);
-                                    let i = next_unused_idx(evs, &consumed, &cur);
+                                    let i = next_unused_idx(evs, consumed, &cur);
                                     if i < evs.len() && evs[i].ts <= cur.ts + edge.max_gap_ms {
                                         steps.push(Step {
                                             edge_id: Some(edge.id.clone()),
@@ -642,16 +707,57 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
                                 }
                                 cur = mt;
                             } else {
-                                // 目标 lane 由最早就绪判定直接给出（旧实现对全部
-                                // 目标流线性 contains 扫描，26 万头事件 × 7 万目标
-                                // = 另一笔十亿次级开销）
                                 let t_fid = mt_target.unwrap_or_else(|| anchor_of(edge));
                                 steps.push(Step {
                                     edge_id: Some(edge.id.clone()),
-                                    filter_id: t_fid,
+                                    filter_id: t_fid.clone(),
                                     event: mt.clone(),
                                 });
                                 cur = mt;
+                                // nodeCounts：目标节点需连续出现 min..max 次（EPL A{min,max}）
+                                let nc = spec.node_counts.as_ref().and_then(|m| m.get(&t_fid));
+                                if let Some(nc) = nc {
+                                    let min = nc.min.unwrap_or(1);
+                                    if min > 1 {
+                                        let evs = get_slice(&t_fid);
+                                        let mut collected: Vec<SeqEvent> = Vec::new();
+                                        let mut last_ev = cur.clone();
+                                        let max_extra = nc.max.map(|m| (m - 1) as usize);
+                                        for ev in evs {
+                                            if !ev_before(&last_ev, ev) {
+                                                continue;
+                                            }
+                                            if ev.ts - last_ev.ts > edge.max_gap_ms {
+                                                break;
+                                            }
+                                            if consumed.contains(&ev.id) || ev.id == cur.id {
+                                                continue;
+                                            }
+                                            collected.push(ev.clone());
+                                            last_ev = ev.clone();
+                                            if let Some(me) = max_extra {
+                                                if collected.len() >= me {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if (collected.len() as i64) + 1 < min {
+                                            if let Some(st) = stat_mut(edge_stats, &edge.id) {
+                                                st.miss_count += 1;
+                                            }
+                                            ok = false;
+                                            break;
+                                        }
+                                        for ev in &collected {
+                                            steps.push(Step {
+                                                edge_id: Some(edge.id.clone()),
+                                                filter_id: t_fid.clone(),
+                                                event: ev.clone(),
+                                            });
+                                        }
+                                        cur = collected.last().cloned().unwrap_or(cur.clone());
+                                    }
+                                }
                             }
                         }
                     }
@@ -660,25 +766,99 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
             if !ok {
                 continue;
             }
-            chain_index += 1;
             for s in &steps {
                 consumed.insert(s.event.id);
             }
             let start_ts = steps[0].event.ts;
             let end_ts = steps.last().unwrap().event.ts;
             chains.push(MatchedChain {
-                chain_index,
+                chain_index: 0,
                 steps,
                 start_ts,
                 end_ts,
-                thread: None,
+                thread: thread.clone(),
             });
         }
     }
+}
 
+/// 对单个 group 跑序列匹配。事件流由 [`EventStore`] 提供（纯算法，不接触存储层）。
+pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<SeqResult> {
+    // 借用切片表：group 成员 filter + 边引用的 filter 全部入表，匹配全程按引用推进。
+    let mut lane_ids: HashSet<String> = spec.filter_ids.iter().cloned().collect();
+    for e in &spec.edges {
+        lane_ids.insert(e.from_filter_id.clone());
+        for t in targets_of(e) {
+            lane_ids.insert(t);
+        }
+    }
+    let slices: EventSlices<'_> = lane_ids
+        .iter()
+        .map(|fid| (fid.as_str(), store.get(fid).map(|v| v.as_slice()).unwrap_or(&[])))
+        .collect();
+    let get_orig = |fid: &str| -> &[SeqEvent] { slices.get(fid).copied().unwrap_or(&[]) };
+
+    let mut edge_stats: Vec<EdgeStat> = spec
+        .edges
+        .iter()
+        .map(|e| EdgeStat {
+            edge_id: e.id.clone(),
+            matched_count: 0,
+            miss_count: 0,
+            late_count: None,
+            jitter_count: None,
+        })
+        .collect();
+
+    let mut violations: Vec<NotViolation> = Vec::new();
+    let mut consumed: HashSet<u32> = HashSet::new();
+    let mut chains: Vec<MatchedChain> = Vec::new();
+    let mut heartbeats: Vec<Heartbeat> = Vec::new();
+
+    if spec.scope == "thread" {
+        // 收集所有 thread 桶（null → "∅"），每桶独立匹配（对齐前端 scope:thread 语义）
+        let mut buckets: HashSet<String> = HashSet::new();
+        for fid in &lane_ids {
+            for ev in get_orig(fid) {
+                buckets.insert(ev.thread.clone().unwrap_or_else(|| "\u{2205}".to_string()));
+            }
+        }
+        for key in &buckets {
+            let thread = if key.as_str() == "\u{2205}" {
+                None
+            } else {
+                Some(key.as_str())
+            };
+            let bucket = bucket_store(&slices, &lane_ids, thread);
+            match_bucket(
+                spec,
+                &bucket,
+                thread.map(|t| t.to_string()),
+                &mut consumed,
+                &mut edge_stats,
+                &mut violations,
+                &mut chains,
+                &mut heartbeats,
+            );
+        }
+    } else {
+        let bucket = bucket_store(&slices, &lane_ids, None);
+        match_bucket(
+            spec,
+            &bucket,
+            None,
+            &mut consumed,
+            &mut edge_stats,
+            &mut violations,
+            &mut chains,
+            &mut heartbeats,
+        );
+    }
+
+    // 未覆盖事件（用原始全局事件；nodeConditions 过滤掉的事件仍计入 uncovered，与前端一致）
     let mut uncovered: Vec<SeqEvent> = Vec::new();
     for fid in &spec.filter_ids {
-        for ev in get_slice(fid) {
+        for ev in get_orig(fid) {
             if !consumed.contains(&ev.id) {
                 uncovered.push(ev.clone());
             }
@@ -686,6 +866,7 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
     }
     uncovered.sort_by_key(|e| (e.ts, e.id));
 
+    // 链按 startTs 排序重编 chainIndex（1-based）
     chains.sort_by_key(|c| (c.start_ts, c.end_ts, c.steps[0].event.id));
     for (i, c) in chains.iter_mut().enumerate() {
         c.chain_index = (i as u32) + 1;
@@ -699,7 +880,7 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
         uncovered_events: uncovered,
         edge_stats,
         not_violations: violations,
-        heartbeats: Vec::new(),
+        heartbeats,
         total_chains,
         total_uncovered,
         covered_marks: BTreeMap::new(),
@@ -898,7 +1079,8 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_scope_falls_back() {
+    fn thread_scope_is_supported() {
+        // engine ≥ 0.2.1：scope=thread 已支持（分桶隔离匹配），不再回退。
         let spec = GroupSpec {
             group_id: "g4".into(),
             filter_ids: vec!["A".into()],
@@ -909,7 +1091,7 @@ mod tests {
             node_counts: None,
             max_chains: None,
         };
-        assert!(!spec.is_supported());
+        assert!(spec.is_supported());
     }
 
     #[test]
@@ -1122,5 +1304,185 @@ mod tests {
         let ids: Vec<u32> = r.chains[0].steps.iter().map(|st| st.event.id).collect();
         assert_eq!(ids, vec![1, 2, 3]);
         assert_eq!(r.edge_stats[0].matched_count, 1);
+    }
+
+    // 构造带 thread/level/message 的事件（nodeConditions / thread 分桶测试需要）
+    fn ev(id: u32, ts: i64, thread: Option<&str>, level: Option<&str>, msg: &str) -> SeqEvent {
+        SeqEvent {
+            id,
+            ts,
+            raw: String::new(),
+            message: msg.to_string(),
+            thread: thread.map(|s| s.to_string()),
+            level: level.map(|s| s.to_string()),
+            source_file: None,
+        }
+    }
+
+    fn store_full(pairs: &[(&str, &[SeqEvent])]) -> EventStore<'static> {
+        pairs.iter().map(|(fid, evs)| (fid.to_string(), evs.to_vec())).collect()
+    }
+
+    #[test]
+    fn thread_scope_matches_within_each_thread() {
+        // 同一 thread 内 A(100)→B(150) 成链；另一 thread 的 A(200) 无配对 B → 不成链
+        let s = store_full(&[
+            (
+                "A",
+                &[ev(1, 100, Some("t1"), None, ""), ev(2, 200, Some("t2"), None, "")],
+            ),
+            ("B", &[ev(3, 150, Some("t1"), None, "")]),
+        ]);
+        let spec = GroupSpec {
+            group_id: "gt".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "thread".into(),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = run_sequences(&[spec], &s);
+        assert!(!r.fallback, "scope=thread 应受支持，不应 fallback");
+        let res = r.results.get("gt").unwrap();
+        assert_eq!(res.chains.len(), 1, "仅 t1 桶内成链");
+        assert_eq!(res.chains[0].thread.as_deref(), Some("t1"));
+        assert_eq!(res.chains[0].steps[0].event.id, 1);
+        assert_eq!(res.chains[0].steps[1].event.id, 3);
+    }
+
+    #[test]
+    fn periodic_heartbeat_reports_gap() {
+        // A 在 ts=0,1000,2000,3500 心跳；period=1000，容差 delta=200。
+        // 2000→3500 间隔 1500 > p+delta(1200) → 一个缺口；无抖动。
+        let s = store_full(&[(
+            "A",
+            &[
+                ev(1, 0, None, None, ""),
+                ev(2, 1000, None, None, ""),
+                ev(3, 2000, None, None, ""),
+                ev(4, 3500, None, None, ""),
+            ],
+        )]);
+        let periodic = EdgeSpec {
+            id: "eP".into(),
+            from_filter_id: "A".into(),
+            to_filter_id: Some("A".into()),
+            to_filter_ids: None,
+            kind: Some("periodic".into()),
+            max_gap_ms: 200,
+            period_ms: Some(1000),
+        };
+        let spec = GroupSpec {
+            group_id: "gp".into(),
+            filter_ids: vec!["A".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![periodic],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.heartbeats.len(), 1);
+        let hb = &r.heartbeats[0];
+        assert_eq!(hb.gaps.len(), 1, "2000→3500 应报一个缺口");
+        assert_eq!(r.edge_stats[0].late_count, Some(1));
+        assert_eq!(hb.jitters.len(), 0);
+    }
+
+    #[test]
+    fn node_counts_min_requires_consecutive() {
+        // A→B(seq)，B 需连续出现 min=3 次（含命中那次）。
+        let s = store_full(&[
+            ("A", &[ev(1, 100, None, None, "")]),
+            (
+                "B",
+                &[
+                    ev(2, 200, None, None, ""),
+                    ev(3, 250, None, None, ""),
+                    ev(4, 300, None, None, ""),
+                ],
+            ),
+        ]);
+        let mut nc = HashMap::new();
+        nc.insert("B".to_string(), NodeCountSpec { min: Some(3), max: None });
+        let spec = GroupSpec {
+            group_id: "gn".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: Some(nc),
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.chains.len(), 1, "B 连续 3 次应成链");
+        let b_steps: Vec<u32> = r
+            .chains[0]
+            .steps
+            .iter()
+            .filter(|st| st.filter_id == "B")
+            .map(|st| st.event.id)
+            .collect();
+        assert_eq!(b_steps, vec![2, 3, 4], "B 应连续出现 3 次");
+    }
+
+    #[test]
+    fn node_counts_below_min_no_chain() {
+        // B 仅 2 次 < min 3 → 不成链。
+        let s = store_full(&[
+            ("A", &[ev(1, 100, None, None, "")]),
+            ("B", &[ev(2, 200, None, None, ""), ev(3, 250, None, None, "")]),
+        ]);
+        let mut nc = HashMap::new();
+        nc.insert("B".to_string(), NodeCountSpec { min: Some(3), max: None });
+        let spec = GroupSpec {
+            group_id: "gn2".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: Some(nc),
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.chains.len(), 0, "B 仅 2 次 < min 3，不成链");
+        assert!(r.edge_stats[0].miss_count >= 1);
+    }
+
+    #[test]
+    fn node_conditions_filters_target_node() {
+        // nodeConditions: B 需 level=='E'。B@150(E) 参与；B@160(W) 被条件过滤 → 计入未覆盖。
+        let s = store_full(&[
+            ("A", &[ev(1, 100, None, None, "")]),
+            (
+                "B",
+                &[ev(2, 150, None, Some("E"), ""), ev(3, 160, None, Some("W"), "")],
+            ),
+        ]);
+        let mut nc = HashMap::new();
+        nc.insert("B".to_string(), "level == 'E'".to_string());
+        let spec = GroupSpec {
+            group_id: "gc".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "global".into(),
+            edges: vec![seq_edge()],
+            node_conditions: Some(nc),
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = match_group(&spec, &s).unwrap();
+        assert_eq!(r.chains.len(), 1);
+        assert_eq!(r.chains[0].steps[1].event.id, 2, "仅 B@(level=E) 参与链");
+        assert_eq!(
+            r.uncovered_events.iter().filter(|e| e.id == 3).count(),
+            1,
+            "B@(level=W) 被条件过滤且计入未覆盖"
+        );
     }
 }

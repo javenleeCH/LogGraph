@@ -8,11 +8,12 @@
  * 两种格式（映射关系见 `plans/engine-cli-api-contract.md` §3.12）：
  * 1. `.loggraph.json`——完整规则集（含颜色 / 折叠 / 画布坐标），GUI 之间互导、
  *    备份、分享；与工作区 `filters.json` 同构，能直接喂给 applyPersistedFilters。
- * 2. `.cep.json`——CLI / CI 直接消费的规则。GUI 能配但引擎 v1 跑不了的四种
- *    特性（`scope:thread`/W01、`nodeCounts`/W04、`nodeConditions`/W05、
- *    `opt`/W02、`periodic`/W03）在导出时**逐条列出警告**。契约本就要求这么做，
- *    而这也是「规则资产化」能不能成立的前提：静默降级会让用户在 CI 里以为
- *    规则在跑，其实它早就被 fallback 掉了。
+ * 2. `.cep.json`——CLI / CI 直接消费的规则。早期引擎 v1 跑不了的四种特性
+ *    （`scope:thread`/W01、`nodeCounts`/W04、`nodeConditions`/W05、`opt`/W02、
+ *    `periodic`/W03）曾在导出时逐条列出警告 —— 这是「规则资产化」的前提：
+ *    静默降级会让用户在 CI 里以为规则在跑，其实它早就被 fallback 掉了。
+ *    **engine ≥ 0.2.1 起这五种特性全部支持**（见契约 §3.5/§3.6），
+ *    故此处不再告警，只保留真正与引擎语义有别的提示（如 message 作用域）。
  *
  * 本模块纯文本进出，不碰 IO / store，便于单测。
  */
@@ -115,37 +116,17 @@ export function buildCepJson(
   for (const g of groups) {
     const seq = g.sequence;
     if (!seq) continue;
-    if (seq.scope === 'thread') {
-      warnings.push(`分组「${g.label}」：按线程作用域（W01）v1 引擎不支持，导出后按全局匹配`);
-    }
     const counts = seq.nodeCounts ?? {};
     const countKeys = Object.keys(counts).filter((k) => {
       const c = counts[k];
       return (c.min ?? 1) > 1 || (c.max ?? Infinity) < Infinity;
     });
-    if (countKeys.length > 0) {
-      warnings.push(`分组「${g.label}」：节点循环计数（W04）v1 引擎不生效 —— ${countKeys.map((k) => {
-        const c = counts[k];
-        const min = c.min ?? 1;
-        const max = c.max ?? Infinity;
-        return `${max === Infinity ? `${min}+` : `${min}..${max}`} 次`;
-      }).join('、')}`);
-    }
     const condKeys = Object.keys(seq.nodeConditions ?? {}).filter(
       (k) => (seq.nodeConditions![k] ?? '').trim().length > 0,
     );
-    if (condKeys.length > 0) {
-      warnings.push(`分组「${g.label}」：节点条件表达式（W05）v1 引擎不生效`);
-    }
     const edges = seq.edges ?? [];
-    const optEdges = edges.filter((e) => (e.kind ?? 'seq') === 'opt');
-    const perEdges = edges.filter((e) => (e.kind ?? 'seq') === 'periodic');
-    if (optEdges.length > 0) {
-      warnings.push(`分组「${g.label}」：可选边 opt（W02）v1 引擎不支持`);
-    }
-    if (perEdges.length > 0) {
-      warnings.push(`分组「${g.label}」：心跳边 periodic（W03）v1 引擎不支持`);
-    }
+    // 注：scope:thread / nodeCounts / nodeConditions / opt / periodic 均已由
+    // engine ≥ 0.2.1 支持，导出不再告警降级（仅旧 v1 引擎需要提示）。
 
     const group: Record<string, unknown> = {
       groupId: sanitizeRuleId(g.id, 'g'),
@@ -287,9 +268,10 @@ export function parseRuleFile(text: string): ParsedRules {
       })
       .filter((e) => !!e.fromFilterId && !!e.toFilterId);
     const seq: Record<string, unknown> = { edges, anomalyEnabled: false };
+    // 注：scope:thread / nodeCounts / nodeConditions 均已由 engine ≥ 0.2.1
+    // 支持，导入不再告警降级（仅旧 v1 引擎需要提示）。
     if (g?.scope === 'thread') {
       seq.scope = 'thread';
-      warnings.push(`分组「${g?.label ?? g?.groupId}」：按线程作用域（W01）在 UI 里可用，但导出到 CLI 会 fallback`);
     }
     if (g?.nodeCounts && Object.keys(g.nodeCounts).length) {
       const nc: Record<string, { min: number; max: number }> = {};
@@ -300,11 +282,9 @@ export function parseRuleFile(text: string): ParsedRules {
         };
       }
       seq.nodeCounts = nc;
-      warnings.push(`分组「${g?.label ?? g?.groupId}」：节点循环计数（W04）在 UI 里可用，但导出到 CLI 会 fallback`);
     }
     if (g?.nodeConditions && Object.keys(g.nodeConditions).length) {
       seq.nodeConditions = g.nodeConditions;
-      warnings.push(`分组「${g?.label ?? g?.groupId}」：节点条件表达式（W05）在 UI 里可用，但导出到 CLI 会 fallback`);
     }
     return {
       id: typeof g?.groupId === 'string' && g.groupId ? sanitizeRuleId(g.groupId, 'g') : `g_cep_${i}`,

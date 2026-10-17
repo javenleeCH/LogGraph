@@ -15,6 +15,7 @@
 
 pub mod cep;
 pub mod error;
+pub mod expr;
 pub mod parser;
 pub mod pipeline;
 pub mod rules;
