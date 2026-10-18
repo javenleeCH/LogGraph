@@ -13,6 +13,7 @@ pub fn run() {
         // 详见 plans/rust-parser-design.md）
         .invoke_handler(tauri::generate_handler![
             parser::parse_log,
+            parser::parse_log_incremental,
             parser::parse_dir,
             parser::dir_lines_chunk,
             parser::dir_events_chunk,

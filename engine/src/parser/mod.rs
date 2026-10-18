@@ -129,6 +129,23 @@ pub fn parse_text_full(text: &str, forced: Option<&TsFormat>) -> ParseResult {
     }
 }
 
+/// 增量解析辅助：在 `[from_byte, end)` 的字节切片 `buf` 中定位「完整新行段」的
+/// 消费长度。
+///
+/// 调用方保证 `from_byte` 总是位于某个已消费 `\n` **之后**，因此 `buf[0]` 必是一条
+/// 新行的起点（不存在行首残段）。唯一可能不完整的是 **buf 尾部**正在写入、尚未落
+/// 换行符的那一行。
+///
+/// 返回 `Some(end)`：`end` 为最后一个 `\n` 的位置 +1（含该换行），`buf[..end]` 即本次
+/// 可安全解析的完整行段；其后的残行留给下次轮询。`None` 表示区间内没有任何完整新行
+/// （只有未换行的残行），调用方不前进偏移，等换行符落盘后下个轮询再读。
+///
+/// 纯函数、无 IO，便于单元自测；文件读字节与偏移运算在 Tauri 壳层完成。
+pub fn find_complete_segment(buf: &[u8]) -> Option<usize> {
+    let last_nl = buf.iter().rposition(|&b| b == b'\n')?;
+    Some(last_nl + 1)
+}
+
 /// 读文件并做 lossy UTF-8 解码（非法字节 → U+FFFD，与浏览器 TextDecoder 默认行为一致）。
 pub fn read_file_lossy(path: &Path) -> Result<String, std::io::Error> {
     let bytes = std::fs::read(path)?;
@@ -442,6 +459,38 @@ mod tests {
         // 100 填充行（无时间戳）+ 尾部换行产生的 1 个空行 → skipped = 101
         assert_eq!(r.total_lines, 102);
         assert_eq!(r.skipped, 101);
+    }
+
+    #[test]
+    fn find_complete_segment_boundaries() {
+        // buf 起点必为行首（调用方保证 from_byte 在已消费 \n 之后）：
+        // A/B 完整，C 为写入中残行 → 只消费到最后一个 \n，取 "A\nB\n"
+        let buf = b"A\nB\nC";
+        assert_eq!(find_complete_segment(buf), Some(4));
+        assert_eq!(&buf[..4], b"A\nB\n");
+
+        // 尾换行：单行 A 带换行 → 取 "A\n"
+        let buf2 = b"A\n";
+        assert_eq!(find_complete_segment(buf2), Some(2));
+        assert_eq!(&buf2[..2], b"A\n");
+
+        // 仅残行（无尾部换行）→ 完整新行尚未落盘 → None（不前进偏移，下次重试）
+        let buf3 = b"A";
+        assert_eq!(find_complete_segment(buf3), None);
+
+        // 完全无换行 → None
+        let buf4 = b"no newline at all";
+        assert_eq!(find_complete_segment(buf4), None);
+
+        // 整段即完整 → 取全部
+        let buf5 = b"A\nB\n";
+        assert_eq!(find_complete_segment(buf5), Some(4));
+        assert_eq!(&buf5[..4], b"A\nB\n");
+
+        // CRLF：\r\n 中换行符是 \n，段边界落在 \n 后（\r 留在段内，split_lines 会剥）
+        let buf6 = b"A\r\nB";
+        assert_eq!(find_complete_segment(buf6), Some(3));
+        assert_eq!(&buf6[..3], b"A\r\n");
     }
 
     #[test]

@@ -40,6 +40,7 @@ import {
   type DbFilterQuery,
   type DbFilterHits,
 } from '../io/dbStore';
+import { mergeEventsByTs } from './eventMerge';
 
 let corrRaf = 0;
 
@@ -175,6 +176,18 @@ interface SessionFile {
   /** Tauri 绝对路径（右键「打开所在目录/加载目录」用；浏览器拖入为 null） */
   path: string | null;
   enabled: boolean;
+}
+
+/** 实时 tail 状态（C 阶段一：单文件实时跟随，仅桌面 standalone 模式） */
+export interface TailState {
+  /** 跟随的文件绝对路径 */
+  path: string;
+  /** 已消费到的字节偏移（下次从该处续读） */
+  offset: number;
+  /** 是否正在轮询 */
+  enabled: boolean;
+  /** 本次跟随累计新增事件数（UI 显示「N 新行」） */
+  newCount: number;
 }
 
 // ---- 工作区持久化（目录即工作区，<日志目录>/.logGraph/filters.json） ----
@@ -425,6 +438,20 @@ interface LogState {
    *  重新勾选恢复（时间窗尽量保持，CEP 结果同步重算） */
   toggleSessionFile: (name: string) => void;
 
+  // --- 实时 tail（C 阶段一） ---
+  /** 跟随配置；null=当前会话不支持/未启用实时跟随（多文件 / dbMode / 无路径） */
+  tail: TailState | null;
+  /** 开启/关闭跟随轮询（tail 存在时切换 enabled） */
+  setTailEnabled: (on: boolean) => void;
+  /** 增量追加 tail 解析结果（重基 id + 稳定合并进全局 events + 重算） */
+  appendTailEvents: (
+    events: LogEvent[],
+    rawLines: string[],
+    newOffset: number,
+    skipped: number,
+    fileSize: number,
+  ) => void;
+
   // --- 主区域布局 ---
   /** 时间线/详情 横竖排列：vertical=上下，horizontal=左右 */
   splitOrientation: 'vertical' | 'horizontal';
@@ -439,6 +466,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   sessionFiles: [],
   sessionDirPath: null,
   sessionEvents: [],
+  tail: null,
 
   filters: [],
   matches: [],
@@ -564,6 +592,7 @@ export const useLogStore = create<LogState>((set, get) => ({
         hoveredEventId: null,
         scrubberTs: null,
         correlatedEventIds: new Set(),
+        tail: null,
       });
       return;
     }
@@ -580,6 +609,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       hoveredEventId: null,
       scrubberTs: null,
       correlatedEventIds: new Set(),
+      tail: null,
     });
     get().recomputeMatches();
   },
@@ -606,6 +636,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       hoveredEventId: null,
       scrubberTs: null,
       correlatedEventIds: new Set(),
+      tail: null,
     });
     get().recomputeMatches();
   },
@@ -627,6 +658,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       hoveredEventId: null,
       scrubberTs: null,
       correlatedEventIds: new Set(),
+      tail: null,
     });
   },
 
@@ -1660,6 +1692,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       sessionFiles: [],
       sessionDirPath: null,
       sessionEvents: [],
+      tail: null,
     });
   },
 
@@ -1705,7 +1738,7 @@ export const useLogStore = create<LogState>((set, get) => ({
           timestampFormatId: meta?.timestampFormatId ?? result.timestampFormatId,
         },
       );
-      set({ sessionFiles: nextFiles, sessionEvents: mergedEvents });
+      set({ sessionFiles: nextFiles, sessionEvents: mergedEvents, tail: null });
       return 'appended';
     }
     // 新开独立会话：清上一会话配置后载入（事件直接标记 sourceFile，
@@ -1723,6 +1756,10 @@ export const useLogStore = create<LogState>((set, get) => ({
       sessionFiles: [{ name: loaded.name, size: loaded.size, path: loaded.path ?? null, enabled: true }],
       sessionDirPath: dirPath,
       sessionEvents: events,
+      // 单文件 standalone：配置实时跟随（默认关闭，由工具栏开关启用）
+      tail: loaded.path
+        ? { path: loaded.path, offset: loaded.size, enabled: false, newCount: 0 }
+        : null,
     });
     return 'replaced';
   },
@@ -1754,6 +1791,49 @@ export const useLogStore = create<LogState>((set, get) => ({
     set({ sessionFiles: nextFiles });
     // CEP 结果含事件集合，需同步重算（setLog 只重算过滤器匹配）
     get().recomputeSequences();
+  },
+
+  // ---- 实时 tail（C 阶段一） ----
+
+  setTailEnabled: (on) => {
+    const t = get().tail;
+    if (!t) return;
+    set({
+      tail: {
+        ...t,
+        enabled: on,
+        // 关闭时清空累计计数；重新开启从当前偏移继续（offset 不变）
+        newCount: on ? t.newCount : 0,
+      },
+    });
+  },
+
+  appendTailEvents: (events, rawLines, newOffset, skipped, fileSize) => {
+    const state = get();
+    const t = state.tail;
+    if (!t) return;
+    const oldRawLen = state.rawLines.length;
+    // 段内事件 id 是段首行号 → 重基为全局 rawLines 行号（追加位置）
+    const rebased = events.map((e) => ({ ...e, id: oldRawLen + e.id }));
+    // 全局 events 按 ts 升序；两段各自已排序 → 稳定合并（O(N)，不破坏 ts 不变式）
+    const mergedEvents = mergeEventsByTs(state.events, rebased);
+    const meta = state.meta;
+    set({
+      events: mergedEvents,
+      rawLines: [...state.rawLines, ...rawLines],
+      meta: meta
+        ? {
+            ...meta,
+            fileSize,
+            totalLines: meta.totalLines + rawLines.length,
+            skipped: meta.skipped + skipped,
+          }
+        : meta,
+      tail: { ...t, offset: newOffset, newCount: t.newCount + rebased.length },
+      // 新数据到达时若有选中事件，刷新其关联窗口（保持跟随感）
+      correlatedEventIds: state.correlatedEventIds,
+    });
+    get().recomputeMatches();
   },
 
   // ---- 日志目录 ----

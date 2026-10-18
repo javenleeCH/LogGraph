@@ -31,6 +31,8 @@ export function Toolbar() {
   const splitOrientation = useLogStore((s) => s.splitOrientation);
   const setSplitOrientation = useLogStore((s) => s.setSplitOrientation);
   const dbMode = useLogStore((s) => s.dbMode);
+  const tail = useLogStore((s) => s.tail);
+  const setTailEnabled = useLogStore((s) => s.setTailEnabled);
   const { theme, toggle } = useTheme();
   const setPaletteOpen = useCommandPalette();
 
@@ -103,6 +105,24 @@ export function Toolbar() {
 
       {/* 时间格式编辑器：内置预设识别不了时自定义（已载入才有意义） */}
       {meta && <TimestampFormatEditor />}
+
+      {/* 实时跟随（C 阶段一）：仅单文件 standalone + 桌面端可用；默认关闭 */}
+      {tail && (
+        <button
+          className={`${styles.tailBtn} ${tail.enabled ? styles.tailBtnOn : ''}`}
+          onClick={() => setTailEnabled(!tail.enabled)}
+          title={
+            tail.enabled
+              ? '实时跟随已开启：文件新增内容会自动追加。点击停止'
+              : '实时跟随：自动监控文件增长并追加新行（单文件模式）'
+          }
+        >
+          <span className={styles.tailDot} />
+          {tail.enabled
+            ? `实时跟随${tail.newCount > 0 ? ` · ${tail.newCount} 新行` : ''}`
+            : '实时跟随'}
+        </button>
+      )}
 
       <div className={styles['seg-control']} title="切换主视图模式">
         <button

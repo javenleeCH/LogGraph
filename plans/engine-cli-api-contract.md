@@ -1460,6 +1460,7 @@ Tauri 与 CLI 是同一引擎 API 的两种传输层，任何 UI 动作都可从
 | （已删 `db_files`） | `loggraph ws files <DIR>` | CLI 便利命令（内部 build_ctx）；IPC 侧由前端从 ctx.files 推导 |
 | `parse_log` | `loggraph parse file <PATH> [--format-id <ID>]` | 回 ParseResult JSON |
 | `parse_dir` | `loggraph parse dir <DIR> [--full]` | 回 DirMeta（--full 附 events+rawLines） |
+| `parse_log_incremental {path, fromByte}` | （IPC 专属，实时 tail；无 CLI 对应） | 回 `{events,rawLines,newOffset,skipped,timestampFormatId}`：从 `fromByte` 读至文件尾，**仅解析完整新行**（`find_complete_segment` 只消费到最后一个 `\n`，写入中残行留在下次）；`newOffset`=已消费字节偏移（含最后 `\n`）。段内事件 id 相对段首，前端按全局 rawLines 长度重基 |
 | `ws_reveal_path {path}` / `ws_open_path {path}` | — | 纯 OS 进程边界（explorer/open） |
 | `dir_lines_chunk` / `dir_events_chunk` / `dir_cache_drop` | `parse dir --full` | 分块传输协议（防 WebView OOM）是 IPC 专属；CLI 单进程直接全量输出 |
 

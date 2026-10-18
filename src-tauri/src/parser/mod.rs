@@ -10,7 +10,8 @@
 //! 拉取；dir_cache_drop 释放。内存峰值 ≈ Rust 缓存 + 单块 JSON，无巨型中间串。
 
 use loggraph_engine::parser::{
-    find_format, parse_dir_files, parse_text_full, read_file_lossy, DirMeta, LogEvent, ParseResult,
+    find_complete_segment, find_format, parse_dir_files, parse_text_full, read_file_lossy, DirMeta,
+    LogEvent, ParseResult,
 };
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,76 @@ pub async fn parse_log(
     })
     .await
     .map_err(|e| format!("解析任务执行失败: {e}"))?
+}
+
+// ---- 实时 tail：增量解析文件尾部（C 阶段一：单文件实时跟随） ----
+
+/// 增量解析结果（段内事件 id 相对段首，前端按全局 rawLines 长度重基）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncrementalParseResult {
+    pub events: Vec<LogEvent>,
+    pub raw_lines: Vec<String>,
+    /// 已消费到的字节偏移（含最后那个 '\n'）；调用方下次从该偏移续读
+    pub new_offset: u64,
+    pub skipped: u32,
+    pub timestamp_format_id: Option<String>,
+}
+
+/// 实时 tail：从 `from_byte` 读文件到末尾，仅解析其中**完整的新行**，
+/// 返回新事件 + 新消费偏移。半行（写入中、未换行）留给下次轮询。
+///
+/// 与 `parse_log` 同走 spawn_blocking，不阻塞 IPC。无新完整行时返回空且
+/// `new_offset == from_byte`（调用方不前进，避免重复/丢行）。
+#[tauri::command]
+pub async fn parse_log_incremental(
+    path: String,
+    from_byte: u64,
+) -> Result<IncrementalParseResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = Path::new(&path);
+        let end = std::fs::metadata(p)
+            .map_err(|e| format!("stat 失败: {e}"))?
+            .len();
+        if from_byte >= end {
+            return Ok(IncrementalParseResult {
+                events: Vec::new(),
+                raw_lines: Vec::new(),
+                new_offset: end,
+                skipped: 0,
+                timestamp_format_id: None,
+            });
+        }
+        let mut file = std::fs::File::open(p).map_err(|e| format!("打开失败: {e}"))?;
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::Start(from_byte))
+            .map_err(|e| format!("seek 失败: {e}"))?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)
+            .map_err(|e| format!("读取失败: {e}"))?;
+        match find_complete_segment(&buf) {
+            None => Ok(IncrementalParseResult {
+                events: Vec::new(),
+                raw_lines: Vec::new(),
+                new_offset: from_byte, // 仅残行：不前进，等换行落盘
+                skipped: 0,
+                timestamp_format_id: None,
+            }),
+            Some(end) => {
+                let segment = String::from_utf8_lossy(&buf[..end]);
+                let parsed = parse_text_full(&segment, None);
+                Ok(IncrementalParseResult {
+                    events: parsed.events,
+                    raw_lines: parsed.raw_lines,
+                    new_offset: from_byte + end as u64,
+                    skipped: parsed.skipped,
+                    timestamp_format_id: parsed.timestamp_format_id,
+                })
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("增量解析任务执行失败: {e}"))?
 }
 
 // ---- 目录批量解析（prepare + 分块拉取） ----

@@ -205,6 +205,41 @@ export async function parseLogPath(path: string): Promise<FullParseResult | null
   return invokeRust({ path });
 }
 
+// ---- 实时 tail：增量解析文件尾部（C 阶段一）----
+
+/** parse_log_incremental 返回的 DTO（serde camelCase） */
+export interface IncrementalParseResult {
+  events: RustLogEvent[];
+  rawLines: string[];
+  /** 已消费到的字节偏移（含最后一个 \n）；下次从该偏移续读 */
+  newOffset: number;
+  skipped: number;
+  timestampFormatId: string | null;
+}
+
+/**
+ * Tauri 专用：从 `fromByte` 增量解析文件尾部，仅返回完整新行。
+ * 返回 null 表示 Tauri 不可用 / 调用失败（tail 轮询应静默跳过本次）。
+ */
+export async function parseLogIncremental(
+  path: string,
+  fromByte: number,
+): Promise<IncrementalParseResult | null> {
+  if (!isTauri()) return null;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const r = await invoke<IncrementalParseResult>('parse_log_incremental', {
+      path,
+      fromByte,
+    });
+    if (!r || !Array.isArray(r.events) || !Array.isArray(r.rawLines)) return null;
+    return r;
+  } catch (err) {
+    console.warn('[parseBridge] parse_log_incremental 失败:', err);
+    return null;
+  }
+}
+
 // ---- 目录批量解析（P2：141 文件场景 1 次 IPC 替代 141 次）----
 
 /** Rust parse_dir 返回的 DTO（serde camelCase） */

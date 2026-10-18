@@ -26,6 +26,7 @@ import { recordOpenProject } from './io/recentProjects';
 import { setupTauriDragDrop, isTauri } from './lib/tauri';
 import { ensureRegexWasm } from './filters/regexWasm';
 import { ensureCepWasm } from './sequence/cepWasm';
+import { startTailWatcher, stopTailWatcher } from './io/tailWatcher';
 import { ParserDriftBanner } from './components/ParserDriftBanner';
 import { ToastHost, BusyIndicator } from './components/ToastHost';
 import { CommandPalette } from './components/CommandPalette';
@@ -97,6 +98,13 @@ export default function App() {
   // 不再有静默回退。
   useEffect(() => {
     void ensureCepWasm();
+  }, []);
+
+  // 启动实时 tail 轮询器（C 阶段一）：全局 1s 定时器，仅单文件 standalone 且
+  // 用户开启「实时跟随」时真正读文件；其余情况空转，开销可忽略。
+  useEffect(() => {
+    startTailWatcher();
+    return () => stopTailWatcher();
   }, []);
 
   // 横向文件树分隔拖拽
