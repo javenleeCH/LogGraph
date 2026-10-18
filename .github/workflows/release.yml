@@ -65,6 +65,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 签名密钥预检 + 规范化：放在最前面，5 秒内失败，而不是构建 12 分钟后才在签名步爆炸。
+      # 背景：GitHub Secrets 的值可以带换行/首尾空白，而 Rust 的 base64 解码对空白零容忍
+      # （报 Invalid symbol 10/32）——v0.2.4 三平台全部"构建成功、签名步失败"正是此类污染
+      # 或密码 env 未设置所致。此处统一剥离 \r\n 与首尾空白，并校验解码后首行是
+      # minisign 注释行；通过后写入 $GITHUB_ENV 供后续 tauri-action 使用。
+      - name: 预检并规范化签名密钥
+        shell: bash
+        env:
+          RAW_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          KEY="$(printf '%s' "$RAW_KEY" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          if [ -z "$KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY 为空——请到仓库 Settings → Secrets and variables → Actions，粘贴私钥文件内容（单行 base64，即 _t/loggraph-updater.key 的全部内容）。"
+            exit 1
+          fi
+          if ! printf '%s' "$KEY" | base64 -d 2>/dev/null | head -1 | grep -q '^untrusted comment:'; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY 不是合法的 minisign 私钥（base64 解码后首行应为 'untrusted comment: rsign encrypted secret key'）。常见原因：粘贴时带了换行/空格，或误粘了公钥内容。"
+            exit 1
+          fi
+          printf 'TAURI_SIGNING_PRIVATE_KEY=%s\n' "$KEY" >> "$GITHUB_ENV"
+          echo "签名密钥预检通过（已剥离首尾空白/换行，经 \$GITHUB_ENV 注入后续步骤）"
+
       - name: 安装 Linux 系统依赖（仅 ubuntu）
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -93,10 +115,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 自签更新通道：minisign 密钥对自生成，**不需要付费代码签名证书**。
-          # 私钥存于仓库 Secrets；tauri-action 用它给产物签名并生成 latest.json，
-          # 客户端用 tauri.conf.json 里的公钥校验。
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # tauri-action 用它给产物签名并生成 latest.json，客户端用 tauri.conf.json 里的公钥校验。
+          # 注意：TAURI_SIGNING_PRIVATE_KEY 不在此处设置——由上面的预检步骤剥离空白后
+          # 经 $GITHUB_ENV 注入；此处若再设会被原始 secret 覆盖，重新引入污染风险。
+          # 密码必须是"设为空字符串"而非"不设"：本密钥为空密码加密格式，env 缺失时
+          # 签名器会交互式索要密码，CI 无 TTY 直接挂起（v0.2.4 三平台全挂的另一个疑点）。
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'logGraph ${{ github.ref_name }}'
