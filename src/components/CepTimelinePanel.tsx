@@ -202,8 +202,10 @@ function buildBlocks(
       overLimit,
       rows: inRange,
       threadHint: g.sequence?.scope === 'thread' ? threadHint(r) : null,
+      // 「为何没匹配」诊断：引擎可用且有序列规则时**始终可点**（不再仅零链时出现）。
+      // 零链给完整诊断（含 overtaken hint），有链给 blocker/hint（zero=false 不报 overtaken）。
       diagnoses:
-        engineOk && totalChains === 0 && g.sequence ? explainNoMatch(g.sequence, matches, true) : null,
+        engineOk && g.sequence ? explainNoMatch(g.sequence, matches, totalChains === 0) : null,
       anomalySummary,
       anomalyTrueTotal,
     });
@@ -413,29 +415,37 @@ export function CepTimelinePanel() {
                   </span>
                 )}
               </button>
-              {b.diagnoses && b.diagnoses.length > 0 && (
+              {b.diagnoses && (
                 <button
-                  className={`${styles.whyToggle} ${whyOpen[b.groupId] ? styles.whyToggleOpen : ''}`}
-                  title="这条规则一条链都没匹配上，点开看最可能的卡点"
+                  className={`${styles.whyToggle} ${whyOpen[b.groupId] ? styles.whyToggleOpen : ''} ${b.diagnoses.length === 0 ? styles.whyToggleNeutral : ''}`}
+                  title={b.diagnoses.length > 0 ? '点开看规则为何没匹配上' : '点开运行诊断'}
                   onClick={() => setWhyOpen((p) => ({ ...p, [b.groupId]: !p[b.groupId] }))}
                 >
                   <ChevronRight size={12} />
-                  为何没匹配
+                  {b.diagnoses.length > 0 ? '为何没匹配' : '诊断规则'}
                 </button>
               )}
             </div>
-            {b.diagnoses && b.diagnoses.length > 0 && whyOpen[b.groupId] && (
-              <ul className={styles.whyList}>
-                {b.diagnoses.map((d, i) => (
-                  <li
-                    key={i}
-                    className={d.severity === 'blocker' ? styles.whyBlocker : styles.whyHint}
-                  >
-                    <span className={styles.whyText}>{d.text}</span>
-                    {d.detail && <span className={styles.whyDetail}>{d.detail}</span>}
-                  </li>
-                ))}
-              </ul>
+            {b.diagnoses && whyOpen[b.groupId] && (
+              b.diagnoses.length > 0 ? (
+                <ul className={styles.whyList}>
+                  {b.diagnoses.map((d, i) => (
+                    <li
+                      key={i}
+                      className={d.severity === 'blocker' ? styles.whyBlocker : styles.whyHint}
+                    >
+                      <span className={styles.whyText}>{d.text}</span>
+                      {d.detail && <span className={styles.whyDetail}>{d.detail}</span>}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className={styles.whyEmpty}>
+                  {b.chainCount > 0
+                    ? '规则匹配正常，未发现问题'
+                    : '未匹配出链，但未发现明显配置问题（可放宽间隔、检查作用域或时间窗）'}
+                </div>
+              )
             )}
             {b.rows.length === 0 ? (
               <div className={styles.blockEmpty}>
