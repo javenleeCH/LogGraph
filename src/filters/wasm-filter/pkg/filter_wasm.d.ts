@@ -34,6 +34,19 @@ export class Regex {
     constructor(pattern: string, case_insensitive: boolean);
 }
 
+/**
+ * 多行 filter 子条件命中聚合（与桌面引擎同源）。
+ *
+ * `pos_json` / `neg_json` 均为 JSON 字符串，形状 `[[{line, ts}, ...], ...]`：
+ * - `pos_json`：各**正向**子条件的命中集（行号升序、ts 对齐）。
+ * - `neg_json`：各**排除**子条件（`!` 前缀）的命中集。
+ *
+ * 返回 JSON 字符串 `[{line, ts}, ...]`：正向集合交集 − 排除集合并集
+ * （以最短正向集为基）。空 `pos` 返回 `[]`。解析失败按空集处理（与引擎
+ * `aggregate_sub_hits` 的「无正向锚→空」语义一致）。
+ */
+export function aggregateFilterHits(pos_json: string, neg_json: string): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -44,12 +57,14 @@ export interface InitOutput {
     readonly __wbg_regex_free: (a: number, b: number) => void;
     readonly __wbg_set_matchspan_end: (a: number, b: number) => void;
     readonly __wbg_set_matchspan_start: (a: number, b: number) => void;
+    readonly aggregateFilterHits: (a: number, b: number, c: number, d: number) => [number, number];
     readonly regex_find: (a: number, b: number, c: number) => number;
     readonly regex_isMatch: (a: number, b: number, c: number) => number;
     readonly regex_new: (a: number, b: number, c: number) => [number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }

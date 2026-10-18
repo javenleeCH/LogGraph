@@ -21,6 +21,8 @@ interface WasmRegexInstance {
 interface WasmPkgModule {
   default: (input?: unknown) => Promise<unknown>;
   Regex: new (pattern: string, caseInsensitive: boolean) => WasmRegexInstance;
+  /** 多行 filter 命中聚合（与桌面引擎同源），入参/出参均为 JSON 字符串 */
+  aggregateFilterHits?: (posJson: string, negJson: string) => string;
 }
 
 let initPromise: Promise<WasmPkgModule | null> | null = null;
@@ -100,5 +102,46 @@ export function validateWithWasm(pattern: string): string | null | undefined {
     return null;
   } catch (e) {
     return (e as Error).message;
+  }
+}
+
+/** 多行 filter 聚合的单条命中（与 filter-wasm AggHit 形状一致） */
+interface WasmAggHit {
+  line: number;
+  ts: number;
+}
+
+/**
+ * 多行 filter 命中聚合（与桌面引擎逐字节同源）。
+ * 入参为「行号升序、ts 对齐」的命中集列表；返回聚合后的命中集。
+ *
+ * 优先走 wasm（`filter-wasm::aggregate_filter_hits`，= 桌面
+ * `engine/src/filter_agg.rs` 的同一份实现），未就绪/失败时返回 `null`，
+ * 调用方（`dbStore.aggregateSubHits`）回退 JS 实现——两者算法一致，仅执行位置不同。
+ */
+export function aggregateFilterHits(
+  pos: { lines: Uint32Array; ts: Float64Array }[],
+  neg: { lines: Uint32Array; ts: Float64Array }[],
+): { lines: Uint32Array; ts: Float64Array } | null {
+  if (!module || typeof module.aggregateFilterHits !== 'function') return null;
+  const toJson = (sets: { lines: Uint32Array; ts: Float64Array }[]) =>
+    JSON.stringify(
+      sets.map((s) =>
+        Array.from(s.lines, (line, i) => ({ line, ts: s.ts[i] })),
+      ),
+    );
+  try {
+    const out: WasmAggHit[] = JSON.parse(
+      module.aggregateFilterHits(toJson(pos), toJson(neg)),
+    );
+    const lines = new Uint32Array(out.length);
+    const ts = new Float64Array(out.length);
+    out.forEach((h, i) => {
+      lines[i] = h.line;
+      ts[i] = h.ts;
+    });
+    return { lines, ts };
+  } catch {
+    return null;
   }
 }

@@ -926,10 +926,15 @@ Logback 两种主流写法、以及 nginx / syslog / Python logging 全部解析
 （引擎只有 `fid\0i` 子条目、拿不到整条命中），CEP 在 dbMode 下因此有整块能力缺口。
 引擎内聚合后，`ws_sequences` 的 `queries` 可直接提交原始跨行 pattern。
 
-**改动约束**：`splitSubConditions` / `aggregateSubHits` 在两端各有一份实现
-（引擎 `session.rs` ↔ 前端 `FilterEngine.ts`+`dbStore.ts`），
-**改任一侧都必须同步改另一侧并两端补测试**——分叉会让同一 filter 在 UI 与
-引擎算出不同命中，且表现为"某几条链莫名对不上"，极难定位。
+**改动约束（2026-10-18 起已消除双实现）**：`split_sub_conditions` 与
+`aggregate_sub_hits` 现在是**单一事实来源** `engine/src/filter_agg.rs`，
+桌面引擎（`session.rs`）与 Web（`filter-wasm` → `dbStore.ts`/`FilterEngine.ts`）
+**编译同一份**源码，Web 经 `filter-wasm::aggregate_filter_hits` 跑与桌面
+native 逐字节一致的聚合。`src/io/dbStore.ts::aggregateSubHits` / `aggregateSubHitsJs`
+仅为 wasm 未就绪时的兜底（算法一致，且 `scripts/test-wasm-filter-agg.mjs` 与
+`src/io/dbStore.test.ts` 三端锁定同一组用例）。**改 CEP/过滤聚合语义只动
+`engine/src/filter_agg.rs` 一处**，native 与 wasm 两端同时生效——
+不再需要"改任一侧同步另一侧 + 两端补测试"的人工同步。
 
 ### 3.15 自签更新通道（✅ engine ≥ 0.2.2，桌面端）
 

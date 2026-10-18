@@ -105,6 +105,37 @@ export class Regex {
     }
 }
 if (Symbol.dispose) Regex.prototype[Symbol.dispose] = Regex.prototype.free;
+
+/**
+ * 多行 filter 子条件命中聚合（与桌面引擎同源）。
+ *
+ * `pos_json` / `neg_json` 均为 JSON 字符串，形状 `[[{line, ts}, ...], ...]`：
+ * - `pos_json`：各**正向**子条件的命中集（行号升序、ts 对齐）。
+ * - `neg_json`：各**排除**子条件（`!` 前缀）的命中集。
+ *
+ * 返回 JSON 字符串 `[{line, ts}, ...]`：正向集合交集 − 排除集合并集
+ * （以最短正向集为基）。空 `pos` 返回 `[]`。解析失败按空集处理（与引擎
+ * `aggregate_sub_hits` 的「无正向锚→空」语义一致）。
+ * @param {string} pos_json
+ * @param {string} neg_json
+ * @returns {string}
+ */
+export function aggregateFilterHits(pos_json, neg_json) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(pos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(neg_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.aggregateFilterHits(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,

@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:wasm": "node scripts/test-wasm-regex.mjs",
-    "test:wasm:cep": "node scripts/test-wasm-cep.mjs"
+    "test:wasm:cep": "node scripts/test-wasm-cep.mjs",
+    "test:wasm:filter": "node scripts/test-wasm-filter-agg.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.2",

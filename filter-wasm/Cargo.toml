@@ -8,9 +8,17 @@ license = "MIT"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# 独立 crate：不进根 workspace（根 members 只含 engine/cli/src-tauri），
+# 避免与桌面构建互相干扰；wasm 构建产物经 wasm-bindgen 生成到 src/filters/wasm-filter/pkg。
+[workspace]
+
 [dependencies]
 # 标准 regex crate —— 与桌面端 engine（parser/line.rs、parser/timestamp.rs）使用的引擎完全一致。
 # 默认特性（含 unicode）与桌面 regex::Regex::new 行为对齐。
 regex = "1"
 # 必须与已安装的 wasm-bindgen-cli 版本一致（schema 校验）
 wasm-bindgen = "=0.2.129"
+# 跨行 filter 命中聚合（aggregate_filter_hits）与桌面引擎同源：
+# 经 #[path] 引入 engine/src/filter_agg.rs 的同一份 split/aggregate 实现。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

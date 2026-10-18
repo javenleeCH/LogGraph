@@ -8,6 +8,7 @@
  */
 
 import { splitSubConditions } from '../filters/FilterEngine';
+import { aggregateFilterHits, ensureRegexWasm } from '../filters/regexWasm';
 import { isTauri } from '../lib/tauri';
 import { toast } from '../store/uiStore';
 
@@ -152,10 +153,14 @@ function includesLine(arr: Uint32Array, x: number): boolean {
   return false;
 }
 
-/** 多行 filter 的子条件命中聚合：正向 sub 行集交集 − 排除 sub 行集并集。
- *  行号升序保持；ts 取基列表（最短正向 sub）的同行值——同一物理行
- *  的 ts 由 Rust line_ts_of 解析，各 sub 结果一致。 */
-function aggregateSubHits(pos: DbFilterHits[], neg: DbFilterHits[]): DbFilterHits {
+/** 多行 filter 聚合（JS 兜底）：正向 sub 行集交集 − 排除 sub 行集并集。
+ *  与桌面引擎 `engine/src/filter_agg.rs::aggregate_sub_hits` 逐字一致——仅当 wasm
+ *  未就绪/失败时使用；`aggregateFilterHits`（wasm）与桌面跑同一份 Rust 实现。 */
+function aggregateSubHitsJs(pos: DbFilterHits[], neg: DbFilterHits[]): DbFilterHits {
+  // 与引擎 aggregate_sub_hits 一致：无正向锚（全排除）直接返回空，不崩溃。
+  if (pos.length === 0) {
+    return { lines: new Uint32Array(0), ts: new Float64Array(0) };
+  }
   const sorted = [...pos].sort((a, b) => a.lines.length - b.lines.length);
   const base = sorted[0];
   const lines: number[] = [];
@@ -176,6 +181,16 @@ function aggregateSubHits(pos: DbFilterHits[], neg: DbFilterHits[]): DbFilterHit
   return { lines: new Uint32Array(lines), ts: new Float64Array(ts) };
 }
 
+/** 多行 filter 的子条件命中聚合（正向交集 − 排除并集）。
+ *  优先走 wasm（`filter-wasm::aggregate_filter_hits`，= 桌面引擎同一份实现），
+ *  未就绪/失败回退 `aggregateSubHitsJs`（算法一致）。聚合逻辑单一事实来源在
+ *  `engine/src/filter_agg.rs`，Web 与桌面不再各维护一份。 */
+export function aggregateSubHits(pos: DbFilterHits[], neg: DbFilterHits[]): DbFilterHits {
+  const wasmOut = aggregateFilterHits(pos, neg);
+  if (wasmOut) return wasmOut;
+  return aggregateSubHitsJs(pos, neg);
+}
+
 /**
  * 批量运行过滤器（单遍扫描下推：全部 filter 一次 invoke）。
  * 二进制布局（Rust encode_filter_batch）：
@@ -192,6 +207,8 @@ export async function runDbFiltersBatch(
 ): Promise<Map<string, DbFilterHits>> {
   const out = new Map<string, DbFilterHits>();
   if (queries.length === 0) return out;
+  // 顺手预热 wasm 聚合引擎（幂等；首次可能仍走 JS 兜底，后续走与桌面同源的 wasm）
+  void ensureRegexWasm();
   const expanded: DbFilterQuery[] = [];
   const multiPlans: { filterId: string; subs: { subId: string; negate: boolean }[] }[] = [];
   let allNegate = 0;

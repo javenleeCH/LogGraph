@@ -31,6 +31,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+// 多行 filter 子条件拆分 / 命中聚合的单一事实来源（与 Web 端 filter-wasm 同源）。
+use crate::filter_agg::{aggregate_sub_hits, split_sub_conditions, AggHit, SUB_ID_SEP};
+
 // ---- DTO ----
 
 /// 命中条目（line + ts）：过滤扫描内联解析写入命中缓存（ts = NO_TS 表示该行无 ts）
@@ -53,18 +56,6 @@ pub struct FilterQuery {
     pub scope: String,
 }
 
-/// 多行 filter 子条件的下推 id 分隔符（`fid\0i`）——与前端
-/// `src/io/dbStore.ts::SUB_ID_SEP` 必须**逐字节一致**：引擎命中缓存按子条件
-/// 独立存，两端同分隔符才能共享同一份缓存条目，不重复扫描；改任一侧都会
-/// 导致命中错位（表现为「多行 filter 在引擎里零命中」）。
-const SUB_ID_SEP: char = '\u{0}';
-
-/// 多行 filter 的单行子条件：negate=该行以 `!` 开头（排除语义）
-struct SubCond {
-    source: String,
-    negate: bool,
-}
-
 /// 展开计划里的单个子条件下推条目
 struct SubPlan {
     id: String,
@@ -77,11 +68,6 @@ struct MultiPlan {
     filter_id: String,
     fp: String,
     subs: Vec<SubPlan>,
-}
-
-/// 行号升序命中数组的二分包含判断（命中扫描按行号升序写入）
-fn hits_contains_line(hits: &[HitEntry], line: u32) -> bool {
-    hits.binary_search_by_key(&line, |h| h.line).is_ok()
 }
 
 /// ctx 文件表条目：行号 → 文件定位的最小描述（客户端不透明持有、原样回传）
@@ -336,30 +322,7 @@ impl Session {
             .collect()
     }
 
-    // ---- 多行 filter 子条件（与前端 dbStore.ts / FilterEngine.ts 逐字对齐）----
-
-    /// pattern → 子条件列表（端口自 `src/filters/FilterEngine.ts::splitSubConditions`）。
-    /// 语义必须逐字一致——剥 `!` 前缀、去首尾空白、跳过空行、纯 `!` 无内容丢弃。
-    /// 两端一旦分叉，同一个 filter 会在 UI 与引擎算出不同命中，且极难排查。
-    fn split_sub_conditions(pattern: &str) -> Vec<SubCond> {
-        let mut out = Vec::new();
-        for raw in pattern.split('\n') {
-            let line = raw.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match line.strip_prefix('!') {
-                Some(rest) => {
-                    let source = rest.trim();
-                    if !source.is_empty() {
-                        out.push(SubCond { source: source.to_string(), negate: true });
-                    }
-                }
-                None => out.push(SubCond { source: line.to_string(), negate: false }),
-            }
-        }
-        out
-    }
+    // ---- 多行 filter 子条件（单一事实来源在 engine/src/filter_agg.rs）----
 
     /// 多行 filter 展开为单行子条件（端口自 `src/io/dbStore.ts::runDbFiltersBatch`
     /// 的拆分下推）。返回 (下推用的子条件 queries, 聚合计划)。
@@ -376,7 +339,7 @@ impl Session {
                 expanded.push(q.clone());
                 continue;
             }
-            let subs = Self::split_sub_conditions(&q.pattern);
+            let subs = split_sub_conditions(&q.pattern);
             if subs.is_empty() || subs.iter().all(|s| s.negate) {
                 continue;
             }
@@ -401,31 +364,19 @@ impl Session {
         (expanded, plans)
     }
 
-    /// 子条件命中聚合（端口自 `src/io/dbStore.ts::aggregateSubHits`）：
-    /// 正向 sub 行集交集 − 排除 sub 行集并集。以最短正向 sub 为基（候选最少），
-    /// ts 取基列表的同行值（同一物理行的 ts 由 line_ts 解析，各 sub 一致）。
-    fn aggregate_sub_hits(pos: &[Arc<Vec<HitEntry>>], neg: &[Arc<Vec<HitEntry>>]) -> Vec<HitEntry> {
-        if pos.is_empty() {
-            return Vec::new();
-        }
-        let mut order: Vec<usize> = (0..pos.len()).collect();
-        order.sort_by_key(|&i| pos[i].len());
-        let base = &pos[order[0]];
-        let mut out = Vec::with_capacity(base.len());
-        'next: for e in base.iter() {
-            for &i in order.iter().skip(1) {
-                if !hits_contains_line(&pos[i], e.line) {
-                    continue 'next;
-                }
-            }
-            for n in neg {
-                if hits_contains_line(n, e.line) {
-                    continue 'next;
-                }
-            }
-            out.push(*e);
-        }
-        out
+    /// 子条件命中聚合（单一事实来源在 `engine/src/filter_agg.rs::aggregate_sub_hits`）：
+    /// 正向 sub 行集交集 − 排除 sub 行集并集。本方法仅做 `HitEntry` ↔ `AggHit`
+    /// 字段转换后委托给共享实现，桌面 native 与 Web(wasm) 跑逐字节一致的同一份。
+    fn aggregate_sub_hits_bridge(pos: &[Arc<Vec<HitEntry>>], neg: &[Arc<Vec<HitEntry>>]) -> Vec<HitEntry> {
+        let to_agg = |v: &Arc<Vec<HitEntry>>| -> Vec<AggHit> {
+            v.iter().map(|e| AggHit { line: e.line, ts: e.ts }).collect()
+        };
+        let pos_a: Vec<Vec<AggHit>> = pos.iter().map(to_agg).collect();
+        let neg_a: Vec<Vec<AggHit>> = neg.iter().map(to_agg).collect();
+        aggregate_sub_hits(&pos_a, &neg_a)
+            .into_iter()
+            .map(|a| HitEntry { line: a.line, ts: a.ts })
+            .collect()
     }
 
     /// 批量运行过滤器（recomputeMatches / 单 filter 编辑共用）：
@@ -509,7 +460,7 @@ impl Session {
                         }
                     }
                 }
-                let agg = Arc::new(Self::aggregate_sub_hits(&pos, &neg));
+                let agg = Arc::new(Self::aggregate_sub_hits_bridge(&pos, &neg));
                 // 按原始 id 落缓存 + 记原始指纹：下次 filters_batch 直接在
                 // 内存层整条命中，不再展开聚合。
                 fc.fps.insert(plan.filter_id.clone(), plan.fp.clone());
@@ -1870,9 +1821,9 @@ mod tests {
 
     #[test]
     fn split_sub_conditions_matches_frontend() {
-        use crate::session::SubCond;
+        use crate::filter_agg::SubCond;
         let flat = |p: &str| -> Vec<(String, bool)> {
-            Session::split_sub_conditions(p)
+            split_sub_conditions(p)
                 .into_iter()
                 .map(|s: SubCond| (s.source, s.negate))
                 .collect()

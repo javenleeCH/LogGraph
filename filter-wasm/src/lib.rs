@@ -1,5 +1,11 @@
 use wasm_bindgen::prelude::*;
 
+/// 多行 filter 的命中聚合 —— 与桌面引擎 `engine/src/filter_agg.rs` 逐字节同源。
+/// Web 端（dbStore / FilterEngine）经此函数跑与桌面 native 引擎完全相同的
+/// 「正向交集 − 排除并集」聚合，杜绝两端分叉（契约 §3.14）。
+#[path = "../../engine/src/filter_agg.rs"]
+mod filter_agg;
+
 /// 编译后的正则表达式，底层是 Rust 标准 `regex` crate —— 与桌面（Tauri）后端
 /// 用于过滤的引擎逐字节一致。导出到 JS，让 Web 端过滤结果与桌面端完全相同。
 ///
@@ -45,4 +51,21 @@ pub struct MatchSpan {
     pub start: usize,
     #[wasm_bindgen(getter)]
     pub end: usize,
+}
+
+/// 多行 filter 子条件命中聚合（与桌面引擎同源）。
+///
+/// `pos_json` / `neg_json` 均为 JSON 字符串，形状 `[[{line, ts}, ...], ...]`：
+/// - `pos_json`：各**正向**子条件的命中集（行号升序、ts 对齐）。
+/// - `neg_json`：各**排除**子条件（`!` 前缀）的命中集。
+///
+/// 返回 JSON 字符串 `[{line, ts}, ...]`：正向集合交集 − 排除集合并集
+/// （以最短正向集为基）。空 `pos` 返回 `[]`。解析失败按空集处理（与引擎
+/// `aggregate_sub_hits` 的「无正向锚→空」语义一致）。
+#[wasm_bindgen(js_name = "aggregateFilterHits")]
+pub fn aggregate_filter_hits(pos_json: &str, neg_json: &str) -> String {
+    let pos: Vec<Vec<filter_agg::AggHit>> = serde_json::from_str(pos_json).unwrap_or_default();
+    let neg: Vec<Vec<filter_agg::AggHit>> = serde_json::from_str(neg_json).unwrap_or_default();
+    let out = filter_agg::aggregate_sub_hits(&pos, &neg);
+    serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
 }
