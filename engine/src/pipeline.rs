@@ -4,7 +4,7 @@
 use crate::cep::{self, GroupSpec, RunSeqResponse, SeqEvent};
 use crate::error::EngineResult;
 use crate::parser::timestamp::{detect_timestamp_format, extract_timestamp, TsFormat};
-use crate::parser::parse_rest;
+use crate::parser::{detect_log_family, parse_rest_fam};
 use crate::search::{self, Pattern};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -74,6 +74,19 @@ pub fn run_cep(
     let sample_refs: Vec<&str> = sample_lines.iter().map(|s| s.as_str()).collect();
     let format: Option<&TsFormat> = detect_timestamp_format(&sample_refs);
 
+    // 同一批样本探测布局族：使 pipeline（CEP 逐行重解析）与 GUI 解析的 thread 提取一致，
+    // 避免「视图有线程、引擎没线程」的分桶退化（契约 §3.13）。
+    let family = {
+        let mut rests: Vec<String> = Vec::new();
+        for l in sample_lines.iter() {
+            if let Some(e) = extract_timestamp(l, format) {
+                rests.push(l[e.end..].to_string());
+            }
+        }
+        let refs: Vec<&str> = rests.iter().map(|s| s.as_str()).collect();
+        detect_log_family(&refs)
+    };
+
     // 3) 全局行身份：同一物理行被多个过滤器命中时，CEP 中必须是同一事件 id。
     //    key = (文件在 paths 中的下标, 1-based 行号)
     let mut line_id: HashMap<(usize, u64), u32> = HashMap::new();
@@ -106,7 +119,7 @@ pub fn run_cep(
                     // 解析时间戳之后的剩余段：抽出 thread / level / message
                     // （对齐前端 parseRest，使 nodeConditions 表达式的 level/msg/thread
                     // 字段能与 GUI 视图等价求值）
-                    let parsed = parse_rest(&h.text[ts.end..]);
+                    let parsed = parse_rest_fam(&h.text[ts.end..], family);
                     events.push(SeqEvent {
                         id,
                         ts: ts.ts,

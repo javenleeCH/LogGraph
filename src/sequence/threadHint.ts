@@ -2,11 +2,17 @@
  * thread 解析质量提示——纯函数，供 CEP 面板展示（放在独立模块是为了可单测，
  * 也避免测试为了一个字符串函数去挂载整个面板组件）。
  *
- * 背景：`thread` 不是日志里的独立字段，而是**位置启发式**的解析产物
- * （解析器只认紧跟时间戳的 `[...]`）。实测 9 种常见格式里只有 1 种
- * （log4j2 那种线程写在最前的）能解析出 thread；Spring Boot / Logback
- * 把 level 写在 thread 之前的两种主流写法、以及 nginx / syslog /
- * Python logging 全部解析不出。
+ * 背景：`thread` 不是日志里的独立字段，而是**位置启发式**的解析产物。
+ * 基础规则只认紧跟时间戳的 `[...]`（log4j2 那种线程写在最前的写法）；
+ * 2026-10-18 起额外按「布局族」在预期槽位补取 thread：
+ *   - Spring Boot / Logback 默认：`--- [thread]` 标记之后（LEVEL PID --- [t] logger : msg）
+ *   - log4j2 变体 / 自定义布局：紧跟级别词之后的第一个 `[thread]`（LEVEL [t] logger - msg）
+ * 探测用 `detect_log_family` 多数决（>50% 才采用），两端同步实现
+ * （`engine/src/parser/line.rs` ↔ `src/parser/LogParser.ts`）。
+ *
+ * 刻意不覆盖的：nginx `[error]`、syslog `proc[pid]`、Python logging 等的括号 token
+ * 其实是级别 / pid 而非线程——若「到处找方括号」自动捕获会误抓，导致流被拆碎、
+ * 链永远凑不齐（零链＝全部漏报），远比漏解析更危险，故保持保守。
  *
  * 解析不出时所有事件落进同一个空桶，`scope: 'thread'` 就**静默退化成全局**。
  * 行为上还算保守（等价于没开分桶），但用户会误以为在按线程隔离，从而相信

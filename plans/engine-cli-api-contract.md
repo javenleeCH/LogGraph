@@ -872,9 +872,19 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 ### 3.13 `threadStats`（thread 解析质量，✅ engine ≥ 0.2.1）
 
 **背景**：`thread` 不是日志里的独立字段，而是**位置启发式**的解析产物
-（`parse_rest` 只认紧跟时间戳的 `[...]`）。实测 9 种常见格式只有 1 种能解析出
-thread（log4j2 那种线程写在最前的写法）；level 写在 thread 之前的 Spring Boot /
-Logback 两种主流写法、以及 nginx / syslog / Python logging 全部解析不出。
+（`parse_rest` 基础规则只认紧跟时间戳的 `[...]`，即 log4j2 那种线程写在最前的写法）。
+
+为提升覆盖率，**engine ≥ 0.2.7** 起按「布局族」在预期槽位补取 thread（见
+`engine/src/parser/line.rs::detect_log_family` / `parse_rest_fam` 与前端
+`src/parser/LogParser.ts` 对称实现，逐行对齐的同款实现）：
+- **Spring Boot / Logback 默认布局**：`LEVEL PID --- [thread] logger : msg`，thread 在
+  `--- [thread]` 标记之后（非行首）；
+- **log4j2 变体 / 自定义布局**：`LEVEL [thread] logger - msg`，thread 是紧跟级别词之后
+  的第一个 `[thread]`。
+
+探测用 `detect_log_family` **多数决**（某族命中率 > 50% 才采用），故偶发的行内括号
+不会触发提取。nginx / syslog / Python logging 的括号 token 是级别 / pid 而非线程，
+自动捕获会误抓，**刻意不覆盖**。
 
 解析不出时所有事件落进同一个空桶 `∅`，`scope: "thread"` 就**静默退化成 global**
 ——行为保守（等价于没开分桶），但调用方会误以为在按线程隔离，从而相信那些跨线程
@@ -900,7 +910,9 @@ Logback 两种主流写法、以及 nginx / syslog / Python logging 全部解析
 
 **误抓远比漏解析危险**：漏解析只是退化成全局（结果保守可用），误抓会把流拆碎导致
 链永远凑不齐。因此**禁止**用"取消行首锚定、到处找方括号"来提高覆盖率——那只是把
-假阴性换成更坏的假阳性。若要改进解析，须同步修改引擎 `parser/line.rs::parse_rest`
+假阴性换成更坏的假阳性。改进解析的 sanctioned 路径是**按格式族在预期槽位取 thread**
+（多数决探测 `LogFamily`，`parse_rest_fam` 仅在行首启发式未命中时补取），且须同步修改
+引擎 `parser/line.rs::parse_rest` / `parse_rest_fam`
 与前端 `parser/LogParser.ts::parseRest`（逐行对齐的两份同款实现）。
 
 前端展示位：CEP 面板每个分组块的头部（`scope === 'thread'` 时才显示，全局作用域下
@@ -1286,7 +1298,7 @@ v1 无流式进度 / 取消命令（引擎单次调用同步完成；大目录�
 | 自签更新通道（updater） | ✅ 支持（engine ≥ 0.2.2，minisign 自签，见 §3.15） |
 | **代码签名证书** | ❌ | Authenticode / Developer ID 要花钱且与代码质量无关，不做。代价是首次运行需人工放行 SmartScreen / Gatekeeper（已写入 release notes） |
 | 线程域序列（`scope:"thread"`） | ✅ 支持（engine ≥ 0.2.1，按 thread 分桶隔离匹配） |
-| thread 字段的格式自适应解析 | ❌ | 位置启发式：只认紧跟时间戳的 `[...]`。多数格式解析不出 ⇒ 分桶退化为全局，**质量回传 `threadStats`（§3.13）而非自动适配** |
+| thread 字段的格式自适应解析 | ✅（下一个发布；当前 dev 已含） | 按布局族在预期槽位取 thread：Spring Boot/Logback 的 `--- [thread]`、log4j2 变体 `LEVEL [thread]`（多数决探测 `LogFamily`，两端同步）。nginx/syslog/Python 的括号 token 是级别/pid 而非线程，刻意不覆盖（误抓比漏解析更危险）；未覆盖时仍回传 `threadStats`（§3.13）提示退化 |
 | `opt` 边 | ✅ 支持（engine ≥ 0.2.0，复用 seq 推进，缺失即跳过） |
 | `periodic` 边 /heartbeats | ✅ 支持（engine ≥ 0.2.1，缺口/抖动入 `heartbeats`） |
 | nodeCounts / nodeConditions | ✅ 支持（engine ≥ 0.2.1，节点循环计数 / 条件表达式） |

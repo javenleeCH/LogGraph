@@ -12,6 +12,111 @@ pub fn js_trim(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
 
+/// 日志「布局族」—— 由样本后段（已去时间戳）探测，决定 thread 的额外提取槽位。
+///
+/// 这是提高 thread 解析覆盖率的**唯一 sanctioned 路径**：按格式族在预期位置取 thread，
+/// 绝不做「取消行首锚定、到处找方括号」（那会把假阴性换成更坏的假阳性，见契约 §3.13）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LogFamily {
+    /// 未知 / 默认：只用行首 `^\[...\]` 启发式（与旧行为一致）
+    Unknown,
+    /// Spring Boot / Logback 默认布局：`LEVEL PID --- [thread] logger : msg`
+    /// thread 在 `--- [..]` 标记之后，而非行首。
+    SpringLogback,
+    /// log4j2 变体 / 自定义布局：`LEVEL [thread] logger - msg`
+    /// thread 是紧跟级别词之后的第一个 `[..]`。
+    Log4jThreadAfter,
+}
+
+// 位置约束的家族标记（不锚行首，但要求固定的 `--- [thread]` 分隔符）
+static SPRING_RE: LazyLock<Regex> = LazyLock::new(|| build_re(r" --- \[[^\]]+\]"));
+// 行首 `LEVEL [thread]`：级别词（纯字母）后紧跟 `[thread]`
+static LOG4J_RE: LazyLock<Regex> =
+    LazyLock::new(|| build_re(r"^[A-Za-z][A-Za-z]*\s+\[[^\]]+\]"));
+// 通用括号捕获（取第一个 `[..]` 内容）
+static BRACKET_RE: LazyLock<Regex> = LazyLock::new(|| build_re(r"\[([^\]]+)\]"));
+
+/// 由样本后段（已去除时间戳）探测日志布局族。
+/// 多数决：某族命中率 > 50% 才采用，否则回退 Unknown（保守，避免偶发括号误抓）。
+pub fn detect_log_family(rests: &[&str]) -> LogFamily {
+    let mut total = 0usize;
+    let mut sb = 0usize;
+    let mut lj = 0usize;
+    for r in rests.iter().take(200) {
+        let t = js_trim(r);
+        if t.is_empty() {
+            continue;
+        }
+        total += 1;
+        if SPRING_RE.is_match(t) {
+            sb += 1;
+        }
+        if LOG4J_RE.is_match(t) {
+            lj += 1;
+        }
+    }
+    if total == 0 {
+        return LogFamily::Unknown;
+    }
+    let half = total / 2;
+    if sb > half {
+        LogFamily::SpringLogback
+    } else if lj > half {
+        LogFamily::Log4jThreadAfter
+    } else {
+        LogFamily::Unknown
+    }
+}
+
+/// 位置约束的家族内 thread 提取（仅当默认行首启发式未命中时调用）。
+/// 返回 (thread, 更新后的 message)。家族外绝不取 thread，故不会引入误抓。
+fn extract_family_thread(msg: &str, family: LogFamily) -> (Option<String>, String) {
+    match family {
+        LogFamily::Unknown => (None, msg.to_string()),
+        LogFamily::SpringLogback => {
+            // ` --- [thread]`：取标记后的第一个括号 token 作 thread，并把该标记段替换为空格
+            if let Some(m) = SPRING_RE.find(msg) {
+                if let Some(b) = BRACKET_RE.captures(&msg[m.start()..m.end()]) {
+                    let thread = b.get(1).unwrap().as_str().to_string();
+                    let replaced =
+                        format!("{} {}", &msg[..m.start()], &msg[m.end()..]).trim().to_string();
+                    (Some(thread), replaced)
+                } else {
+                    (None, msg.to_string())
+                }
+            } else {
+                (None, msg.to_string())
+            }
+        }
+        LogFamily::Log4jThreadAfter => {
+            // 紧跟级别词之后的第一个 `[..]`（级别已在前置步骤剥除，这里 msg 以 `[..]` 起或含之）
+            if let Some(c) = BRACKET_RE.captures(msg) {
+                let thread = c.get(1).unwrap().as_str().to_string();
+                let range = c.get(0).unwrap().range();
+                let mut s = msg.to_string();
+                s.replace_range(range, " ");
+                (Some(thread), js_trim(&s).to_string())
+            } else {
+                (None, msg.to_string())
+            }
+        }
+    }
+}
+
+/// 家族感知版：默认启发式之后，若未取到 thread，再按家族在预期槽位补取。
+/// 家族感知提取是位置约束的，绝不会「到处找方括号」，故不会引入误抓。
+pub fn parse_rest_fam(rest: &str, family: LogFamily) -> RestParsed {
+    let mut parsed = parse_rest(rest);
+    if parsed.thread.is_none() {
+        let (t, m) = extract_family_thread(&parsed.message, family);
+        if t.is_some() {
+            parsed.thread = t;
+            parsed.message = m;
+        }
+    }
+    parsed
+}
+
 /// 对齐 LogParser.LEVELS（裸写比较大小写敏感；括号形式比较 upper 后的值）。
 /// 含 TS 端的单字母级别 I/D/W/E/F 与 VERBOSE/EMERGENCY；ERR/PANIC 为 Rust 端额外同义词。
 const LEVELS: &[&str] = &[
@@ -29,6 +134,7 @@ static BARE_LEVEL_RE: LazyLock<Regex> = LazyLock::new(|| build_re(r"^([A-Z]+)\s+
 static BRACKET_LEVEL_RE: LazyLock<Regex> =
     LazyLock::new(|| build_re(r"(?:\[|\()([A-Za-z]+)(?:\]|\))\s*"));
 
+#[derive(PartialEq, Debug)]
 pub struct RestParsed {
     pub thread: Option<String>,
     pub level: Option<String>,
@@ -208,5 +314,90 @@ mod tests {
         assert_eq!(r.thread.as_deref(), Some("线程"));
         assert_eq!(r.level.as_deref(), Some("ERROR"));
         assert_eq!(r.message, "msg");
+    }
+
+    // ---- 布局族探测 + 家族感知 thread 提取（B 解析覆盖，2026-10-18）----
+
+    #[test]
+    fn spring_logback_thread_after_separator() {
+        // Spring Boot / Logback 默认：LEVEL PID --- [thread] logger : msg
+        let r = parse_rest_fam(
+            " INFO 12345 --- [main] com.foo.Bar : started",
+            LogFamily::SpringLogback,
+        );
+        assert_eq!(r.thread.as_deref(), Some("main"));
+        assert_eq!(r.level.as_deref(), Some("INFO"));
+        assert_eq!(r.message, "12345  com.foo.Bar : started");
+    }
+
+    #[test]
+    fn log4j_thread_after_level() {
+        // log4j2 变体 / 自定义布局：LEVEL [thread] logger - msg
+        let r = parse_rest_fam(
+            "ERROR [pool-1] com.foo.Service - boom",
+            LogFamily::Log4jThreadAfter,
+        );
+        assert_eq!(r.thread.as_deref(), Some("pool-1"));
+        assert_eq!(r.level.as_deref(), Some("ERROR"));
+        assert_eq!(r.message, "com.foo.Service - boom");
+    }
+
+    #[test]
+    fn family_extraction_only_when_leading_thread_missing() {
+        // 行首已有 thread（log4j2 线程在前）→ 家族规则不覆盖、不误改
+        let r = parse_rest_fam(
+            "[net-0] INFO 12345 --- [main] com.foo : x",
+            LogFamily::SpringLogback,
+        );
+        assert_eq!(r.thread.as_deref(), Some("net-0")); // 仍取行首
+        assert_eq!(r.level.as_deref(), Some("INFO"));
+    }
+
+    #[test]
+    fn unknown_family_keeps_legacy_behavior() {
+        // 未知族 → 与旧 parse_rest 完全一致（不引入任何新提取）
+        let cases = [
+            "[INFO] message body",
+            "INFO hello",
+            "(main) E crash",
+            "hello (INFO) world",
+        ];
+        for c in cases {
+            assert_eq!(parse_rest_fam(c, LogFamily::Unknown), parse_rest(c));
+        }
+    }
+
+    #[test]
+    fn detect_log_family_majority_vote() {
+        // 全部 Spring Boot → 探出 SpringLogback
+        let rests = [
+            " INFO 1 --- [main] a : x",
+            " WARN 1 --- [main] a : y",
+            " ERROR 1 --- [main] a : z",
+        ];
+        assert_eq!(detect_log_family(&rests), LogFamily::SpringLogback);
+
+        // 全部 log4j 变体 → Log4jThreadAfter
+        let rests2 = ["INFO [t1] a - x", "WARN [t1] a - y", "ERROR [t1] a - z"];
+        assert_eq!(detect_log_family(&rests2), LogFamily::Log4jThreadAfter);
+
+        // 多数不足（混入不带 threaded 布局的行）→ 回退 Unknown（保守，防误抓）
+        let rests3 = ["INFO plain message", "WARN [t1] a - y", "ERROR plain message"];
+        assert_eq!(detect_log_family(&rests3), LogFamily::Unknown);
+
+        // 空样本 → Unknown
+        assert_eq!(detect_log_family(&[]), LogFamily::Unknown);
+
+        // 单行也能探出（覆盖 pipeline 逐行场景虽无多数决，但标记足够特异）
+        let single = [" INFO 1 --- [main] a : x"];
+        assert_eq!(detect_log_family(&single), LogFamily::SpringLogback);
+    }
+
+    #[test]
+    fn detect_log_family_rejects_nginx_level_bracket_as_thread() {
+        // nginx：行首 [error] 是级别不是线程；不应被误判为任何族
+        // （保持现状：由行首启发式把 [error] 当 thread，见契约 §3.13 不变量）
+        let rests = ["[error] 12345#0: *1 open() failed", "[error] 12346#0: *2 closed"];
+        assert_eq!(detect_log_family(&rests), LogFamily::Unknown);
     }
 }

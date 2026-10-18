@@ -38,8 +38,58 @@ export interface ParseResult {
 // 级别可能以 () 或 [] 包裹，也可能裸写
 const LEVEL_BRACKET_RE = /(?:\[|\()(?<level>[A-Za-z]+)(?:\]|\))\s*/;
 
-/** 解析单行的后段（已去除时间戳） */
-function parseRest(rest: string): { thread?: string; level?: string; message: string } {
+/** 日志布局族——由样本后段探测，决定 thread 的额外提取槽位（对齐 engine::parser::line::LogFamily）。 */
+export type LogFamily = 'unknown' | 'springLogback' | 'log4jThreadAfter';
+
+const SPRING_RE = / --- \[[^\]]+\]/;
+const LOG4J_RE = /^[A-Za-z][A-Za-z]*\s+\[[^\]]+\]/;
+const BRACKET_RE = /\[([^\]]+)\]/;
+
+/** 由样本后段（已去时间戳）探测布局族，多数决（>50% 才采用）。对齐 engine::parser::line::detect_log_family。 */
+export function detectLogFamily(rests: string[]): LogFamily {
+  let total = 0, sb = 0, lj = 0;
+  for (const r of rests.slice(0, 200)) {
+    const t = r.trim();
+    if (!t) continue;
+    total++;
+    if (SPRING_RE.test(t)) sb++;
+    if (LOG4J_RE.test(t)) lj++;
+  }
+  if (total === 0) return 'unknown';
+  const half = Math.floor(total / 2);
+  if (sb > half) return 'springLogback';
+  if (lj > half) return 'log4jThreadAfter';
+  return 'unknown';
+}
+
+/** 位置约束的家族内 thread 提取；未命中默认启发式时才调用。对齐 engine::parser::line::extract_family_thread。 */
+function applyFamilyThread(message: string, family: LogFamily): [string | undefined, string] {
+  if (family === 'springLogback') {
+    const m = message.match(SPRING_RE);
+    if (m && m.index !== undefined) {
+      const inner = m[0].match(BRACKET_RE);
+      if (inner) {
+        const thread = inner[1];
+        const replaced = (message.slice(0, m.index) + ' ' + message.slice(m.index + m[0].length)).trim();
+        return [thread, replaced];
+      }
+    }
+    return [undefined, message];
+  }
+  if (family === 'log4jThreadAfter') {
+    const c = message.match(BRACKET_RE);
+    if (c && c.index !== undefined) {
+      const thread = c[1];
+      const replaced = (message.slice(0, c.index) + ' ' + message.slice(c.index + c[0].length)).trim();
+      return [thread, replaced];
+    }
+    return [undefined, message];
+  }
+  return [undefined, message];
+}
+
+/** 解析单行的后段（已去除时间戳）。导出以便单测（对齐 engine::parser::line::parse_rest）。 */
+export function parseRest(rest: string, family: LogFamily = 'unknown'): { thread?: string; level?: string; message: string } {
   let thread: string | undefined;
   let level: string | undefined;
   let message = rest.trim();
@@ -63,6 +113,15 @@ function parseRest(rest: string): { thread?: string; level?: string; message: st
       // 删除匹配区间本身（保留前缀）；旧 slice(match[0].length) 按长度从头切，位置错误
       const i = bracketLevel.index ?? 0;
       message = (message.slice(0, i) + message.slice(i + bracketLevel[0].length)).trim();
+    }
+  }
+
+  // 家族感知提取（仅当行首启发式未命中）。位置约束，不「到处找方括号」，不会误抓。
+  if (!thread) {
+    const [t, m] = applyFamilyThread(message, family);
+    if (t) {
+      thread = t;
+      message = m;
     }
   }
 
@@ -94,6 +153,15 @@ export class LogParser {
 
     const formatId = format?.id ?? null;
 
+    // 探测日志布局族（基于样本后段），用于 thread 的家族感知提取（对齐 engine::parser::detect_log_family）
+    const sampleRests: string[] = [];
+    for (const l of allLines.slice(0, 200)) {
+      if (!l.trim()) continue;
+      const e = extractTimestamp(l, format);
+      if (e) sampleRests.push(l.slice(e.index + e.matchStr.length));
+    }
+    const family = detectLogFamily(sampleRests);
+
     for (let i = 0; i < allLines.length; i++) {
       const raw = allLines[i];
       if (!raw.trim()) {
@@ -108,7 +176,7 @@ export class LogParser {
       // 用真实匹配区间切出剩余（对齐 Rust &raw[ext.end..]），避免 matchStr 在行内更早
       // 重复时 indexOf 定位错位的已知偏差（web-desktop-consistency-review.md §1.3）。
       const rest = raw.slice(extracted.index + extracted.matchStr.length);
-      const { thread, level, message } = parseRest(rest);
+      const { thread, level, message } = parseRest(rest, family);
       events.push({
         id: i,
         ts: extracted.ts,

@@ -7,7 +7,7 @@
 pub mod line;
 pub mod timestamp;
 
-pub use line::{js_trim, parse_rest, RestParsed};
+pub use line::{detect_log_family, js_trim, parse_rest, parse_rest_fam, LogFamily, RestParsed};
 pub use timestamp::{
     detect_timestamp_format, extract_timestamp, find_format, formats, TsFormat,
 };
@@ -75,6 +75,21 @@ pub fn parse_text_full(text: &str, forced: Option<&TsFormat>) -> ParseResult {
     let mut events: Vec<LogEvent> = Vec::new();
     let mut skipped: u32 = 0;
 
+    // 探测日志布局族（基于样本后段），用于 thread 的家族感知提取（见 line.rs；契约 §3.13）
+    let family = {
+        let mut rests: Vec<String> = Vec::new();
+        for l in lines.iter().take(200) {
+            if js_trim(l).is_empty() {
+                continue;
+            }
+            if let Some(e) = extract_timestamp(l, format) {
+                rests.push(l[e.end..].to_string());
+            }
+        }
+        let refs: Vec<&str> = rests.iter().map(|s| s.as_str()).collect();
+        detect_log_family(&refs)
+    };
+
     for (i, raw) in lines.iter().enumerate() {
         // 空行（JS trim 语义）→ skipped
         if js_trim(raw).is_empty() {
@@ -90,7 +105,7 @@ pub fn parse_text_full(text: &str, forced: Option<&TsFormat>) -> ParseResult {
         // 注：JS 用 raw.indexOf(matchStr) 定位（matchStr 在行内更早重复出现时会定位到错误位置），
         // 此处用真实匹配区间 —— 仅构造性输入下不同，已文档化（plans/rust-parser-design.md §5.2）。
         let rest = &raw[ext.end..];
-        let parsed = parse_rest(rest);
+        let parsed = parse_rest_fam(rest, family);
         events.push(LogEvent {
             id: i as u32,
             ts: ext.ts,
