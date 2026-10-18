@@ -40,7 +40,7 @@ import {
   type DbFilterQuery,
   type DbFilterHits,
 } from '../io/dbStore';
-import { mergeEventsByTs } from './eventMerge';
+import { isPureAppend, mergeEventsByTs } from './eventMerge';
 
 let corrRaf = 0;
 
@@ -1862,12 +1862,14 @@ export const useLogStore = create<LogState>((set, get) => ({
     const oldRawLen = state.rawLines.length;
     // 段内事件 id 是段首行号 → 重基为全局 rawLines 行号；sourceFile 标记来源文件
     const rebased = events.map((e) => ({ ...e, id: oldRawLen + e.id, sourceFile: name }));
-    // 全局 events 按 ts 升序；两段各自已排序 → 稳定合并（O(N)，不破坏 ts 不变式）
+    // 全局 events 按 ts 升序；两段各自已排序 → 稳定合并（不破坏 ts 不变式）
+    // 纯追加（新段不早于尾部）时走拼接快路径，并据此启用 filter 增量（见下）
+    const pure = isPureAppend(state.events, rebased);
     const mergedEvents = mergeEventsByTs(state.events, rebased);
     const meta = state.meta;
     set({
       events: mergedEvents,
-      rawLines: [...state.rawLines, ...rawLines],
+      rawLines: state.rawLines.concat(rawLines),
       meta: meta
         ? {
             ...meta,
@@ -1878,6 +1880,16 @@ export const useLogStore = create<LogState>((set, get) => ({
       tail: { ...t, offsets: { ...t.offsets, [path]: newOffset }, newCount: t.newCount + rebased.length },
       correlatedEventIds: state.correlatedEventIds,
     });
+    // 纯追加 + 有过滤器：filter 命中集走增量（O(Δ)）而非全量重扫（O(N) 每 tick）。
+    // 非纯追加（时钟回拨/多文件交错）或过滤器为空 → 回退全量，保证结果一致。
+    if (pure && state.filters.length > 0) {
+      set({ matches: FilterEngine.appendMatches(state.matches, rebased, state.filters) });
+      scheduleTailRecompute(() => {
+        get().recomputeSequences();
+        get().recomputeCorrelations();
+      });
+      return;
+    }
     scheduleTailRecompute(() => get().recomputeMatches());
   },
 

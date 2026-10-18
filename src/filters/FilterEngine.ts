@@ -153,6 +153,35 @@ export class FilterEngine {
   }
 
   /**
+   * 增量追加（实时 tail 专用）：只对「新增事件」跑过滤器，命中集拼到旧命中集末尾。
+   *
+   * 前提（调用方必须保证，由 isPureAppend 判定）：newEvents 整体不早于已有事件的
+   * 最晚 ts。此时 `run(oldEvents ++ newEvents)` 与 `run(oldEvents) ++ run(newEvents)`
+   * 逐项等价——顺序一致、同 ts 稳定性一致，因此增量结果与全量重算完全相同。
+   *
+   * 非纯追加（时钟回拨 / 多文件交错）时**不可**使用，须回退全量 recomputeMatches。
+   * 开销 O(Δ × filters) 而非 O(N × filters)，长时 tail 下避免每 tick 全量重扫。
+   */
+  static appendMatches(
+    oldMatches: FilterMatch[],
+    newEvents: LogEvent[],
+    filters: Filter[],
+  ): FilterMatch[] {
+    void ensureRegexWasm();
+    const compiled: (CompiledFilter | null)[] = filters.map(compileFilter);
+    return filters.map((f, i) => {
+      const prev = oldMatches.find((m) => m.filterId === f.id)?.events ?? [];
+      const cf = compiled[i];
+      if (!cf || newEvents.length === 0) return { filterId: f.id, events: prev };
+      const added: LogEvent[] = [];
+      for (const ev of newEvents) {
+        if (eventMatches(ev, cf)) added.push(ev);
+      }
+      return { filterId: f.id, events: added.length ? prev.concat(added) : prev };
+    });
+  }
+
+  /**
    * 单 filter 重算（增量路径）：只跑一个 filter，其余 matches 引用复用。
    * 大数据量下配合 runFilterChunked 异步分块执行，避免阻塞主线程。
    */

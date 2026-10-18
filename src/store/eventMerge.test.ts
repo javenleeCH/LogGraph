@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mergeEventsByTs } from './eventMerge';
+import { isPureAppend, mergeEventsByTs } from './eventMerge';
 import type { LogEvent } from '../types';
 
 function ev(id: number, ts: number): LogEvent {
@@ -53,5 +53,21 @@ describe('mergeEventsByTs（实时 tail 增量合并）', () => {
     const b = [ev(3, 20)];
     const m = mergeEventsByTs(a, b);
     expect(m.map((e) => e.id)).toEqual([7, 3]);
+  });
+
+  it('追加快路径：返回新数组，不修改原数组', () => {
+    const a = [ev(0, 100), ev(1, 200)];
+    const b = [ev(2, 300)];
+    const m = mergeEventsByTs(a, b);
+    expect(a.length).toBe(2); // 原数组未被改动
+    expect(m).not.toBe(a);
+    expect(m.length).toBe(3);
+  });
+
+  it('isPureAppend：追加=true / 交错=false / 任一段为空=true', () => {
+    expect(isPureAppend([ev(0, 100), ev(1, 200)], [ev(2, 300)])).toBe(true);
+    expect(isPureAppend([ev(0, 300)], [ev(1, 100)])).toBe(false); // 时钟回拨
+    expect(isPureAppend([], [ev(0, 100)])).toBe(true);
+    expect(isPureAppend([ev(0, 100)], [])).toBe(true);
   });
 });
