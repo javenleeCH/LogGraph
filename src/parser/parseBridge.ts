@@ -259,6 +259,7 @@ export interface RustDirMeta {
   totalLines: number;
   skipped: number;
   fileCount: number;
+  fileErrors: number;
   timestampFormatId: string | null;
   fileNames: string[];
 }
@@ -270,6 +271,7 @@ export interface RustDirParseResult {
   fileNames: string[];
   totalLines: number;
   skipped: number;
+  fileErrors: number;
   timestampFormatId: string | null;
 }
 
@@ -282,6 +284,7 @@ function isRustDirMeta(v: unknown): v is RustDirMeta {
     typeof r.totalLines === 'number' &&
     typeof r.skipped === 'number' &&
     typeof r.fileCount === 'number' &&
+    typeof r.fileErrors === 'number' &&
     (r.timestampFormatId === null || typeof r.timestampFormatId === 'string') &&
     Array.isArray(r.fileNames)
   );
@@ -351,6 +354,7 @@ export async function parseLogDir(
       fileNames: meta.fileNames,
       totalLines: meta.totalLines,
       skipped: meta.skipped,
+      fileErrors: meta.fileErrors,
       timestampFormatId: meta.timestampFormatId,
     };
   } catch (err) {

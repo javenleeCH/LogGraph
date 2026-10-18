@@ -192,6 +192,7 @@ export function Toolbar() {
               <span className={styles['status-file']}>
                 {meta.fileName} · {eventCount.toLocaleString()} 行
                 {meta.skipped > 0 ? ` · 跳过 ${meta.skipped}` : ''}
+                {meta.fileErrors ? ` · ${meta.fileErrors} 个文件读取失败` : ''}
               </span>
             )}
             {/* 加载模式徽标：hover 看摘要，点击看完整能力边界 */}

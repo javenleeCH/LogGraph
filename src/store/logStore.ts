@@ -125,10 +125,22 @@ function cepFailureText(
 
 function scheduleCorrRecompute(run: () => void) {
   if (corrRaf) cancelAnimationFrame(corrRaf);
+  corrRaf = 0; // 复位后再排新帧，避免持有已取消的过期 id（防御 StrictMode/重排）
   corrRaf = requestAnimationFrame(() => {
     corrRaf = 0;
     run();
   });
+}
+
+// tail 增量 tick 高频触发：recomputeMatches（filter+CEP+correlation 全量扫描）合并防抖，
+// 避免长时 tail 下每 tick O(N) 重算累积成 O(N²)。最终状态由最后一次 flush 保证一致。
+let tailRecomputeTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleTailRecompute(run: () => void) {
+  if (tailRecomputeTimer) clearTimeout(tailRecomputeTimer);
+  tailRecomputeTimer = setTimeout(() => {
+    tailRecomputeTimer = null;
+    run();
+  }, 200);
 }
 
 // 浅色主题下调色板（颜色偏深，确保在白色背景上可见），循环使用
@@ -229,6 +241,7 @@ export interface LogMeta {
   fileSize: number;
   totalLines: number;
   skipped: number;
+  fileErrors?: number;
   timestampFormatId: string | null;
 }
 
@@ -1865,7 +1878,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       tail: { ...t, offsets: { ...t.offsets, [path]: newOffset }, newCount: t.newCount + rebased.length },
       correlatedEventIds: state.correlatedEventIds,
     });
-    get().recomputeMatches();
+    scheduleTailRecompute(() => get().recomputeMatches());
   },
 
   // ---- 日志目录 ----

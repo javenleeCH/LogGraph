@@ -201,6 +201,8 @@ pub struct DirMeta {
     pub total_lines: u32,
     pub skipped: u32,
     pub file_count: u32,
+    /// 目录中读取失败被跳过（权限/二进制/编码异常）的文件数；漏报也应可观测
+    pub file_errors: u32,
     /// 全部文件探测格式一致才透出，否则 None
     pub timestamp_format_id: Option<String>,
     pub file_names: Vec<String>,
@@ -241,12 +243,16 @@ pub fn parse_dir_files(
     let mut skipped: u32 = 0;
     let mut format_ids: Vec<Option<String>> = Vec::new();
     let mut file_names: Vec<String> = Vec::new();
+    let mut file_errors: u32 = 0;
 
     for (i, rel) in names.iter().enumerate() {
         let full = root.join(rel);
         let text = match read_file_lossy(&full) {
             Ok(t) => t,
-            Err(_) => continue, // 读取失败跳过（前端降级行为一致）
+            Err(_) => {
+                file_errors += 1; // 读取失败：计数而非静默丢弃（漏报也应可观测）
+                continue;
+            }
         };
         let parsed = parse_text_full(&text, None);
         emit(i + 1, total, rel);
@@ -285,6 +291,7 @@ pub fn parse_dir_files(
             total_lines,
             skipped,
             file_count: file_names.len() as u32,
+            file_errors,
             timestamp_format_id,
             file_names,
         },
@@ -539,6 +546,7 @@ mod tests {
         std::fs::write(dir.join("b.log"), "2024-01-01 10:00:01.000 early\n").unwrap();
         let r = parse_dir_files(&dir, |_, _, _| {}).unwrap();
         assert_eq!(r.meta.file_count, 2);
+        assert_eq!(r.meta.file_errors, 0); // 两个文件均可读
         assert_eq!(r.meta.total_events, 2);
         assert_eq!(r.events[0].message, "early"); // 全局按 ts 排序
         assert_eq!(r.events[0].source_file.as_deref(), Some("b.log"));

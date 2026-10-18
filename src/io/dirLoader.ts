@@ -353,6 +353,7 @@ export async function loadMultiple(
             fileSize: 0,
             totalLines: r.totalLines,
             skipped: r.skipped,
+            fileErrors: r.fileErrors,
             timestampFormatId: r.timestampFormatId,
           },
         };
