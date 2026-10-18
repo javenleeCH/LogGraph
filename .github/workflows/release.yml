@@ -111,7 +111,8 @@ jobs:
             | macOS | `*.dmg`（aarch64） | 未签名：右键 → 打开，绕过 Gatekeeper |
             | Linux | `*.AppImage` / `*.deb` | AppImage 需 `chmod +x` 后执行 |
 
-            未做代码签名，故标记为 Pre-release。详见 commit 历史。
+            未做付费代码签名，故在 body 说明首次安装的系统放行步骤；但**不**标 Pre-release
+            （自签 updater 依赖 /releases/latest/download/latest.json，Pre-release 不进 latest 会 404）。
           releaseDraft: false
           # 必须是正式版（prerelease: false）：自签 updater 的 endpoint 指向
           # /releases/latest/download/latest.json，而 Pre-release 不进 latest，
