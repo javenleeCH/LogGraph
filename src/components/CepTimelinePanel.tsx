@@ -116,13 +116,16 @@ function chainRow(
   };
 }
 
-/** 从 sequenceResults 构建每分组的行列表（按 startTs 升序，时间纵轴与 filter 视图无关） */
+/** 从 sequenceResults 构建每分组的行列表（按 startTs 升序，时间纵轴与 filter 视图无关）。
+ *  engineOk=false（引擎不可用/加载中）时抑制「为何没匹配」诊断——零链是
+ *  "没跑"而非"跑过没匹配上"，此时给出的诊断全是误诊。 */
 function buildBlocks(
   groups: FilterGroup[],
   sequenceResults: Record<string, SequenceMatchResult>,
   filters: Map<string, Filter>,
   matches: FilterMatch[],
   cepRange: { start: number; end: number } | null,
+  engineOk: boolean,
 ): CepBlock[] {
   const out: CepBlock[] = [];
   for (const g of groups) {
@@ -199,7 +202,8 @@ function buildBlocks(
       overLimit,
       rows: inRange,
       threadHint: g.sequence?.scope === 'thread' ? threadHint(r) : null,
-      diagnoses: totalChains === 0 && g.sequence ? explainNoMatch(g.sequence, matches, true) : null,
+      diagnoses:
+        engineOk && totalChains === 0 && g.sequence ? explainNoMatch(g.sequence, matches, true) : null,
       anomalySummary,
       anomalyTrueTotal,
     });
@@ -224,6 +228,10 @@ export function CepTimelinePanel() {
   const focusEvent = useLogStore((s) => s.focusEvent);
   // 异常高亮开关（从 group 编辑器迁入）：按组控制未覆盖事件标红
   const toggleSequenceAnomaly = useLogStore((s) => s.toggleSequenceAnomaly);
+  // CEP 引擎状态（wasm 是唯一 Web 引擎，TS 副本已删除）：失败显式横幅 + 重试
+  const cepEngineError = useLogStore((s) => s.cepEngineError);
+  const cepEnginePending = useLogStore((s) => s.cepEnginePending);
+  const retryCepEngine = useLogStore((s) => s.retryCepEngine);
   // 面板收纳（收纳后留 24px 竖条作展开入口）
   const [collapsed, setCollapsed] = useState(false);
   // 每组渐进渲染上限（groupId → 已加载行数）：首屏 RENDER_BATCH 批，
@@ -256,16 +264,33 @@ export function CepTimelinePanel() {
     setRangeOpen(false);
   };
 
+  // 配置了序列边的组数（结果可能因引擎未跑而为空，但规则本身存在）
+  const seqGroupCount = useMemo(
+    () => groups.filter((g) => g.sequence && g.sequence.edges.length > 0).length,
+    [groups],
+  );
+  // 引擎挂了且确实有序列规则 → 面板必须活着显示横幅：否则 blocks 为空直接
+  // return null，用户看到"什么都没有"，完全无法归因（正是本轮要消灭的盲区）
+  const engineDown = cepEngineError !== null && seqGroupCount > 0;
+  const enginePending = cepEnginePending && seqGroupCount > 0;
+
   const blocks = useMemo(() => {
     const filterMap = new Map(filters.map((f) => [f.id, f] as const));
-    return buildBlocks(groups, sequenceResults, filterMap, matches, cepRange);
-  }, [groups, sequenceResults, filters, matches, cepRange]);
+    return buildBlocks(
+      groups,
+      sequenceResults,
+      filterMap,
+      matches,
+      cepRange,
+      cepEngineError === null && !cepEnginePending,
+    );
+  }, [groups, sequenceResults, filters, matches, cepRange, cepEngineError, cepEnginePending]);
 
   useEffect(() => {
     setLimits({});
   }, [blocks]);
 
-  if (blocks.length === 0) return null;
+  if (blocks.length === 0 && !engineDown && !enginePending) return null;
 
   if (collapsed) {
     return (
@@ -286,7 +311,9 @@ export function CepTimelinePanel() {
       <div className={styles.panelHeader}>
         <span className={styles.panelTitle}>CEP 规则</span>
         <span className={styles.spacer} />
-        <span className={styles.panelCount}>{blocks.length} 组规则</span>
+        <span className={styles.panelCount}>
+          {engineDown ? seqGroupCount : blocks.length} 组规则
+        </span>
         <button
           className={`${styles.rangeBtn} ${cepRange ? styles.rangeActive : ''}`}
           title="按时间筛选 CEP 结果（仅本面板生效）"
@@ -321,6 +348,27 @@ export function CepTimelinePanel() {
           </div>
         )}
       </div>
+      {/* 引擎不可用横幅：TS 兜底已删除，失败必须显式呈现 + 可重试，
+          绝不把"没跑"伪装成"没有匹配" */}
+      {engineDown && (
+        <div className={styles.engineBanner}>
+          <AlertTriangle size={13} />
+          <div className={styles.engineBannerBody}>
+            <b>CEP 引擎不可用，序列匹配未执行</b>
+            <span>{cepEngineError}</span>
+          </div>
+          <button
+            className={styles.engineRetry}
+            onClick={retryCepEngine}
+            title="重置引擎加载状态并重试"
+          >
+            重试
+          </button>
+        </div>
+      )}
+      {enginePending && !engineDown && (
+        <div className={styles.enginePending}>CEP 引擎加载中…</div>
+      )}
       <div className={styles.panelBody}>
         {blocks.map((b) => {
           // 渐进渲染：只挂载已加载批次，行号 count 已在全量 rows 上编好

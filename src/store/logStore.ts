@@ -8,8 +8,15 @@ import { toast } from './uiStore';
 import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, SavedRange, SequenceConfig, SequenceEdge, SequenceMatchResult, TimeRange } from '../types';
 import type { FullParseResult } from '../parser/parseBridge';
 import { FilterEngine, splitSubConditions } from '../filters/FilterEngine';
-import { runSequenceMatching } from '../sequence/SequenceMatcher';
-import { ensureCepWasm, runCepWasm } from '../sequence/cepWasm';
+import {
+  ensureCepWasm,
+  isCepWasmFailed,
+  isCepWasmReady,
+  onCepWasmSettled,
+  retryCepWasm,
+  runCepWasm,
+  type CepWasmOutcome,
+} from '../sequence/cepWasm';
 import {
   openWorkspaceDir,
   readFilters,
@@ -102,22 +109,17 @@ function skelEvents(hits: DbFilterHits | undefined): LogEvent[] {
  *  渐进渲染（见 CepTimelinePanel），2000 行 ≈ 50 屏，再深请收窄规则/时间窗。 */
 export const CEP_MAX_CHAINS = 2000;
 
-/** 前端 TS 序列引擎的事件体量护栏：超限组跳过（大目录全量跑会把主线程拖死） */
-const TS_SEQ_EVENT_LIMIT = 300_000;
-
-function seqTsSafeGroups(groups: FilterGroup[], matches: FilterMatch[]): FilterGroup[] {
-  const len = new Map<string, number>();
-  for (const fm of matches) len.set(fm.filterId, fm.events.length);
-  const ok = groups.filter((g) =>
-    g.filterIds.reduce((n, fid) => n + (len.get(fid) ?? 0), 0) <= TS_SEQ_EVENT_LIMIT,
-  );
-  if (ok.length < groups.length) {
-    toast.warn(
-      'CEP 数据量过大，已跳过部分规则组',
-      `命中事件超过 ${TS_SEQ_EVENT_LIMIT / 1000}k 的组不走前端引擎（引擎下推失败/不支持时），请收紧规则`,
-    );
-  }
-  return ok;
+/** 引擎非 ok 结局的 UI 文案（ctx=失败场景前缀）。TS 副本已删除，
+ *  失败必须显式呈现，绝不把"没跑"伪装成"没有匹配"。 */
+function cepFailureText(
+  w: Extract<CepWasmOutcome, { kind: 'failed' } | { kind: 'unsupported' }>,
+  ctx?: string,
+): string {
+  const reason =
+    w.kind === 'unsupported'
+      ? '引擎声明不支持当前规则特性（is_supported 恒 true 后不应出现，请检查引擎版本）'
+      : `引擎错误：${w.error instanceof Error ? w.error.message : String(w.error)}`;
+  return ctx ? `${ctx}；${reason}` : `CEP 引擎不可用——${reason}`;
 }
 
 function scheduleCorrRecompute(run: () => void) {
@@ -249,7 +251,14 @@ interface LogState {
   // --- 序列图关联（group 内 filter 串行时序） ---
   /** 各 group 的序列匹配结果（groupId → result；未配置/无边的 group 不在内） */
   sequenceResults: Record<string, SequenceMatchResult>;
+  /** CEP 引擎（wasm）最近一次失败的说明；null=正常。失败时序列匹配未执行，
+   *  UI 显示横幅 + 重试——TS 兜底副本已删除，不再有静默回退 */
+  cepEngineError: string | null;
+  /** wasm 加载窗口期：已注册就绪重算，sequenceResults 暂为旧值 */
+  cepEnginePending: boolean;
   recomputeSequences: () => void;
+  /** 重试 CEP 引擎（UI 横幅按钮）：重置 wasm 加载状态，就绪/失败后自动重算 */
+  retryCepEngine: () => void;
   addSequenceEdge: (
     groupId: string,
     fromFilterId: string,
@@ -438,6 +447,8 @@ export const useLogStore = create<LogState>((set, get) => ({
   groups: [],
   collapsedGroups: new Set(),
   sequenceResults: {},
+  cepEngineError: null,
+  cepEnginePending: false,
 
   viewRange: null,
   fullRange: null,
@@ -610,6 +621,8 @@ export const useLogStore = create<LogState>((set, get) => ({
       viewRange: null,
       matches: [],
       sequenceResults: {},
+      cepEngineError: null,
+      cepEnginePending: false,
       selectedEventId: null,
       hoveredEventId: null,
       scrubberTs: null,
@@ -838,17 +851,23 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   // ---- 序列图关联（group 内 filter 串行时序） ----
 
-  /** 重算所有 group 的序列匹配（依赖 matches + groups.sequence） */
+  /** 重算所有 group 的序列匹配（依赖 matches + groups.sequence）。
+   *
+   *  引擎拓扑（TS 副本已删除，wasm 与桌面 native 编译同一份 cep.rs）：
+   *  - dbMode：单行/常规组下推 native（runDbSequences，可扩展）；
+   *    仅「全排除」跨行组必须走 wasm（需要全量行基集，目录模式拿不到）；
+   *    native 异常/回退时用同一份 cep.rs 的 wasm 兜底，仍失败才显式报错。
+   *  - Web 端：wasm 是唯一引擎。
+   *  wasm 首次加载窗口期：保留旧结果，注册 onCepWasmSettled 就绪后自动重算；
+   *  失败写 cepEngineError 由 UI 横幅 + 重试呈现，绝不静默空跑。 */
   recomputeSequences: () => {
     const { groups, matches, dbMode, filters } = get();
-    // 幂等启动 Web 端 wasm CEP 引擎（与桌面 native 引擎同一份 cep.rs）；
-    // 首次加载窗口期内 runCepWasm 回退 TS，加载完成后 Web 端即走引擎。
+    // 幂等启动 wasm CEP 引擎（App 启动时已预热，这里双保险）
     void ensureCepWasm();
-    // dbMode：优先下推 Rust（PR-4 CEP 加速路径），不支持的特性整体回退 TS 引擎
     if (dbMode) {
       void (async () => {
         // engine ≥ 0.2.2 起引擎自带跨行聚合（拆分下推 fid\0i + 引擎内取交集），
-        // 含跨行 filter 的 group 也能下推；仅「全排除」仍需回退——它需要全量
+        // 含跨行 filter 的 group 也能下推；仅「全排除」仍需走 wasm——它需要全量
         // 行基集，目录模式拿不到（与 dbStore 的全排除提示同源）。
         const seqGroups = groups.filter((g) => g.sequence && g.sequence.edges.length > 0);
         const tsGroups = seqGroups.filter((g) =>
@@ -861,6 +880,21 @@ export const useLogStore = create<LogState>((set, get) => ({
         );
         const rustGroups = seqGroups.filter((g) => !tsGroups.includes(g));
         let results: Record<string, SequenceMatchResult> = {};
+        let engineError: string | null = null;
+        // wasm 恰好在加载（含重试竞态）：保留旧结果，落定后自动重算
+        const deferUntilSettled = () => {
+          set({ cepEnginePending: true });
+          onCepWasmSettled(() => {
+            set({ cepEnginePending: false });
+            get().recomputeSequences();
+          });
+        };
+        // 仅当本批规则确实需要 wasm（tsGroups 非空）时才预检加载窗口——
+        // 纯 native 路径不应被 wasm 加载状态阻塞
+        if (tsGroups.length > 0 && !isCepWasmReady() && !isCepWasmFailed()) {
+          deferUntilSettled();
+          return;
+        }
         if (rustGroups.length > 0) {
           try {
             // REST 化：ws_sequences 需携带 groups 引用到的全部 filter 的
@@ -897,31 +931,81 @@ export const useLogStore = create<LogState>((set, get) => ({
               seqQueries,
             );
             if (resp.fallback) {
-              results = runSequenceMatching(seqTsSafeGroups(rustGroups, matches), matches);
+              // 引擎整体回退（is_supported 恒 true 后不应出现）：同一份 cep.rs 的 wasm 顶上
+              const w = runCepWasm(rustGroups, matches);
+              if (w.kind === 'ok') results = w.results;
+              else if (w.kind === 'loading') {
+                deferUntilSettled();
+                return;
+              } else engineError = cepFailureText(w, '原生引擎回退了该组规则');
             } else {
               results = resp.results as Record<string, SequenceMatchResult>;
             }
-          } catch {
-            results = runSequenceMatching(seqTsSafeGroups(rustGroups, matches), matches);
+          } catch (e) {
+            // native IPC 失败（传输/进程层，非语义问题）：wasm 顶上，仍失败才显式报错
+            const w = runCepWasm(rustGroups, matches);
+            if (w.kind === 'ok') results = w.results;
+            else if (w.kind === 'loading') {
+              deferUntilSettled();
+              return;
+            } else engineError = cepFailureText(w, `原生引擎下推失败（${String(e)}）`);
           }
         }
         if (tsGroups.length > 0) {
           const w = runCepWasm(tsGroups, matches);
-          Object.assign(
-            results,
-            w ?? runSequenceMatching(seqTsSafeGroups(tsGroups, matches), matches),
-          );
+          if (w.kind === 'ok') Object.assign(results, w.results);
+          else if (w.kind === 'loading') {
+            deferUntilSettled();
+            return;
+          } else engineError = engineError ?? cepFailureText(w, '跨行规则组的 CEP 引擎不可用');
         }
-        set({ sequenceResults: results });
+        set({
+          sequenceResults: results,
+          cepEngineError: engineError,
+          cepEnginePending: false,
+        });
         get().recomputeCorrelations();
       })();
       return;
     }
-    // Web 端：优先走引擎 wasm（与桌面 native 同一份 cep.rs），未就绪/不支持回退 TS
-    const wasmResults = runCepWasm(groups, matches);
-    const results = wasmResults ?? runSequenceMatching(groups, matches);
-    // 引用不变时避免无谓 set（runSequenceMatching 每次新对象，简单比较）
-    set({ sequenceResults: results });
+    // Web 端：wasm 是唯一引擎（与桌面 native 同一份 cep.rs）
+    const w = runCepWasm(groups, matches);
+    if (w.kind === 'loading') {
+      // 首次加载窗口期：保留旧结果不闪空，就绪/失败后自动重算
+      set({ cepEnginePending: true });
+      onCepWasmSettled(() => {
+        set({ cepEnginePending: false });
+        get().recomputeSequences();
+      });
+      return;
+    }
+    if (w.kind === 'ok') {
+      set({ sequenceResults: w.results, cepEngineError: null, cepEnginePending: false });
+    } else {
+      // 引擎不可用：清空结果 + 显式错误（UI 横幅 + 重试）——
+      // 绝不把"没跑"伪装成"没有匹配"
+      set({
+        sequenceResults: {},
+        cepEngineError: cepFailureText(w),
+        cepEnginePending: false,
+      });
+    }
+  },
+
+  retryCepEngine: () => {
+    set({ cepEngineError: null, cepEnginePending: true });
+    retryCepWasm();
+    if (isCepWasmReady()) {
+      set({ cepEnginePending: false });
+      get().recomputeSequences();
+      return;
+    }
+    // 重置后必然处于 loading：落定（就绪/再次失败）后自动重算，
+    // 失败路径由 recomputeSequences 重新写回 cepEngineError
+    onCepWasmSettled(() => {
+      set({ cepEnginePending: false });
+      get().recomputeSequences();
+    });
   },
 
   addSequenceEdge: (groupId, fromFilterId, toFilterId, maxGapMs, opts) => {
@@ -1561,6 +1645,8 @@ export const useLogStore = create<LogState>((set, get) => ({
       groups: [],
       collapsedGroups: new Set<string>(),
       sequenceResults: {},
+      cepEngineError: null,
+      cepEnginePending: false,
       graphNodes: {},
       graphPan: { x: 0, y: 0 },
       graphZoom: 1,

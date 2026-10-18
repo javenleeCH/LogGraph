@@ -300,8 +300,12 @@ src/
     regexWasm.ts                # wasm 版 Rust regex 加载 / 编译 / 校验
     wasm-filter/pkg/            # wasm 产物（随仓库提交）
   sequence/
-    expr.ts                     # 节点条件表达式
-    SequenceMatcher.ts          # 序列链匹配（六种边 + thread 分桶 + 循环计数）
+    expr.ts                     # 节点条件表达式（UI 校验 / 预览计数）
+    cepWasm.ts                  # wasm 版 CEP 引擎加载 / 运行（与桌面 native 同源）
+    wasm-cep/pkg/               # wasm 产物（随仓库提交）
+    explain.ts                  # 「为何没匹配」零链诊断（纯函数）
+    threadHint.ts               # thread 解析质量提示（纯函数）
+    anomalyWindows.ts           # 异常时间窗聚合与分级（纯函数）
   io/
     openLogFlow.ts              # 打开日志统一入口（单文件 / 目录）
     fileLoader.ts               # 文件加载（浏览器/Tauri 双后端）

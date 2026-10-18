@@ -25,6 +25,7 @@ import {
 import { recordOpenProject } from './io/recentProjects';
 import { setupTauriDragDrop, isTauri } from './lib/tauri';
 import { ensureRegexWasm } from './filters/regexWasm';
+import { ensureCepWasm } from './sequence/cepWasm';
 import { ParserDriftBanner } from './components/ParserDriftBanner';
 import { ToastHost, BusyIndicator } from './components/ToastHost';
 import { CommandPalette } from './components/CommandPalette';
@@ -88,6 +89,14 @@ export default function App() {
   // 会在首次过滤时由 FilterEngine 惰性触发加载）。
   useEffect(() => {
     if (!isTauri()) void ensureRegexWasm();
+  }, []);
+
+  // 预热 wasm CEP 引擎：与桌面 native 同一份 cep.rs，是 Web 端唯一序列引擎
+  // （TS 副本已删除）。启动即加载，让加载窗口与日志解析重叠——CEP 需要
+  // 时它基本已就绪；未就绪时 recomputeSequences 延后到 onCepWasmSettled 重算，
+  // 不再有静默回退。
+  useEffect(() => {
+    void ensureCepWasm();
   }, []);
 
   // 横向文件树分隔拖拽

@@ -107,7 +107,7 @@ flowchart TB
         TAURI["src-tauri/  薄壳<br/>窗口 + IPC 命令转发"]
     end
     ENGINE["engine/  loggraph-engine<br/>search + parser + cep + pipeline + rules<br/>纯 Rust 库，无 tauri / 无 DB"]
-    WEB["src/  React Web UI<br/>浏览器模式：filter-wasm + TS SequenceMatcher"]
+    WEB["src/  React Web UI<br/>浏览器模式：filter-wasm + cep-wasm"]
     CEPFILE[".cep 规则文件<br/>(JSON, §3)"]
 
     CLI --> ENGINE
@@ -152,11 +152,19 @@ flowchart TB
 
 * **Tauri 模式（桌面）**：`invoke('engine_*')` → engine，能力全集。
 
-* **浏览器模式**：`filter-wasm`（regex 过滤）+ `src/sequence/SequenceMatcher.ts`
+* **浏览器模式**：`filter-wasm`（regex 过滤）+ `cep-wasm`（序列匹配）。
 
-  （TS 版序列匹配）。TS 实现是浏览器**降级路径**，语义上允许落后于引擎，
+  两个 wasm 都由**引擎源码**编译（`#[path]` 共享 `engine/src/cep.rs` 等），
 
-  但**结果 DTO 字段必须与 §5.2 一致**（同为 `SequenceMatchResult` 形状）。
+  与桌面 native 是同一份实现的两种编译产物，**不存在 TS 降级路径**
+
+  （`SequenceMatcher.ts` 已于 2026-10-18 删除）。wasm 首次加载窗口期内
+
+  CEP 重算延后到就绪自动执行；加载/运行失败时 UI 显式呈现「引擎不可用」
+
+  横幅 + 重试，绝不静默给出空结果。结果 DTO 字段与 §5.2 一致
+
+  （同为 `SequenceMatchResult` 形状）。
 
 模式探测：`window.__TAURI__` 存在 → Tauri 模式。UI 不感知差异的接口
 
@@ -959,6 +967,29 @@ native 逐字节一致的聚合。`src/io/dbStore.ts::aggregateSubHits` / `aggre
 
 入口：⌘K 命令面板 → 「更新」→「检查更新…」（实现 `src/io/updater.ts`）。
 Web 版无更新通道（刷新即最新），调用时明确提示而非静默失败。
+
+***
+
+### 3.16 CEP 单一事实来源收口（✅ 2026-10-18，TS 副本已删除）
+
+**改动约束（2026-10-18 起 CEP 双实现彻底清零）**：前端 TS 序列引擎副本
+`src/sequence/SequenceMatcher.ts`（614 行，五轮复评起冻结为兜底）**已删除**。
+CEP 匹配语义的单一事实来源是 `engine/src/cep.rs`：
+
+- 桌面端：native 引擎（Tauri IPC `engine_run_cep` / `ws_sequences` 下推）；
+- Web 端与 dbMode 跨行组：`cep-wasm/`（`#[path]` 共享 `cep.rs` 的 wasm 构建，
+  入口 `src/sequence/cepWasm.ts::runCepWasm`），与 native 逐字节一致；
+- App 启动即预热 `ensureCepWasm()`；首次加载窗口期内重算延后
+  （`onCepWasmSettled` 就绪自动重算，保留旧结果不闪空）；
+- 失败策略**无静默回退**：`runCepWasm` 返回显式 outcome
+  （`loading` / `failed` / `unsupported` / `ok`），失败写
+  `logStore.cepEngineError`，CEP 面板渲染「引擎不可用」横幅 + 重试
+  （`retryCepEngine` → `retryCepWasm` 重置加载状态）；
+- `threadStats` 等可观测产出由引擎统一计算（测试
+  `src/sequence/threadHint.test.ts` 直跑 wasm 锁定）。
+
+**改 CEP 语义只动 `engine/src/cep.rs` 一处**，native 与 wasm 同时生效。
+验证：`node scripts/test-wasm-cep.mjs`（10/10）+ `npm test`（90/90）。
 
 ***
 

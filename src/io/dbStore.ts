@@ -370,8 +370,9 @@ export interface DbRunSeqGroup {
 }
 
 export interface DbRunSeqResponse {
-  /** true → 存在不支持的特性（thread 分桶 / nodeConditions / nodeCounts / opt / periodic），
-   *  调用方应整体回退到前端 TS 引擎 runSequenceMatching */
+  /** true → 引擎整体回退（is_supported 恒 true 后不应出现；保留供引擎未来新增门控）。
+   *  调用方（logStore.recomputeSequences）以同一份 cep.rs 的 wasm 兜底，
+   *  仍失败则写 cepEngineError 显式报错——TS 兜底副本已删除 */
   fallback: boolean;
   results: Record<string, unknown>;
 }
@@ -379,8 +380,9 @@ export interface DbRunSeqResponse {
 /**
  * 把序列匹配下推到 Rust（queries 先 warm 命中缓存，再以 (line, ts) 命中
  * 作为事件流贪心链匹配）。queries 必须覆盖 groups 引用到的全部 filter，
- * 否则对应事件缺失。仅支持 global 作用域 + seq/and/or/not 边；其它特性由
- * Rust 端标记 fallback。
+ * 否则对应事件缺失。thread 分桶 / nodeConditions / nodeCounts / opt /
+ * periodic 自 engine ≥ 0.2.1 起均已支持；「全排除」跨行组需全量行基集，
+ * 由调用方分流到 wasm 路径（见 logStore.recomputeSequences）。
  */
 export async function runDbSequences(
   groups: DbRunSeqGroup[],

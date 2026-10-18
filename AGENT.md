@@ -59,7 +59,10 @@ src/      React UI         桌面模式走 IPC；浏览器模式走 TS 降级实
 - **JS 语义对齐**：engine 的 timestamp/line 解析逐条对齐前端
   `src/parser/timestampFormats.ts` / `LogParser.ts`（含 JS trim 字符集、
   `\d`/`\s` 翻译、Date.UTC 越界进位、epoch 无 lookaround 的极大数字段扫描等）。
-  CEP 对齐 `src/sequence/SequenceMatcher.ts`。**改任一侧必须同步另一侧**，
+  CEP 语义单一事实来源是 `engine/src/cep.rs`——前端 TS 副本
+  （`SequenceMatcher.ts`）已于 2026-10-18 删除，Web 端经 `cep-wasm`
+  与 native 编译同一份源，**只改引擎一处，两端同时生效**；失败时
+  UI 显式报错（`logStore.cepEngineError`），不存在 TS 降级路径。
   对齐清单见 `plans/rust-parser-design.md`。
 - `.logGraph` 是应用工作区目录（filters.json / perf.log），**绝不当作日志源索引**
   （残留文件会污染格式探测）。所有枚举日志文件的路径必须排除它。
