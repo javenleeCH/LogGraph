@@ -3,6 +3,9 @@ import { useLogStore, selectEventCount } from '../store/logStore';
 import { useTheme } from '../hooks/useTheme';
 import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
 import { formatDateTime, formatDuration } from '../utils/timeFormat';
+import { describeLoadMode } from '../utils/loadMode';
+import { isTauri } from '../lib/tauri';
+import { toast } from '../store/uiStore';
 import { FolderOpen, Folder, Table, BarChart, Maximize, Sun, Moon, Search, Keyboard } from './Icon';
 import { RangeChips } from './RangeChips';
 import { RecentProjectsMenu } from './RecentProjectsMenu';
@@ -27,8 +30,13 @@ export function Toolbar() {
   const logsDirName = useLogStore((s) => s.logsDirName);
   const splitOrientation = useLogStore((s) => s.splitOrientation);
   const setSplitOrientation = useLogStore((s) => s.setSplitOrientation);
+  const dbMode = useLogStore((s) => s.dbMode);
   const { theme, toggle } = useTheme();
   const setPaletteOpen = useCommandPalette();
+
+  // 加载模式徽标（P1④：同一份数据两种能力边界，用户此前的行为差异无法归因）。
+  // desktop 判定只需一次，不随主题/数据变化。
+  const modeInfo = useMemo(() => describeLoadMode(dbMode, isTauri()), [dbMode]);
 
   const showShortcuts = () =>
     window.dispatchEvent(new CustomEvent('loggraph-show-shortcuts'));
@@ -158,6 +166,15 @@ export function Toolbar() {
                 {meta.skipped > 0 ? ` · 跳过 ${meta.skipped}` : ''}
               </span>
             )}
+            {/* 加载模式徽标：hover 看摘要，点击看完整能力边界 */}
+            <button
+              className={styles['mode-pill']}
+              data-mode={modeInfo.mode}
+              title={modeInfo.summary}
+              onClick={() => toast.info(modeInfo.detailTitle, modeInfo.boundaries.join('\n'))}
+            >
+              {modeInfo.label}
+            </button>
           </div>
           <div className={styles['status-right']}>
             {hitInfo.total > 0 && (

@@ -232,6 +232,44 @@
   white-space: nowrap;
 }
 
+/* ---- 加载模式徽标（P1④）:hover 看摘要，点击看完整能力边界 ----
+   视觉语义：中性信息 pill（不借用 --anomaly/--danger/--corr 数据语义色）；
+   仅用 --accent 小圆点区分「数据库模式·直扫磁盘」这一交互高亮。 */
+.mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2px 10px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mode-pill:hover {
+  color: var(--accent-light);
+  border-color: var(--accent);
+}
+
+.mode-pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: 0 0 auto;
+}
+
+/* 数据库模式 = 在线直扫原文件，圆点点亮 */
+.mode-pill[data-mode='db']::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
 .status-btn {
   display: inline-flex;
   align-items: center;
