@@ -9,6 +9,7 @@ import type { Filter, FilterGroup, FilterMatch, LogEvent, NodeCount, NodePos, Sa
 import type { FullParseResult } from '../parser/parseBridge';
 import { FilterEngine, splitSubConditions } from '../filters/FilterEngine';
 import { runSequenceMatching } from '../sequence/SequenceMatcher';
+import { ensureCepWasm, runCepWasm } from '../sequence/cepWasm';
 import {
   openWorkspaceDir,
   readFilters,
@@ -840,6 +841,9 @@ export const useLogStore = create<LogState>((set, get) => ({
   /** 重算所有 group 的序列匹配（依赖 matches + groups.sequence） */
   recomputeSequences: () => {
     const { groups, matches, dbMode, filters } = get();
+    // 幂等启动 Web 端 wasm CEP 引擎（与桌面 native 引擎同一份 cep.rs）；
+    // 首次加载窗口期内 runCepWasm 回退 TS，加载完成后 Web 端即走引擎。
+    void ensureCepWasm();
     // dbMode：优先下推 Rust（PR-4 CEP 加速路径），不支持的特性整体回退 TS 引擎
     if (dbMode) {
       void (async () => {
@@ -902,14 +906,20 @@ export const useLogStore = create<LogState>((set, get) => ({
           }
         }
         if (tsGroups.length > 0) {
-          Object.assign(results, runSequenceMatching(seqTsSafeGroups(tsGroups, matches), matches));
+          const w = runCepWasm(tsGroups, matches);
+          Object.assign(
+            results,
+            w ?? runSequenceMatching(seqTsSafeGroups(tsGroups, matches), matches),
+          );
         }
         set({ sequenceResults: results });
         get().recomputeCorrelations();
       })();
       return;
     }
-    const results = runSequenceMatching(groups, matches);
+    // Web 端：优先走引擎 wasm（与桌面 native 同一份 cep.rs），未就绪/不支持回退 TS
+    const wasmResults = runCepWasm(groups, matches);
+    const results = wasmResults ?? runSequenceMatching(groups, matches);
     // 引用不变时避免无谓 set（runSequenceMatching 每次新对象，简单比较）
     set({ sequenceResults: results });
   },

@@ -12,9 +12,11 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build --no-bundle",
     "build:wasm": "cd filter-wasm && cargo build --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/filter_wasm.wasm --target web --out-dir ../src/filters/wasm-filter/pkg --out-name filter_wasm",
+    "build:wasm:cep": "cd cep-wasm && cargo build --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/cep_wasm.wasm --target web --out-dir ../src/sequence/wasm-cep/pkg --out-name cep_wasm",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:wasm": "node scripts/test-wasm-regex.mjs"
+    "test:wasm": "node scripts/test-wasm-regex.mjs",
+    "test:wasm:cep": "node scripts/test-wasm-cep.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.2",

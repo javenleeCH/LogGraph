@@ -1,4 +1,12 @@
 /**
+ * ⚠️ 已弃用（仅兜底安全网）：本文件是 CEP 引擎的 TS 副本。Web 端现已改用同一份
+ * 引擎源（engine/src/cep.rs）的 wasm 构建（cep-wasm/ + src/sequence/cepWasm.ts），
+ * 桌面端走 native 引擎，两者语义逐字节一致。新增/修改 CEP 语义**只改
+ * engine/src/cep.rs**，不要再在此处并行维护，否则会再次产生双实现债。
+ * 仅当 wasm 加载失败（极旧浏览器等）时作为回退。
+ */
+
+/**
  * 序列匹配引擎（模式族 v2）：把 group 内声明的 filter 图关联
  * （seq / not / and / or / periodic 边）在事件流上做贪心链匹配与断言。
  *
