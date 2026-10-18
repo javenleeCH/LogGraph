@@ -67,6 +67,57 @@
   background: var(--bg-elevated);
 }
 
+/* 三步上手引导：把"打开→加过滤→建序列"连成可见的流程，并显式指向模板 */
+.steps {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 20px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  text-align: left;
+}
+.stepNo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent-grad);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  flex: none;
+}
+.stepBody {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.stepTitle {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.stepDesc {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.stepArrow {
+  color: var(--text-faint);
+  font-size: 14px;
+}
+
 .divider {
   position: relative;
   width: 100%;

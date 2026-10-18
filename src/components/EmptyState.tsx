@@ -10,6 +10,7 @@ import { openSingleLogFile, openLogDirectory } from '../io/openLogFlow';
 import { listFavoriteProjects, listRecentProjects, type ProjectEntry } from '../io/recentProjects';
 import { FileText, Folder, Plus, Search } from './Icon';
 import { ProjectRow } from './ProjectRow';
+import { openWithQuery } from './CommandPalette';
 import styles from './EmptyState.module.css';
 
 /** 未载入任何日志：主引导页 */
@@ -48,6 +49,32 @@ export function WelcomeState() {
           跨轨道的垂直对齐就是时间上的关联。
         </p>
 
+        <div className={styles.steps}>
+          <div className={styles.step}>
+            <span className={styles.stepNo}>1</span>
+            <div className={styles.stepBody}>
+              <div className={styles.stepTitle}>打开日志</div>
+              <div className={styles.stepDesc}>拖入文件或目录</div>
+            </div>
+          </div>
+          <span className={styles.stepArrow}>→</span>
+          <div className={styles.step}>
+            <span className={styles.stepNo}>2</span>
+            <div className={styles.stepBody}>
+              <div className={styles.stepTitle}>加过滤器</div>
+              <div className={styles.stepDesc}>按级别 / 关键字分轨</div>
+            </div>
+          </div>
+          <span className={styles.stepArrow}>→</span>
+          <div className={styles.step}>
+            <span className={styles.stepNo}>3</span>
+            <div className={styles.stepBody}>
+              <div className={styles.stepTitle}>用模板建序列</div>
+              <div className={styles.stepDesc}>自动连成链路</div>
+            </div>
+          </div>
+        </div>
+
         <div className={styles.actions}>
           <button className="primary" onClick={() => void openSingleLogFile()}>
             <FileText size={14} />
@@ -59,6 +86,10 @@ export function WelcomeState() {
               打开日志目录
             </button>
           )}
+          <button className="ghost" onClick={() => openWithQuery('模板')}>
+            <Plus size={14} />
+            用模板建序列规则
+          </button>
         </div>
 
         <div className={styles.divider}>
@@ -113,6 +144,11 @@ export function WelcomeState() {
             <Plus size={12} />
             先建一个过滤器
           </button>
+          <span className={styles.tipSep} />
+          <button className={styles.linkBtn} onClick={() => openWithQuery('模板')}>
+            <Plus size={12} />
+            或用模板快速建序列规则
+          </button>
         </div>
       </div>
     </div>
@@ -159,6 +195,10 @@ export function NoFilterState() {
         >
           <Plus size={13} />
           空白过滤器
+        </button>
+        <button className="ghost" onClick={() => openWithQuery('模板')}>
+          <Plus size={13} />
+          用模板建序列规则
         </button>
       </div>
       <div className={styles.compactHint}>

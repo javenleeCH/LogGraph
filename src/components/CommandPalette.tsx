@@ -46,19 +46,29 @@ import styles from './CommandPalette.module.css';
 
 interface PaletteState {
   open: boolean;
+  /** openWithQuery 预填的查询，命令面板打开时消费一次 */
+  initialQuery: string;
   setOpen: (v: boolean) => void;
+  openWithQuery: (q: string) => void;
   toggle: () => void;
 }
 
 export const usePaletteStore = create<PaletteState>((set, get) => ({
   open: false,
+  initialQuery: '',
   setOpen: (v) => set({ open: v }),
+  openWithQuery: (q: string) => set({ open: true, initialQuery: q }),
   toggle: () => set({ open: !get().open }),
 }));
 
 /** 供任意组件调用：打开命令面板 */
 export function openCommandPalette() {
   usePaletteStore.getState().setOpen(true);
+}
+
+/** 供任意组件调用：打开命令面板并预填查询（如跳到「规则模板」组） */
+export function openWithQuery(q: string) {
+  usePaletteStore.getState().openWithQuery(q);
 }
 
 /** 供 Toolbar 按钮使用的 setter hook */
@@ -617,10 +627,12 @@ export function CommandPalette() {
     setCursor(0);
   }, [query]);
 
-  // 打开时聚焦并复位输入框
+  // 打开时聚焦并复位/预填输入框（openWithQuery 会预填 initialQuery，消费后清空）
   useEffect(() => {
     if (open) {
-      setQuery('');
+      const seed = usePaletteStore.getState().initialQuery;
+      setQuery(seed);
+      if (seed) usePaletteStore.setState({ initialQuery: '' });
       setCursor(0);
       requestAnimationFrame(() => inputRef.current?.focus());
     }
