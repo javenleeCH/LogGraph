@@ -1,0 +1,15 @@
+2024-01-15 11:00:00.100 INFO [main] com.legacy.LegacyService - LegacyService starting
+2024-01-15 11:00:00.400 INFO [main] com.legacy.LegacyService - Worker pool size=3
+2024-01-15 11:00:00.600 INFO [main] com.legacy.LegacyService - Startup complete
+2024-01-15 11:00:01.000 INFO [pool-1] com.legacy.Worker - processing batch 1 (100 items)
+2024-01-15 11:00:01.200 INFO [pool-2] com.legacy.Worker - processing batch 2 (100 items)
+2024-01-15 11:00:01.500 INFO [pool-1] com.legacy.Worker - batch 1 committed
+2024-01-15 11:00:01.600 WARN [pool-3] com.legacy.Worker - queue depth high: 512
+2024-01-15 11:00:01.900 ERROR [pool-2] com.legacy.Worker - batch 2 failed: connection timeout
+2024-01-15 11:00:02.300 WARN [pool-2] com.legacy.Worker - retrying batch 2 attempt 1/3
+2024-01-15 11:00:02.800 INFO [pool-2] com.legacy.Worker - batch 2 committed
+2024-01-15 11:00:03.000 INFO [pool-3] com.legacy.Worker - processing batch 3 (100 items)
+2024-01-15 11:00:03.400 INFO [pool-3] com.legacy.Worker - batch 3 committed
+2024-01-15 11:00:04.000 DEBUG [pool-1] com.legacy.Worker - heartbeat ok
+2024-01-15 11:00:05.000 INFO [main] com.legacy.LegacyService - Shutdown initiated
+2024-01-15 11:00:05.300 INFO [main] com.legacy.LegacyService - LegacyService stopped

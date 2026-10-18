@@ -1,0 +1,44 @@
+{
+  "$schema": "https://loggraph.dev/schemas/cep-rules-1.schema.json",
+  "version": 1,
+  "description": "示例：scope=thread 线程分桶（配 sample/springboot/order-service.log）——Spring Boot/Logback 布局的 thread 由格式族在 `--- [thread]` 槽位提取；链只在同一线程桶内匹配",
+  "filters": [
+    { "id": "started",   "label": "启动完成",   "pattern": "Started OrderService" },
+    { "id": "entry",     "label": "请求进入",   "pattern": "GET /api/orders" },
+    { "id": "query",     "label": "执行查询",   "pattern": "Executing query" },
+    { "id": "reset",     "label": "连接重置",   "pattern": "Connection reset by peer" },
+    { "id": "retry",     "label": "重试请求",   "pattern": "Retrying request" },
+    { "id": "done",      "label": "请求完成",   "pattern": "Request completed" }
+  ],
+  "groups": [
+    {
+      "groupId": "recovery",
+      "label": "线程内故障恢复链",
+      "scope": "thread",
+      "filterIds": ["reset", "retry", "done"],
+      "edges": [
+        { "id": "rec_e1", "kind": "seq", "fromFilterId": "reset", "toFilterId": "retry", "maxGapMs": 2000 },
+        { "id": "rec_e2", "kind": "seq", "fromFilterId": "retry", "toFilterId": "done",  "maxGapMs": 2000 }
+      ]
+    },
+    {
+      "groupId": "healthy",
+      "label": "线程内健康请求链",
+      "scope": "thread",
+      "filterIds": ["entry", "query", "done"],
+      "edges": [
+        { "id": "ok_e1", "kind": "seq", "fromFilterId": "entry", "toFilterId": "query", "maxGapMs": 2000 },
+        { "id": "ok_e2", "kind": "seq", "fromFilterId": "query", "toFilterId": "done",  "maxGapMs": 2000 }
+      ]
+    },
+    {
+      "groupId": "no-reset-after-startup",
+      "label": "启动后禁止连接重置（NOT，期望零违规）",
+      "scope": "thread",
+      "filterIds": ["started", "reset"],
+      "edges": [
+        { "id": "not_e1", "kind": "not", "fromFilterId": "started", "toFilterId": "reset", "maxGapMs": 60000 }
+      ]
+    }
+  ]
+}

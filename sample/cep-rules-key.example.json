@@ -1,0 +1,39 @@
+{
+  "$schema": "https://loggraph.dev/schemas/cep-rules-1.schema.json",
+  "version": 1,
+  "description": "示例：scope=key 关联键分桶（配 sample/distributed/ 三服务日志）——keyPattern 从原始行抽 traceId，跨文件事件按 traceId 入桶，链只在同一 traceId 内匹配；含全局作用域对照组（会串出跨请求伪链，仅作演示勿用）",
+  "filters": [
+    { "id": "entry",    "label": "网关入口",   "pattern": "GET /api/orders" },
+    { "id": "authOk",   "label": "鉴权通过",   "pattern": "token validated" },
+    { "id": "created",  "label": "订单创建",   "pattern": "order created" },
+    { "id": "payFail",  "label": "支付失败",   "pattern": "payment failed" },
+    { "id": "gw500",    "label": "网关 500",   "pattern": "status=500" }
+  ],
+  "groups": [
+    {
+      "groupId": "trace-failure",
+      "label": "跨服务故障链（按 traceId 分桶）",
+      "scope": "key",
+      "keyPattern": "traceId=([0-9a-f]{8})",
+      "filterIds": ["entry", "authOk", "created", "payFail", "gw500"],
+      "edges": [
+        { "id": "key_e1", "kind": "seq", "fromFilterId": "entry",    "toFilterId": "authOk",   "maxGapMs": 60000 },
+        { "id": "key_e2", "kind": "seq", "fromFilterId": "authOk",   "toFilterId": "created",  "maxGapMs": 60000 },
+        { "id": "key_e3", "kind": "seq", "fromFilterId": "created",  "toFilterId": "payFail",  "maxGapMs": 60000 },
+        { "id": "key_e4", "kind": "seq", "fromFilterId": "payFail",  "toFilterId": "gw500",    "maxGapMs": 60000 }
+      ]
+    },
+    {
+      "groupId": "trace-failure-global-contrast",
+      "label": "对照：全局作用域（会串伪链，仅作演示勿用）",
+      "scope": "global",
+      "filterIds": ["entry", "authOk", "created", "payFail", "gw500"],
+      "edges": [
+        { "id": "glob_e1", "kind": "seq", "fromFilterId": "entry",    "toFilterId": "authOk",   "maxGapMs": 60000 },
+        { "id": "glob_e2", "kind": "seq", "fromFilterId": "authOk",   "toFilterId": "created",  "maxGapMs": 60000 },
+        { "id": "glob_e3", "kind": "seq", "fromFilterId": "created",  "toFilterId": "payFail",  "maxGapMs": 60000 },
+        { "id": "glob_e4", "kind": "seq", "fromFilterId": "payFail",  "toFilterId": "gw500",    "maxGapMs": 60000 }
+      ]
+    }
+  ]
+}

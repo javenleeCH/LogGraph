@@ -564,7 +564,7 @@ pub fn parse_rules(json: &str) -> EngineResult<RulesFile>;
 | `groupId` | string | **是** | — | id 格式同上，全局唯一（S02） |
 | `label` | string ≤64 | 否 | — | 展示名，引擎忽略 |
 | `scope` | enum | 否 | `"global"` | `global` \| `thread` \| `key`。`thread` = 按 `thread` 字段分桶隔离匹配（engine ≥ 0.2.1）；`key` = 按关联键分桶隔离匹配（engine ≥ 0.2.7，见 §3.4.1） |
-| `keyPattern` | string | 否 | — | 仅 `scope:"key"`：从事件原文 `raw` 提取关联键（traceId/requestId…）的正则，**须含 1 个捕获组**（取 group 1）。缺省 / 空 / 编译失败 / 无捕获组 ⇒ 该组退化为 `global`（保守，不误分桶） |
+| `keyPattern` | string | 否 | — | 仅 `scope:"key"`：从事件原文 `raw` 提取关联键（traceId/requestId…）的正则，**须含 1 个捕获组**（取 group 1）。规则文件路径下缺省 / 空 / 编译失败 / 无捕获组 ⇒ `validate` 报 **S12**（文件不可用，避免"以为在按 key 分桶、实际静默按 global 串伪链"）；引擎库调用（不过校验）仍保守退化为 `global` |
 | `filterIds` | string[] | **是** | — | 1..256 项，去重；每项 ∈ `filters[].id`（S03）。**边只能引用这里声明的 filter**（S04） |
 | `edges` | Edge[] | **是** | — | 0..256 条；可为空（该 group 只产出 uncovered 事件清单） |
 | `nodeCounts` | map | 否 | `{}` | 见 §3.6（engine ≥ 0.2.1 起支持） |
@@ -576,10 +576,14 @@ pub fn parse_rules(json: &str) -> EngineResult<RulesFile>;
 微服务日志的请求关联键（traceId / requestId…）**不是**日志里的独立字段，也不在
 thread 的启发式槽位里——thread 是位置启发式产物（§3.13），让用户改用显式正则：
 
-- 分桶键 = `keyPattern` 对每条事件 `raw` 的**捕获组 1**；无捕获组 ⇒ 该 group 退化为 `global`；
+- 分桶键 = `keyPattern` 对每条事件 `raw` 的**捕获组 1**；
 - 未命中正则的事件**不进任何键桶**（不同于 thread 的 `∅` 桶）：没有键就无从关联，
   混在一起匹配只会跨请求串出伪链。这类事件计入 `uncoveredEvents`；
-- 正则编译失败 / 缺省 / 空串 ⇒ 退化为 `global`（与 `thread` 覆盖率 0 时的保守方向一致）；
+- 规则文件路径下 `keyPattern` 缺省 / 空 / 编译失败 / 无捕获组 ⇒ `validate` 报 S12
+  （硬闸门，不放进引擎）；引擎库调用（跳过校验）才走保守退化：正则不可用 ⇒
+  退化为 `global`，与 `thread` 覆盖率 0 时的保守方向一致；
+- **反向保护**：非 `key` 作用域的 group 带 `keyPattern` ⇒ `validate` 记 S12 **warning**
+  （W_RULES_UNSUPPORTED，字段被忽略但文件合法——防用户误以为设了就生效）；
 - 链的 `thread` 字段此时承载**关联键值**（复用同一承载位，避免 DTO 再加一列）；
 - 引擎回传 `keyStats`（§3.13.1）：`withKey === 0` ⇒ 正则没提取到任何键（静默退化）；
   `distinctKeys` 接近 `withKey` ⇒ 键粒度太细（每事件一桶 ⇒ 链凑不齐 ⇒ 全部漏报）。
@@ -682,7 +686,8 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
         "groupId":   { "$ref": "#/$defs/id" },
         "label":     { "type": "string", "maxLength": 64 },
         "scope":     { "enum": ["global", "thread", "key"], "default": "global" },
-        "keyPattern": { "type": "string", "maxLength": 512 },
+        "keyPattern": { "type": "string", "minLength": 1, "maxLength": 4096,
+                        "description": "scope=\"key\" 时的关联键提取正则；须含 >=1 个捕获组（S12）" },
         "filterIds": {
           "type": "array", "minItems": 1, "maxItems": 256,
           "uniqueItems": true,
@@ -775,6 +780,7 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 | S09 | 语义 | `nodeCounts`/`nodeConditions` 键 ∈ 所在 group 的 filterIds | 键 `Z` 不在 filterIds |
 | S10 | 语义 | nodeCount `1 ≤ min ≤ max`（缺省端 min=1 /max=∞） | `{ "min": 5, "max": 2 }` |
 | S11 | 版本 | `version` ∈ 引擎支持集（当前 `{1}`）；非整数 → schema 层 | `"version": 2` |
+| S12 | 语义 | `scope:"key"` ⇒ `keyPattern` 必填、非空、可编译、含 ≥1 捕获组（§3.4.1）；非 key 作用域带 `keyPattern` ⇒ warning | `{"scope":"key"}` 无 keyPattern |
 
 校验顺序与聚合（✅ Stable）：
 
@@ -786,7 +792,7 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
    （未知字段 / 必填 / 类型 / 枚举 / id 正则 / 边界 / 去重），**聚合全部**
    问题后一次性返回。kind↔字段条件（S06/S07）**不在此层**—— 结构层不懂
    kind 缺省语义，统一在语义层做（schema 里的 `allOf` 是编辑器用的）。
-4. **语义层**（E_RULES_SEMANTIC）：typed 反序列化成功后执行 S01–S10，
+4. **语义层**（E_RULES_SEMANTIC）：typed 反序列化成功后执行 S01–S12，
    聚合全部问题。S08 失败的错误码是 `E_PATTERN`（不是 E_RULES_SEMANTIC），
    但 issue 仍带 `rule: "S08"`。
 
@@ -819,7 +825,7 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 | `E_RULES_SYNTAX` | 语法 | JSON 解析失败 | 2 |
 | `E_RULES_VERSION` | 版本 | S11 | 2 |
 | `E_RULES_SCHEMA` | 结构 | 未知字段 / 类型 / 枚举 / 边界 | 2 |
-| `E_RULES_SEMANTIC` | 语义 | S01–S07、S09、S10 | 2 |
+| `E_RULES_SEMANTIC` | 语义 | S01–S07、S09、S10、S12 | 2 |
 | `E_PATTERN` | 语义 | S08 正则编译失败 | 2 |
 | `E_GLOB` | 遍历 | `-g` 非法 glob | 2 |
 | `E_IO` | 运行 | 文件读失败、walk io 错误 | 2 |

@@ -1,0 +1,16 @@
+[
+  {
+    "filterId": "reset-104-only",
+    "pattern": "Connection reset\n!errno=110",
+    "isRegex": false,
+    "caseSensitive": true,
+    "scope": "raw"
+  },
+  {
+    "filterId": "slow-query-with-ms",
+    "pattern": "Slow query\n[0-9]+ms",
+    "isRegex": true,
+    "caseSensitive": true,
+    "scope": "raw"
+  }
+]

@@ -1,0 +1,5 @@
+2024-01-15 10:00:00.200 [order-1] INFO  order created traceId=f00dcafe orderId=O-9003
+2024-01-15 10:00:00.300 [order-1] ERROR payment failed traceId=f00dcafe reason=card_declined
+2024-01-15 10:00:05.120 [order-1] INFO  order created traceId=a1b2c3d4 orderId=O-9002
+2024-01-15 10:00:05.300 [order-1] ERROR payment failed traceId=a1b2c3d4 reason=card_declined
+2024-01-15 10:00:20.000 [order-2] ERROR payment failed traceId=deadbeef reason=gateway_unreachable

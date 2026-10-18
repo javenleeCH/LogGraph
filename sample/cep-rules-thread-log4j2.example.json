@@ -1,0 +1,44 @@
+{
+  "$schema": "https://loggraph.dev/schemas/cep-rules-1.schema.json",
+  "version": 1,
+  "description": "示例：scope=thread 线程分桶（配 sample/log4j2/legacy-service.log）——log4j2 变体布局 `LEVEL [thread] logger - msg` 的 thread 由格式族提取；链只在同一线程桶内匹配",
+  "filters": [
+    { "id": "started",  "label": "启动完成",   "pattern": "Startup complete" },
+    { "id": "stopped",  "label": "服务停止",   "pattern": "LegacyService stopped" },
+    { "id": "shutdown", "label": "开始关闭",   "pattern": "Shutdown initiated" },
+    { "id": "failed",   "label": "批次失败",   "pattern": "batch 2 failed" },
+    { "id": "retry",    "label": "批次重试",   "pattern": "retrying batch 2" },
+    { "id": "committed","label": "批次提交",   "pattern": "batch 2 committed" }
+  ],
+  "groups": [
+    {
+      "groupId": "batch-recovery",
+      "label": "线程内批次失败恢复链",
+      "scope": "thread",
+      "filterIds": ["failed", "retry", "committed"],
+      "edges": [
+        { "id": "l4j_rec_e1", "kind": "seq", "fromFilterId": "failed", "toFilterId": "retry",     "maxGapMs": 5000 },
+        { "id": "l4j_rec_e2", "kind": "seq", "fromFilterId": "retry",  "toFilterId": "committed", "maxGapMs": 5000 }
+      ]
+    },
+    {
+      "groupId": "lifecycle",
+      "label": "主线程生命周期链",
+      "scope": "thread",
+      "filterIds": ["started", "shutdown", "stopped"],
+      "edges": [
+        { "id": "l4j_life_e1", "kind": "seq", "fromFilterId": "started",  "toFilterId": "shutdown", "maxGapMs": 60000 },
+        { "id": "l4j_life_e2", "kind": "seq", "fromFilterId": "shutdown", "toFilterId": "stopped",  "maxGapMs": 60000 }
+      ]
+    },
+    {
+      "groupId": "no-fail-after-startup",
+      "label": "启动后禁止批次失败（NOT，期望零违规）",
+      "scope": "thread",
+      "filterIds": ["started", "failed"],
+      "edges": [
+        { "id": "l4j_not_e1", "kind": "not", "fromFilterId": "started", "toFilterId": "failed", "maxGapMs": 60000 }
+      ]
+    }
+  ]
+}

@@ -43,7 +43,11 @@
       "properties": {
         "groupId":   { "$ref": "#/$defs/id" },
         "label":     { "type": "string", "maxLength": 64 },
-        "scope":     { "enum": ["global", "thread"], "default": "global" },
+        "scope":     { "enum": ["global", "thread", "key"], "default": "global" },
+        "keyPattern": {
+          "type": "string", "minLength": 1, "maxLength": 4096,
+          "description": "scope=\"key\" 时的关联键提取正则；必须含 ≥1 个捕获组（契约 §3.4.1）"
+        },
         "filterIds": {
           "type": "array", "minItems": 1, "maxItems": 256,
           "uniqueItems": true,

@@ -2,10 +2,10 @@
 //!
 //! 三层：JSON 语法（`E_RULES_SYNTAX`）→ 版本闸门（S11）→ 结构（`E_RULES_SCHEMA`，
 //! 手写镜像 `schemas/cep-rules-1.schema.json`，不引 JSON-Schema 库）→ 语义
-//! （`E_RULES_SEMANTIC`，S01–S10；S08 用 `E_PATTERN`）。
+//! （`E_RULES_SEMANTIC`，S01–S12；S08 用 `E_PATTERN`）。
 //! 每层内部聚合全部问题、不 fail-fast；前层失败则后层跳过。
 //! engine ≥ 0.2.1 起 `thread`/`periodic`/`nodeCounts`/`nodeConditions` 均已支持，
-//! 不再产出 W01–W05 警告；文件保持合法，结构/语义问题仍报 S01–S10。
+//! 不再产出 W01–W05 警告；文件保持合法，结构/语义问题仍报 S01–S12。
 
 use crate::cep::GroupSpec;
 use crate::error::{EngineError, EngineResult};
@@ -67,7 +67,7 @@ impl IssueCode {
 #[derive(Debug, Clone, Serialize)]
 pub struct RuleIssue {
     pub code: IssueCode,
-    /// S01–S10 / W01–W05；结构层问题无编号
+    /// S01–S12 / W01–W05；结构层问题无编号
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<&'static str>,
     /// 实例路径，如 `$.groups[0].edges[1].toFilterId`
@@ -110,7 +110,7 @@ fn default_version() -> u32 {
 pub fn validate_rules(json: &str) -> RuleReport {
     let json = strip_bom(json);
     let mut errors = Vec::new();
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
 
     let value: Value = match serde_json::from_str(json) {
         Ok(v) => v,
@@ -147,7 +147,7 @@ pub fn validate_rules(json: &str) -> RuleReport {
         // 结构已过（required/类型/未知键/边界全查过），typed 反序列化必然成功
         let file: RulesFile = serde_json::from_value(value)
             .expect("结构校验通过后 typed 反序列化不应失败");
-        validate_semantics(&file, &mut errors);
+        validate_semantics(&file, &mut errors, &mut warnings);
     }
 
     RuleReport { valid: errors.is_empty(), errors, warnings }
@@ -181,7 +181,9 @@ pub fn parse_rules(json: &str) -> EngineResult<RulesFile> {
     })?;
 
     let mut errors = Vec::new();
-    validate_semantics(&file, &mut errors);
+    // parse_rules 是硬闸门（只分 合法/非法），告警不进错误类型——
+    // W 码展示走 validate_rules / `loggraph validate` 路径。
+    validate_semantics(&file, &mut errors, &mut Vec::new());
     if !errors.is_empty() {
         return Err(EngineError::RulesSemantic { issues: errors });
     }
@@ -435,7 +437,8 @@ fn validate_group(v: &Value, path: String, errors: &mut Vec<RuleIssue>) {
     for k in obj.keys() {
         if !matches!(
             k.as_str(),
-            "groupId" | "label" | "scope" | "filterIds" | "edges" | "nodeCounts" | "nodeConditions"
+            "groupId" | "label" | "scope" | "keyPattern" | "filterIds" | "edges" | "nodeCounts"
+                | "nodeConditions"
         ) {
             schema_err(
                 errors,
@@ -448,12 +451,29 @@ fn validate_group(v: &Value, path: String, errors: &mut Vec<RuleIssue>) {
     check_string_field(obj.get("label"), format!("{path}.label"), Some(MAX_LABEL_LEN), errors);
     if let Some(s) = obj.get("scope") {
         match s.as_str() {
-            Some("global") | Some("thread") => {}
+            Some("global") | Some("thread") | Some("key") => {}
             _ => schema_err(
                 errors,
                 format!("{path}.scope"),
-                "必须是 \"global\" 或 \"thread\"".to_string(),
+                "必须是 \"global\" / \"thread\" / \"key\"".to_string(),
             ),
+        }
+    }
+    // keyPattern：scope="key" 的关联键提取正则（契约 §3.4.1）。
+    // 结构层只查类型/长度；「必须有捕获组」等语义在 S12（结构层不懂正则）。
+    if let Some(kp) = obj.get("keyPattern") {
+        match kp.as_str() {
+            None => schema_err(
+                errors,
+                format!("{path}.keyPattern"),
+                "必须是字符串".to_string(),
+            ),
+            Some(s) if s.chars().count() > MAX_PATTERN_LEN => schema_err(
+                errors,
+                format!("{path}.keyPattern"),
+                format!("长度超过上限 {MAX_PATTERN_LEN}"),
+            ),
+            _ => {}
         }
     }
     check_array_field(
@@ -617,11 +637,15 @@ fn check_node_conditions(v: Option<&Value>, path: String, errors: &mut Vec<RuleI
 }
 
 // ---------------------------------------------------------------------------
-// 语义层（S01–S10）：typed 反序列化成功后执行。
+// 语义层（S01–S12）：typed 反序列化成功后执行。
 // W01–W05 已于 engine ≥ 0.2.1 全部支持并移除，故不再产出 warning。
 // ---------------------------------------------------------------------------
 
-fn validate_semantics(file: &RulesFile, errors: &mut Vec<RuleIssue>) {
+fn validate_semantics(
+    file: &RulesFile,
+    errors: &mut Vec<RuleIssue>,
+    warnings: &mut Vec<RuleIssue>,
+) {
     // ---- S01 过滤器 id 唯一 / S08 正则可编译 ----
     let mut filter_first: HashMap<&str, usize> = HashMap::new();
     for (i, f) in file.filters.iter().enumerate() {
@@ -653,7 +677,7 @@ fn validate_semantics(file: &RulesFile, errors: &mut Vec<RuleIssue>) {
     }
     let declared: HashSet<&str> = file.filters.iter().map(|f| f.id.as_str()).collect();
 
-    // ---- S02–S10（逐 group；S05 边 id 跨 group 唯一）----
+    // ---- S02–S12（逐 group；S05 边 id 跨 group 唯一）----
     let mut group_first: HashMap<&str, usize> = HashMap::new();
     let mut edge_first: HashMap<&str, (usize, usize)> = HashMap::new();
     for (gi, g) in file.groups.iter().enumerate() {
@@ -672,6 +696,59 @@ fn validate_semantics(file: &RulesFile, errors: &mut Vec<RuleIssue>) {
 
         // W01/W04/W05：engine ≥ 0.2.1 起 scope=thread / nodeCounts / nodeConditions
         // 均已支持，不再告警/回退。空 map = 未写，不影响。
+
+        // S12：scope="key" 关联键正则（契约 §3.4.1）。引擎侧缺 keyPattern /
+        // 无捕获组会**静默按 global 运行**——校验层在作者期显式报错，
+        // 不把「串伪链 / 零链」留给运行期才发现。
+        match (&g.key_pattern, g.scope.as_str()) {
+            (Some(kp), _) => {
+                if kp.trim().is_empty() {
+                    sem_err(
+                        errors,
+                        "S12",
+                        format!("{gpath}.keyPattern"),
+                        "keyPattern 不能为空字符串（scope=\"key\" 时引擎按 global 运行）".to_string(),
+                    );
+                } else {
+                    match regex::Regex::new(kp) {
+                        Err(e) => sem_err(
+                            errors,
+                            "S12",
+                            format!("{gpath}.keyPattern"),
+                            format!("keyPattern 不是合法正则: {e}"),
+                        ),
+                        // captures_len() < 2 ⇒ 0 个捕获组（1 = 整串本身）
+                        Ok(re) if re.captures_len() < 2 => sem_err(
+                            errors,
+                            "S12",
+                            format!("{gpath}.keyPattern"),
+                            "keyPattern 必须包含至少 1 个捕获组 (...)——无组时引擎按 global 运行"
+                                .to_string(),
+                        ),
+                        Ok(_) => {}
+                    }
+                }
+                if g.scope != "key" {
+                    // 有 keyPattern 但 scope 非 key：引擎忽略该字段。不阻断，告警。
+                    warnings.push(RuleIssue {
+                        code: IssueCode::Unsupported,
+                        rule: Some("S12"),
+                        path: format!("{gpath}.keyPattern"),
+                        message: format!(
+                            "keyPattern 仅在 scope=\"key\" 时生效（当前 scope=\"{}\"，该字段被忽略）",
+                            g.scope
+                        ),
+                    });
+                }
+            }
+            (None, "key") => sem_err(
+                errors,
+                "S12",
+                format!("{gpath}.scope"),
+                "scope=\"key\" 必须同时提供 keyPattern（缺省时引擎按 global 运行）".to_string(),
+            ),
+            _ => {}
+        }
 
         let members: HashSet<&str> = g.filter_ids.iter().map(|s| s.as_str()).collect();
 
@@ -1077,6 +1154,106 @@ mod tests {
                     "nodeCounts": { "a": { "min": 5, "max": 2 } } } ] }"#,
         );
         assert!(r.errors.iter().any(rules(IssueCode::RulesSemantic, Some("S10"))));
+    }
+
+    // ---- S12：scope="key" 关联键正则（契约 §3.4.1）----
+
+    #[test]
+    fn key_scope_valid_with_capture_group() {
+        let r = report(
+            r#"{ "filters": [ { "id": "a", "pattern": "x" } ],
+                "groups": [ { "groupId": "g", "scope": "key", "keyPattern": "traceId=([0-9a-f]{8})",
+                    "filterIds": ["a"], "edges": [] } ] }"#,
+        );
+        assert!(r.valid, "errors: {:?}", r.errors);
+        assert!(r.warnings.is_empty(), "不应有告警，实得: {:?}", r.warnings);
+    }
+
+    #[test]
+    fn key_scope_requires_key_pattern_s12() {
+        // scope=key 缺 keyPattern ⇒ 引擎会静默按 global 跑，作者期必须报错
+        let r = report(
+            r#"{ "filters": [ { "id": "a", "pattern": "x" } ],
+                "groups": [ { "groupId": "g", "scope": "key", "filterIds": ["a"], "edges": [] } ] }"#,
+        );
+        assert!(!r.valid);
+        assert!(r.errors.iter().any(rules(IssueCode::RulesSemantic, Some("S12"))));
+    }
+
+    #[test]
+    fn key_pattern_without_capture_group_s12() {
+        // 无捕获组 ⇒ 引擎按 global 跑（伪链风险），作者期报错
+        let r = report(
+            r#"{ "filters": [ { "id": "a", "pattern": "x" } ],
+                "groups": [ { "groupId": "g", "scope": "key", "keyPattern": "traceId=\\w+",
+                    "filterIds": ["a"], "edges": [] } ] }"#,
+        );
+        assert!(!r.valid);
+        assert!(r.errors.iter().any(rules(IssueCode::RulesSemantic, Some("S12"))));
+    }
+
+    #[test]
+    fn key_pattern_invalid_regex_s12() {
+        let r = report(
+            r#"{ "filters": [ { "id": "a", "pattern": "x" } ],
+                "groups": [ { "groupId": "g", "scope": "key", "keyPattern": "([unclosed",
+                    "filterIds": ["a"], "edges": [] } ] }"#,
+        );
+        assert!(!r.valid);
+        assert!(r.errors.iter().any(rules(IssueCode::RulesSemantic, Some("S12"))));
+    }
+
+    #[test]
+    fn key_pattern_empty_string_s12() {
+        let r = report(
+            r#"{ "filters": [ { "id": "a", "pattern": "x" } ],
+                "groups": [ { "groupId": "g", "scope": "key", "keyPattern": "",
+                    "filterIds": ["a"], "edges": [] } ] }"#,
+        );
+        assert!(!r.valid);
+        assert!(r.errors.iter().any(rules(IssueCode::RulesSemantic, Some("S12"))));
+    }
+
+    #[test]
+    fn key_pattern_without_key_scope_warns_but_valid() {
+        // 有 keyPattern 但 scope 非 key ⇒ 引擎忽略该字段；不阻断，告警
+        let r = report(
+            r#"{ "filters": [ { "id": "a", "pattern": "x" } ],
+                "groups": [ { "groupId": "g", "scope": "global", "keyPattern": "traceId=(\\w+)",
+                    "filterIds": ["a"], "edges": [] } ] }"#,
+        );
+        assert!(r.valid, "errors: {:?}", r.errors);
+        assert_eq!(r.warnings.len(), 1);
+        assert_eq!(r.warnings[0].code, IssueCode::Unsupported);
+        assert_eq!(r.warnings[0].rule, Some("S12"));
+    }
+
+    #[test]
+    fn key_pattern_wrong_type_schema_layer() {
+        // keyPattern 非字符串 ⇒ 结构层（E_RULES_SCHEMA）报错，不进语义层
+        let r = report(
+            r#"{ "filters": [ { "id": "a", "pattern": "x" } ],
+                "groups": [ { "groupId": "g", "scope": "key", "keyPattern": 42,
+                    "filterIds": ["a"], "edges": [] } ] }"#,
+        );
+        assert!(!r.valid);
+        assert!(r
+            .errors
+            .iter()
+            .any(|i| i.code == IssueCode::RulesSchema && i.path.ends_with("keyPattern")));
+    }
+
+    #[test]
+    fn unknown_scope_rejected_with_key_in_message() {
+        let r = report(
+            r#"{ "filters": [ { "id": "a", "pattern": "x" } ],
+                "groups": [ { "groupId": "g", "scope": "session", "filterIds": ["a"], "edges": [] } ] }"#,
+        );
+        assert!(!r.valid);
+        assert!(r
+            .errors
+            .iter()
+            .any(|i| i.code == IssueCode::RulesSchema && i.path.ends_with("scope")));
     }
 
     #[test]

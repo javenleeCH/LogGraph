@@ -1,0 +1,9 @@
+2024-01-15 10:00:00.000 [nio-1] INFO  GET /api/orders traceId=4bf92f35 duration=42ms
+2024-01-15 10:00:00.050 [nio-1] ERROR response sent traceId=4bf92f35 status=502
+2024-01-15 10:00:00.400 [nio-3] ERROR response sent traceId=f00dcafe status=500
+2024-01-15 10:00:05.000 [nio-2] INFO  GET /api/orders traceId=a1b2c3d4 duration=610ms
+2024-01-15 10:00:05.600 [nio-2] ERROR response sent traceId=a1b2c3d4 status=500
+2024-01-15 10:00:10.000 [nio-1] INFO  GET /api/orders traceId=e5f6a7b8 duration=15ms
+2024-01-15 10:00:10.400 [nio-1] ERROR response sent traceId=e5f6a7b8 status=401
+2024-01-15 10:00:15.000 [nio-2] INFO  GET /health traceId=deadbeef duration=2ms
+2024-01-15 10:00:15.050 [nio-2] INFO  response sent traceId=deadbeef status=200

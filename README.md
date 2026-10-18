@@ -89,7 +89,7 @@ level == '' || msg.endsWith('!')
 - **rg 同内核全家桶**：`ignore`（尊重 `.gitignore` / `.ignore` / `.rgignore` / 全局 gitignore / `info/exclude`，默认跳过隐藏文件）+ `grep-searcher`（mmap + SIMD + memchr）+ `grep-regex`，速度与语义对齐命令行 rg。
 - **rg 没有的 CEP**：一条命令完成「多过滤器扫描 → 时间戳提取 → 序列模式匹配」，直接输出匹配链 / NOT 违规 / 边统计。
 - **开关**：`-i` 忽略大小写、`-F` 纯文本（默认正则）、`-g` glob（`!` 排除，可多次）、`--hidden`、`--no-ignore`、`--json` 结构化输出。
-- 规则样例见 [`sample/cep-rules.example.json`](sample/cep-rules.example.json)。
+- 规则样例见 [`sample/cep-rules.example.json`](sample/cep-rules.example.json)（global 基线）；分作用域样例见 `sample/cep-rules-thread.example.json`（线程分桶）、`sample/cep-rules-key.example.json`（关联键分桶）、`sample/filters-crossline.example.json`（跨行 filter），清单与一键验证见下方「样本数据」。
 
 ### 大规模日志（桌面端 dbMode）
 
@@ -136,7 +136,7 @@ cargo install --path cli   # 安装 loggraph 命令到 PATH
 
 cargo build --release -p loggraph-cli  # 性能基准请用 release（debug 慢一个数量级）
 
-cargo test -p loggraph-engine   # 引擎单测（42 项：search/parser/cep/rules）
+cargo test -p loggraph-engine   # 引擎单测（128 项：search/parser/cep/rules）
 cd src-tauri && cargo test      # 桌面侧单测
 ```
 
@@ -149,7 +149,7 @@ loggraph search <文件或目录> <模式> [-i] [-F] [-g '<glob>'] [--hidden] [-
 # CEP：`.cep.json` 规则文件描述过滤器与分组/边（先过 schema 校验）
 loggraph cep <文件或目录> -R <rules.cep.json> [--json] [--fail-on-violation] [--fail-on-unsupported]
 
-# 规则文件校验（语法 + schema + 语义 S01–S10 / W01–W05）
+# 规则文件校验（语法 + schema + 语义 S01–S12）
 loggraph validate <rules.cep.json> [--json]
 
 # 导出规则 JSON Schema（管道给补全/LSP 用）
@@ -177,6 +177,33 @@ loggraph schema cep
     }
   ]
 }
+```
+
+### 样本数据（端到端验收，不靠 UT 空跑）
+
+每个特性都配了可真实跑验的样本：`sample/` 下的日志 + 规则 + 一个全自动验收脚本
+（解析 → CEP 分桶 → 跨行 filter → 规则闸门，共 45 项断言）。
+
+| 样本 | 对应特性 | 内容 |
+| --- | --- | --- |
+| `sample.log` / `sample_large.log` | 解析基线 / 性能 | 纯格式 50 行（CRLF）/ 5 万行 |
+| `springboot/order-service.log` | 格式族解析（B 轮覆盖） | Spring Boot `LEVEL PID --- [thread] logger : msg`，25 行 6 线程，连接重置→重试→恢复故事线 |
+| `log4j2/legacy-service.log` | 格式族解析（log4j2 变体） | `LEVEL [thread] logger - msg`，15 行 4 线程，批次失败→重试→提交 |
+| `distributed/{gateway,auth,order}.log` | scope=key 跨服务关联（#43） | 三服务 19 行共享 `traceId=<8hex>`，含 1 条完整故障链 + 1 条孤儿 trace |
+| `cep-rules-thread.example.json` | scope=thread 线程分桶 | recovery / healthy / NOT 三组，配 springboot 样本 |
+| `cep-rules-thread-log4j2.example.json` | scope=thread + log4j2 样本 | batch-recovery / lifecycle / NOT |
+| `cep-rules-key.example.json` | scope=key 关联键分桶 | `traceId=([0-9a-f]{8})` 5 步链 + global 对照组（演示伪链，勿用于生产） |
+| `filters-crossline.example.json` | 跨行 filter（契约 §3.14） | `"Connection reset\n!errno=110"` 正负子条件、慢查询多子条件交集 |
+
+```bash
+# 一键验收（自动 build CLI，45 项断言全过才算样本有效）
+node scripts/verify-samples.mjs
+
+# 手动试跑
+loggraph parse file sample/springboot/order-service.log
+loggraph cep sample/springboot -R sample/cep-rules-thread.example.json
+loggraph cep sample/distributed -R sample/cep-rules-key.example.json
+loggraph validate sample/cep-rules-key.example.json
 ```
 
 打开应用后：

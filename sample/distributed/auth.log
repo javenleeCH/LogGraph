@@ -1,0 +1,5 @@
+2024-01-15 10:00:00.100 [auth-1] INFO  token validated traceId=f00dcafe user=u1004
+2024-01-15 10:00:05.040 [auth-1] INFO  token validated traceId=a1b2c3d4 user=u1002
+2024-01-15 10:00:10.030 [auth-1] INFO  token validation started traceId=e5f6a7b8 user=u1003
+2024-01-15 10:00:10.150 [auth-1] ERROR token expired traceId=e5f6a7b8
+2024-01-15 10:00:15.030 [auth-1] INFO  token validated traceId=deadbeef user=healthcheck
