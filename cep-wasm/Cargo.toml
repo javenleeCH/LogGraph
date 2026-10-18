@@ -16,5 +16,7 @@ crate-type = ["cdylib", "rlib"]
 # 与 engine 保持同版本（语义一致）
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# cep.rs scope='key' 用：用户关联键正则（capture group 1）
+regex = "1"
 # 必须与已安装的 wasm-bindgen-cli 版本一致（schema 校验）
 wasm-bindgen = "=0.2.129"

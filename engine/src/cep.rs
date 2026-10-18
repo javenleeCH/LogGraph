@@ -4,7 +4,8 @@
 //! 事件源由调用方以 `filter_id -> 事件流` 的形式提供（引擎层可接 rg 直扫结果、
 //! 内存数组或瘦 SQL 查询）。
 //!
-//! 当前覆盖：`seq` / `not` / `and` / `or` / `opt` 五类边；`thread` 作用域分桶；
+//! 当前覆盖：`seq` / `not` / `and` / `or` / `opt` 五类边；`thread` / `key`
+//! 作用域分桶（key = 用户正则从 raw 提取的关联键，缺省/无效退化为全局）；
 //! `periodic` 自环心跳断言；节点级 `nodeCounts`（EPL `A{min,max}`）与
 //! `nodeConditions`（条件表达式）。详见 [`GroupSpec::is_supported`]（现恒 `true`）。
 //! DTO 形状按契约 §2.4/§3：camelCase + `deny_unknown_fields`，
@@ -12,6 +13,7 @@
 
 use crate::error::EngineResult;
 use crate::expr::compile_expr;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -24,9 +26,13 @@ pub struct GroupSpec {
     /// 展示名（UI 元数据，引擎忽略，契约 §3.4）
     #[serde(default)]
     pub label: Option<String>,
-    /// "global" | "thread"（缺省 global，契约 §3.4）
+    /// "global" | "thread" | "key"（缺省 global，契约 §3.4）
     #[serde(default = "default_scope")]
     pub scope: String,
+    /// scope="key" 时的关联键正则（须含 1 个捕获组，从 event.raw 提取 traceId/requestId…）。
+    /// 用户显式定义（非启发式）；缺省/无效 → 该 group 退化为全局（保守，不误分桶）。
+    #[serde(default)]
+    pub key_pattern: Option<String>,
     pub filter_ids: Vec<String>,
     pub edges: Vec<EdgeSpec>,
     #[serde(default)]
@@ -215,6 +221,11 @@ pub struct SeqResult {
     /// thread 解析质量统计（**无论 scope 是否为 thread 都产出**）
     #[serde(rename = "threadStats")]
     pub thread_stats: ThreadStats,
+    /// 关联键提取质量统计（**仅 scope='key' 且正则可用时产出**；退化到 global 的组
+    /// 不出现该字段，与「没走 key 路径」区分）。设计同 ThreadStats：让「正则没提取到键」
+    /// （静默退化全局）与「每事件一个键」（桶拆碎全漏）两种失败可见。见契约 §3.13.1。
+    #[serde(rename = "keyStats", skip_serializing_if = "Option::is_none")]
+    pub key_stats: Option<KeyStats>,
 }
 
 /// `thread` 字段的解析质量统计——纯可观测性，不改变任何匹配语义。
@@ -239,6 +250,20 @@ pub struct ThreadStats {
     pub with_thread: usize,
     /// distinct thread 数（`∅` 桶不计入）
     pub distinct_threads: usize,
+}
+
+/// `scope='key'` 的关联键提取质量统计——纯可观测性，不改变任何匹配语义。
+/// 与 [`ThreadStats`] 同构：用户正则的失效同样是静默的（没键 ⇒ 已按全局跑；
+/// 键太细 ⇒ 链全凑不齐），回传计数让调用方能把两种失败变成可见提示。
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyStats {
+    /// 参与本组匹配的事件总数（与分桶用的是同一批事件）
+    pub total_events: usize,
+    /// 其中正则提取到非空关联键的事件数
+    pub with_key: usize,
+    /// distinct 关联键数（未命中正则的事件不计入）
+    pub distinct_keys: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -508,27 +533,30 @@ impl GroupSpec {
 }
 
 /// 对单个 group 跑序列匹配。事件流由 [`EventStore`] 提供（纯算法，不接触存储层）。
-/// 按 thread 分桶构造单桶事件表（orig，未应用 nodeConditions）。
-/// `thread=None` 表示全局（不过滤，含所有事件）；`Some("∅")` 取 thread 为 None 的事件；
-/// 其余精确匹配 `event.thread`。
+/// 按分桶键构造单桶事件表（orig，未应用 nodeConditions）。
+/// `select=None` 表示全局（不过滤，含所有事件）；`Some("∅")` 取键为 None 的事件；
+/// 其余精确匹配 `key_of(event)`。`key_of` 抽取分桶键：thread 作用域取 `event.thread`，
+/// key 作用域取用户正则从 raw 提取的关联键（见 `match_group`）。返回拥有型 key，
+/// 避免调用点被事件引用生命周期束缚（桶键常来自独立映射表）。
 fn bucket_store<'a>(
     slices: &EventSlices<'a>,
     lane_ids: &HashSet<String>,
-    thread: Option<&str>,
+    select: Option<&str>,
+    key_of: impl Fn(&SeqEvent) -> Option<String>,
 ) -> HashMap<String, Vec<SeqEvent>> {
     let mut m = HashMap::new();
     for fid in lane_ids {
         let evs = slices.get(fid.as_str()).copied().unwrap_or(&[]);
-        let filtered: Vec<SeqEvent> = match thread {
+        let filtered: Vec<SeqEvent> = match select {
             None => evs.to_vec(),
             Some(t) if t == "\u{2205}" => evs
                 .iter()
-                .filter(|e| e.thread.is_none())
+                .filter(|e| key_of(e).is_none())
                 .cloned()
                 .collect(),
             Some(t) => evs
                 .iter()
-                .filter(|e| e.thread.as_deref() == Some(t))
+                .filter(|e| key_of(e).as_deref() == Some(t))
                 .cloned()
                 .collect(),
         };
@@ -841,6 +869,8 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
     let mut consumed: HashSet<u32> = HashSet::new();
     let mut chains: Vec<MatchedChain> = Vec::new();
     let mut heartbeats: Vec<Heartbeat> = Vec::new();
+    // 关联键提取质量（仅 key 作用域且正则可用时填充，见 SeqResult.key_stats）
+    let mut key_stats: Option<KeyStats> = None;
 
     if spec.scope == "thread" {
         // 收集所有 thread 桶（null → "∅"），每桶独立匹配（对齐前端 scope:thread 语义）
@@ -856,7 +886,12 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
             } else {
                 Some(key.as_str())
             };
-            let bucket = bucket_store(&slices, &lane_ids, thread);
+            // select 恒 Some(key)：∅ 桶必须是 Some("∅") 而非 None——None 在
+            // bucket_store 里表示「全局不过滤」，会把无 thread 事件混进每个真实
+            // thread 桶，造成双计 + 跨线程误链（曾潜伏，混合会话才暴露）。
+            let bucket = bucket_store(&slices, &lane_ids, Some(key.as_str()), |e| {
+                e.thread.clone()
+            });
             match_bucket(
                 spec,
                 &bucket,
@@ -868,8 +903,90 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
                 &mut heartbeats,
             );
         }
+    } else if spec.scope == "key" {
+        // key 作用域：用户正则（须含 1 个捕获组）从 event.raw 提取关联键
+        // （traceId/requestId…）分桶，每桶独立匹配。用户显式定义，非启发式。
+        // 缺省 / 空串 / 编译失败 / 无捕获组 → 退化为全局（保守，不误分桶）。
+        let compiled = spec
+            .key_pattern
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .and_then(|p| Regex::new(p).ok())
+            .filter(|re| re.captures_len() >= 2);
+        match compiled {
+            Some(re) => {
+                // id → 关联键（未命中/无捕获组 → None，不进任何键桶）
+                let mut key_of_event: HashMap<u32, Option<String>> = HashMap::new();
+                let mut buckets: HashSet<String> = HashSet::new();
+                let mut with_key = 0usize;
+                let mut total_keyed = 0usize;
+                for fid in &lane_ids {
+                    for ev in get_orig(fid) {
+                        total_keyed += 1;
+                        let k = re
+                            .captures(&ev.raw)
+                            .and_then(|c| c.get(1))
+                            .map(|m| m.as_str().to_string());
+                        if let Some(k) = &k {
+                            with_key += 1;
+                            buckets.insert(k.clone());
+                        }
+                        key_of_event.insert(ev.id, k);
+                    }
+                }
+                key_stats = Some(KeyStats {
+                    total_events: total_keyed,
+                    with_key,
+                    distinct_keys: buckets.len(),
+                });
+                // 无任何事件带键：不建 ∅ 桶、直接全局匹配一次（等价但避免空跑）。
+                if buckets.is_empty() {
+                    let bucket = bucket_store(&slices, &lane_ids, None, |_| None);
+                    match_bucket(
+                        spec,
+                        &bucket,
+                        None,
+                        &mut consumed,
+                        &mut edge_stats,
+                        &mut violations,
+                        &mut chains,
+                        &mut heartbeats,
+                    );
+                }
+                for key in &buckets {
+                    let bucket = bucket_store(&slices, &lane_ids, Some(key.as_str()), |e| {
+                        key_of_event.get(&e.id).and_then(|o| o.clone())
+                    });
+                    // 桶标签沿用 key（链/心跳的 thread 字段承载桶标识，前端按需展示）
+                    match_bucket(
+                        spec,
+                        &bucket,
+                        Some(key.clone()),
+                        &mut consumed,
+                        &mut edge_stats,
+                        &mut violations,
+                        &mut chains,
+                        &mut heartbeats,
+                    );
+                }
+            }
+            None => {
+                let bucket = bucket_store(&slices, &lane_ids, None, |_| None);
+                match_bucket(
+                    spec,
+                    &bucket,
+                    None,
+                    &mut consumed,
+                    &mut edge_stats,
+                    &mut violations,
+                    &mut chains,
+                    &mut heartbeats,
+                );
+            }
+        }
     } else {
-        let bucket = bucket_store(&slices, &lane_ids, None);
+        let bucket = bucket_store(&slices, &lane_ids, None, |_| None);
         match_bucket(
             spec,
             &bucket,
@@ -934,6 +1051,7 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
             with_thread,
             distinct_threads: distinct.len(),
         },
+        key_stats,
     })
 }
 
@@ -1020,6 +1138,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: None,
@@ -1040,6 +1159,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: None,
@@ -1066,6 +1186,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: None,
@@ -1090,6 +1211,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![EdgeSpec { kind: Some("not".into()), ..seq_edge() }],
             node_conditions: None,
             node_counts: None,
@@ -1110,6 +1232,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into(), "C".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![EdgeSpec {
                 id: "e_and".into(),
                 from_filter_id: "A".into(),
@@ -1136,6 +1259,7 @@ mod tests {
             filter_ids: vec!["A".into()],
             label: None,
             scope: "thread".into(),
+            key_pattern: None,
             edges: vec![],
             node_conditions: None,
             node_counts: None,
@@ -1159,6 +1283,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into(), "C".into(), "D".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![
                 EdgeSpec {
                     id: "e_and".into(),
@@ -1196,6 +1321,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![EdgeSpec {
                 id: "e".into(),
                 from_filter_id: "A".into(),
@@ -1220,6 +1346,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![EdgeSpec {
                 id: "e_opt".into(),
                 from_filter_id: "A".into(),
@@ -1250,6 +1377,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![EdgeSpec {
                 id: "e_opt".into(),
                 from_filter_id: "A".into(),
@@ -1281,6 +1409,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into(), "C".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![
                 EdgeSpec {
                     id: "e_ab".into(),
@@ -1325,6 +1454,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into(), "C".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![
                 EdgeSpec {
                     id: "e_ab".into(),
@@ -1373,6 +1503,19 @@ mod tests {
         pairs.iter().map(|(fid, evs)| (fid.to_string(), evs.to_vec())).collect()
     }
 
+    // 带 raw 的事件（scope=key 从 raw 提取关联键用）
+    fn ev_raw(id: u32, ts: i64, thread: Option<&str>, raw: &str) -> SeqEvent {
+        SeqEvent {
+            id,
+            ts,
+            raw: raw.to_string(),
+            message: String::new(),
+            thread: thread.map(|s| s.to_string()),
+            level: None,
+            source_file: None,
+        }
+    }
+
     #[test]
     fn thread_scope_matches_within_each_thread() {
         // 同一 thread 内 A(100)→B(150) 成链；另一 thread 的 A(200) 无配对 B → 不成链
@@ -1388,6 +1531,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "thread".into(),
+            key_pattern: None,
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: None,
@@ -1400,6 +1544,179 @@ mod tests {
         assert_eq!(res.chains[0].thread.as_deref(), Some("t1"));
         assert_eq!(res.chains[0].steps[0].event.id, 1);
         assert_eq!(res.chains[0].steps[1].event.id, 3);
+    }
+
+    /// 回归（曾潜伏）：thread 作用域的 ∅ 桶曾以 select=None（= 全局不过滤）建桶，
+    /// 无 thread 事件混进每个真实 thread 桶 ⇒ 双计 + 跨线程误链（纯线程会话不暴露，
+    /// 混合有/无 thread 才炸）。现在 ∅ 桶恒 Some("∅")，与真实 thread 严格隔离。
+    #[test]
+    fn thread_scope_empty_bucket_isolated_from_real_threads() {
+        // t1: A(100)→B(150) 成链；t2: A(200) 无 B；∅: A(300)→B(350) 成链
+        let s = store_full(&[
+            (
+                "A",
+                &[
+                    ev(1, 100, Some("t1"), None, ""),
+                    ev(2, 200, Some("t2"), None, ""),
+                    ev(3, 300, None, None, ""),
+                ],
+            ),
+            (
+                "B",
+                &[ev(4, 150, Some("t1"), None, ""), ev(5, 350, None, None, "")],
+            ),
+        ]);
+        let spec = GroupSpec {
+            group_id: "gt".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "thread".into(),
+            key_pattern: None,
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = run_sequences(&[spec], &s);
+        let res = r.results.get("gt").unwrap();
+        assert_eq!(res.chains.len(), 2, "t1 与 ∅ 各成一条链，t2 不成链");
+        let ids: Vec<(u32, u32)> = res
+            .chains
+            .iter()
+            .map(|c| (c.steps[0].event.id, c.steps[1].event.id))
+            .collect();
+        assert!(ids.contains(&(1, 4)), "t1 桶内成链: {ids:?}");
+        assert!(ids.contains(&(3, 5)), "∅ 桶内成链: {ids:?}");
+        // ∅ 链的 thread 标签必须是 None（真实线程标签不能串到 ∅ 桶）
+        let empty_chain = res.chains.iter().find(|c| c.steps[0].event.id == 3).unwrap();
+        assert_eq!(empty_chain.thread, None);
+        // t2 的 A@200 不成链 ⇒ uncovered；且不得与 ∅ 的 B@350 跨桶成链
+        assert!(
+            res.uncovered_events.iter().any(|e| e.id == 2),
+            "t2 事件应 uncovered"
+        );
+    }
+
+    /// scope="key"：用户正则（须含 1 个捕获组）从 raw 提取关联键分桶；
+    /// 同键成链、跨键不成链、无键事件落 ∅（不参与任何键桶）。
+    #[test]
+    fn key_scope_buckets_by_user_pattern_capture() {
+        let s = store_full(&[
+            (
+                "A",
+                &[
+                    ev_raw(1, 100, None, r#"GET /a traceId=abc-1 ok"#),
+                    ev_raw(2, 200, None, r#"GET /b traceId=def-2 ok"#),
+                    ev_raw(3, 300, None, r#"GET /c no-trace"#),
+                ],
+            ),
+            (
+                "B",
+                &[
+                    ev_raw(4, 150, None, r#"resp 200 traceId=abc-1"#),
+                    ev_raw(5, 250, None, r#"resp 500 traceId=zzz-9"#),
+                ],
+            ),
+        ]);
+        let spec = GroupSpec {
+            group_id: "gk".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "key".into(),
+            key_pattern: Some(r"traceId=([\w-]+)".into()),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let r = run_sequences(&[spec], &s);
+        let res = r.results.get("gk").unwrap();
+        assert_eq!(res.chains.len(), 1, "仅 abc-1 桶内 A→B 成链");
+        assert_eq!(res.chains[0].steps[0].event.id, 1);
+        assert_eq!(res.chains[0].steps[1].event.id, 4);
+        // 桶标签 = 关联键（链的 thread 字段承载桶标识）
+        assert_eq!(res.chains[0].thread.as_deref(), Some("abc-1"));
+        // 其余事件 uncovered：跨键的 def-2 / zzz-9、无键的 3
+        let unc: Vec<u32> = res.uncovered_events.iter().map(|e| e.id).collect();
+        assert!(
+            unc.contains(&2) && unc.contains(&3) && unc.contains(&5),
+            "{unc:?}"
+        );
+    }
+
+    /// keyStats 与 ThreadStats 同构：让「正则没提取到键」（静默退化全局）与
+    /// 「每事件一个键」（桶拆碎 ⇒ 全漏）两种失败可见。仅 key 路径真实生效时回传。
+    #[test]
+    fn key_scope_reports_key_stats_only_when_pattern_usable() {
+        let s = store_full(&[
+            (
+                "A",
+                &[
+                    ev_raw(1, 100, None, r#"traceId=abc-1"#),
+                    ev_raw(2, 200, None, r#"traceId=def-2"#),
+                    ev_raw(3, 300, None, r#"no key here"#),
+                ],
+            ),
+            ("B", &[ev_raw(4, 150, None, r#"traceId=abc-1"#)]),
+        ]);
+        let mk = |pattern: Option<&str>, scope: &str| GroupSpec {
+            group_id: "gk".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: scope.into(),
+            key_pattern: pattern.map(|p| p.to_string()),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        let ks = match_group(&mk(Some(r"traceId=([\w-]+)"), "key"), &s)
+            .unwrap()
+            .key_stats
+            .expect("key 路径生效时应回传 keyStats");
+        assert_eq!(ks.total_events, 4);
+        assert_eq!(ks.with_key, 3, "第 3 条无键");
+        assert_eq!(ks.distinct_keys, 2);
+        // 退化（正则缺省）与 非 key 作用域：不回传，与「没走 key 路径」区分
+        assert!(match_group(&mk(None, "key"), &s).unwrap().key_stats.is_none());
+        assert!(match_group(&mk(Some(r"traceId=([\w-]+)"), "global"), &s)
+            .unwrap()
+            .key_stats
+            .is_none());
+    }
+
+    /// scope="key" 但正则缺省 / 编译失败 / 无捕获组 ⇒ 退化为全局
+    /// （保守：宁可全局多报，也不按无效键误分桶全漏）。
+    #[test]
+    fn key_scope_degrades_to_global_when_pattern_unusable() {
+        let mk = |pattern: Option<&str>| GroupSpec {
+            group_id: "gk".into(),
+            filter_ids: vec!["A".into(), "B".into()],
+            label: None,
+            scope: "key".into(),
+            key_pattern: pattern.map(|p| p.to_string()),
+            edges: vec![seq_edge()],
+            node_conditions: None,
+            node_counts: None,
+            max_chains: None,
+        };
+        // A(100)→B(150)：即使两边 traceId 不同，退化后也按全局成链
+        let s = store_full(&[
+            ("A", &[ev_raw(1, 100, None, r#"traceId=abc-1"#)]),
+            ("B", &[ev_raw(2, 150, None, r#"traceId=zzz-9"#)]),
+        ]);
+        for pattern in [None, Some("([unclosed"), Some(r"traceId=[\w-]+")] {
+            let spec = mk(pattern);
+            let r = run_sequences(&[spec], &s);
+            let res = r.results.get("gk").unwrap();
+            assert_eq!(
+                res.chains.len(),
+                1,
+                "pattern={pattern:?} 应退化为全局并成链"
+            );
+            assert_eq!(res.chains[0].steps[1].event.id, 2);
+            assert_eq!(res.chains[0].thread, None, "退化时桶标签为 None");
+        }
     }
 
     /// thread 是位置启发式产物（见 `ThreadStats` 文档）：统计不论 scope 都产出，
@@ -1423,6 +1740,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: None,
@@ -1444,6 +1762,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "thread".into(),
+            key_pattern: None,
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: None,
@@ -1474,6 +1793,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into(), "C".into()],
             label: None,
             scope: "thread".into(),
+            key_pattern: None,
             edges: vec![
                 seq_edge(),
                 EdgeSpec {
@@ -1524,6 +1844,7 @@ mod tests {
             filter_ids: vec!["A".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![periodic],
             node_conditions: None,
             node_counts: None,
@@ -1558,6 +1879,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: Some(nc),
@@ -1589,6 +1911,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![seq_edge()],
             node_conditions: None,
             node_counts: Some(nc),
@@ -1616,6 +1939,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![seq_edge()],
             node_conditions: Some(nc),
             node_counts: None,

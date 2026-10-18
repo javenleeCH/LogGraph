@@ -6,6 +6,7 @@ import styles from './CepTimelinePanel.module.css';
 import { ChevronLeft, ChevronRight, AlertTriangle } from './Icon';
 import { fmtCompact, fmtCount } from '../utils/counts';
 import { threadHint, type ThreadHint } from '../sequence/threadHint';
+import { keyHint, type KeyHint } from '../sequence/keyHint';
 import { explainNoMatch, type Diagnosis } from '../sequence/explain';
 import {
   aggregateAnomalyWindows,
@@ -58,6 +59,8 @@ interface CepBlock {
   rows: CepRow[];
   /** 仅按线程作用域时给出：thread 解析质量提示（无提示=null） */
   threadHint: ThreadHint | null;
+  /** 仅关联键作用域时给出：key 提取质量提示（无提示=null） */
+  keyHint: KeyHint | null;
   /** 仅零链时给出：「为何没匹配」诊断（无诊断=null）。基于各 filter 的实际
    *  命中反推，不参与匹配语义，故永远不会改变结果 */
   diagnoses: Diagnosis[] | null;
@@ -202,6 +205,7 @@ function buildBlocks(
       overLimit,
       rows: inRange,
       threadHint: g.sequence?.scope === 'thread' ? threadHint(r) : null,
+      keyHint: g.sequence?.scope === 'key' ? keyHint(r) : null,
       // 「为何没匹配」诊断：引擎可用且有序列规则时**始终可点**（不再仅零链时出现）。
       // 零链给完整诊断（含 overtaken hint），有链给 blocker/hint（zero=false 不报 overtaken）。
       diagnoses:
@@ -395,6 +399,14 @@ export function CepTimelinePanel() {
                   title={b.threadHint.title}
                 >
                   {b.threadHint.text}
+                </span>
+              )}
+              {b.keyHint && (
+                <span
+                  className={`${styles.threadStat} ${b.keyHint.warn ? styles.threadStatWarn : ''}`}
+                  title={b.keyHint.title}
+                >
+                  {b.keyHint.text}
                 </span>
               )}
               <button

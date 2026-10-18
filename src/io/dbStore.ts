@@ -361,7 +361,9 @@ export interface DbRunSeqEdge {
 export interface DbRunSeqGroup {
   groupId: string;
   filterIds: string[];
-  scope?: 'global' | 'thread';
+  scope?: 'global' | 'thread' | 'key';
+  /** scope='key' 时的关联键正则（须含 1 个捕获组；缺省/无效 ⇒ 引擎退化为全局） */
+  keyPattern?: string;
   edges: DbRunSeqEdge[];
   nodeConditions?: Record<string, string>;
   nodeCounts?: Record<string, { min: number; max: number }>;
@@ -395,6 +397,7 @@ export async function runDbSequences(
       groupId: g.groupId,
       filterIds: g.filterIds,
       scope: g.scope ?? 'global',
+      keyPattern: g.keyPattern,
       edges: g.edges.map((e) => ({
         id: e.id,
         fromFilterId: e.fromFilterId,

@@ -284,7 +284,9 @@ interface LogState {
   ) => void;
   removeSequenceEdge: (groupId: string, edgeId: string) => void;
   toggleSequenceAnomaly: (groupId: string) => void;
-  setSequenceScope: (groupId: string, scope: 'global' | 'thread') => void;
+  setSequenceScope: (groupId: string, scope: 'global' | 'thread' | 'key') => void;
+  /** 设置 scope='key' 的关联键正则（非空才生效；空串=清除并退回全局语义由引擎兜底） */
+  setSequenceKeyPattern: (groupId: string, keyPattern: string) => void;
   /** 设置节点循环次数（EPL A{min,max}）；null 删除约束 */
   setNodeCount: (
     groupId: string,
@@ -945,6 +947,7 @@ export const useLogStore = create<LogState>((set, get) => ({
                 groupId: g.id,
                 filterIds: g.filterIds,
                 scope: g.sequence!.scope,
+                keyPattern: g.sequence!.keyPattern,
                 edges: g.sequence!.edges.map((e) => ({
                   id: e.id,
                   fromFilterId: e.fromFilterId,
@@ -1129,7 +1132,23 @@ export const useLogStore = create<LogState>((set, get) => ({
     const groups = get().groups.map((g) => {
       if (g.id !== groupId) return g;
       const seq = g.sequence ?? { edges: [], anomalyEnabled: false };
-      return { ...g, sequence: { ...seq, scope } };
+      // 切离 key 作用域时清掉 keyPattern：避免残留正则被下次切回时误用
+      const next = scope === 'key' ? { ...seq, scope } : { ...seq, scope, keyPattern: undefined };
+      return { ...g, sequence: next };
+    });
+    set({ groups });
+    get().recomputeSequences();
+    schedulePersist(get);
+  },
+
+  setSequenceKeyPattern: (groupId, keyPattern) => {
+    const groups = get().groups.map((g) => {
+      if (g.id !== groupId) return g;
+      const seq = g.sequence ?? { edges: [], anomalyEnabled: false };
+      const trimmed = keyPattern.trim();
+      // 显式标注避免字面量 'key' 被推断拓宽为 string
+      const next: SequenceConfig = { ...seq, scope: 'key', keyPattern: trimmed || undefined };
+      return { ...g, sequence: next };
     });
     set({ groups });
     get().recomputeSequences();
@@ -1536,7 +1555,10 @@ export const useLogStore = create<LogState>((set, get) => ({
       return {
         edges,
         anomalyEnabled: seq.anomalyEnabled === true,
-        ...(seq.scope === 'thread' ? { scope: 'thread' } : {}),
+        ...(seq.scope === 'thread' || seq.scope === 'key' ? { scope: seq.scope } : {}),
+        ...(seq.scope === 'key' && typeof seq.keyPattern === 'string' && seq.keyPattern
+          ? { keyPattern: seq.keyPattern }
+          : {}),
         ...(Object.keys(nodeCounts).length ? { nodeCounts } : {}),
         ...(Object.keys(nodeConditions).length ? { nodeConditions } : {}),
       };

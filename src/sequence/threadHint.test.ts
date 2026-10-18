@@ -24,7 +24,7 @@ function ev(id: number, ts: number, thread?: string) {
 }
 
 /** 用 wasm 引擎跑 A→B(seq, 1000ms) 单组，返回该组结果 */
-function run(scope: 'global' | 'thread', store: Record<string, ReturnType<typeof ev>[]>) {
+function run(scope: 'global' | 'thread' | 'key', store: Record<string, ReturnType<typeof ev>[]>) {
   const groups = [
     {
       groupId: 'g',

@@ -70,7 +70,9 @@ export function threadHint(r: SequenceMatchResult): ThreadHint | null {
         `几乎每个事件一个桶（基数比 ${(ratio * 100).toFixed(0)}%）—— 疑似把\n` +
         'traceId / requestId 之类非线程字段当成了 thread。\n\n' +
         '链必须在同一个桶内成立，这种拆分会导致全部漏报（零链）。\n' +
-        '误抓比漏解析危险得多：漏解析只是退化成全局，结果仍保守可用。',
+        '误抓比漏解析危险得多：漏解析只是退化成全局，结果仍保守可用。\n\n' +
+        '如果这些字段确实是请求关联键：改用「🔑 关联键」作用域，\n' +
+        '用正则（如 traceId=([0-9a-f-]+)）显式提取，别让位置启发式去猜。',
     };
   }
 

@@ -47,7 +47,7 @@ export interface RuleTemplate {
   description: string;
   /** 创建后该组是否开启异常（未覆盖事件标红） */
   anomalyEnabled: boolean;
-  scope?: 'global' | 'thread';
+  scope?: 'global' | 'thread' | 'key';
   nodes: TemplateNode[];
   edges: TemplateEdge[];
 }

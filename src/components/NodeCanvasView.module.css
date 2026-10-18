@@ -983,6 +983,41 @@
   border-radius: 8px;
 }
 
+/* 作用域分段开关（全局 / 按线程 / 关联键） */
+.scopeSwitch {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  flex: 0 0 auto;
+}
+
+.scopeSwitch button {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 7px;
+  white-space: nowrap;
+}
+
+/* scope=key 的关联键正则输入 */
+.keyPatternInput {
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  width: 240px;
+}
+
+.keyPatternInput:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .anomalyBadge {
   font-size: 10px;
   font-weight: 600;

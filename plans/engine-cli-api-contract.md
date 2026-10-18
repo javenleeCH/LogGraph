@@ -346,7 +346,8 @@ parse 失败的行，逐行回退全格式尝试（§2.5）。
 pub struct GroupSpec {
     pub group_id: String,
     pub filter_ids: Vec<String>,
-    pub scope: String,                       // "global" | "thread"
+    pub scope: String,                       // "global" | "thread" | "key"
+    pub key_pattern: Option<String>,         // 仅 scope="key"：关联键正则（须含 1 个捕获组）
     pub edges: Vec<EdgeSpec>,
     pub node_conditions: Option<HashMap<String, String>>,
     pub node_counts: Option<HashMap<String, NodeCountSpec>>,
@@ -391,7 +392,8 @@ pub struct SeqResult {
     pub total_chains: usize,
     pub total_uncovered: usize,
     pub covered_marks: BTreeMap<String, Vec<(u32, u32)>>,
-    pub thread_stats: ThreadStats,   // 不论 scope 是否 thread 都产出，见 §3.10
+    pub thread_stats: ThreadStats,   // 不论 scope 是否 thread 都产出，见 §3.13
+    pub key_stats: Option<KeyStats>, // 仅 scope="key" 且正则可用时产出，见 §3.13.1
 }
 pub struct RunSeqResponse { pub fallback: bool, pub results: BTreeMap<String, SeqResult> }
 // BTreeMap：--json 输出按 groupId 字典序，agent 可依赖键序
@@ -561,12 +563,26 @@ pub fn parse_rules(json: &str) -> EngineResult<RulesFile>;
 | --- | --- | --- | --- | --- |
 | `groupId` | string | **是** | — | id 格式同上，全局唯一（S02） |
 | `label` | string ≤64 | 否 | — | 展示名，引擎忽略 |
-| `scope` | enum | 否 | `"global"` | `global` \| `thread`。`thread` = 按 `thread` 字段分桶隔离匹配（engine ≥ 0.2.1 起支持） |
+| `scope` | enum | 否 | `"global"` | `global` \| `thread` \| `key`。`thread` = 按 `thread` 字段分桶隔离匹配（engine ≥ 0.2.1）；`key` = 按关联键分桶隔离匹配（engine ≥ 0.2.7，见 §3.4.1） |
+| `keyPattern` | string | 否 | — | 仅 `scope:"key"`：从事件原文 `raw` 提取关联键（traceId/requestId…）的正则，**须含 1 个捕获组**（取 group 1）。缺省 / 空 / 编译失败 / 无捕获组 ⇒ 该组退化为 `global`（保守，不误分桶） |
 | `filterIds` | string[] | **是** | — | 1..256 项，去重；每项 ∈ `filters[].id`（S03）。**边只能引用这里声明的 filter**（S04） |
 | `edges` | Edge[] | **是** | — | 0..256 条；可为空（该 group 只产出 uncovered 事件清单） |
 | `nodeCounts` | map | 否 | `{}` | 见 §3.6（engine ≥ 0.2.1 起支持） |
 | `nodeConditions` | map | 否 | `{}` | 见 §3.6（engine ≥ 0.2.1 起支持） |
 | `maxChains` | integer ≥1 | 否 | —（不限） | 返回链数上限（UI 防大目录载荷爆炸）。截断时 `totalChains`/`totalUncovered` 仍报全量真值，`coveredMarks` 回传全量 lane 标记 |
+
+#### 3.4.1 `scope:"key"`（关联键分桶，engine ≥ 0.2.7）
+
+微服务日志的请求关联键（traceId / requestId…）**不是**日志里的独立字段，也不在
+thread 的启发式槽位里——thread 是位置启发式产物（§3.13），让用户改用显式正则：
+
+- 分桶键 = `keyPattern` 对每条事件 `raw` 的**捕获组 1**；无捕获组 ⇒ 该 group 退化为 `global`；
+- 未命中正则的事件**不进任何键桶**（不同于 thread 的 `∅` 桶）：没有键就无从关联，
+  混在一起匹配只会跨请求串出伪链。这类事件计入 `uncoveredEvents`；
+- 正则编译失败 / 缺省 / 空串 ⇒ 退化为 `global`（与 `thread` 覆盖率 0 时的保守方向一致）；
+- 链的 `thread` 字段此时承载**关联键值**（复用同一承载位，避免 DTO 再加一列）；
+- 引擎回传 `keyStats`（§3.13.1）：`withKey === 0` ⇒ 正则没提取到任何键（静默退化）；
+  `distinctKeys` 接近 `withKey` ⇒ 键粒度太细（每事件一桶 ⇒ 链凑不齐 ⇒ 全部漏报）。
 
 ### 3.5 `groups[].edges[]`（边定义与 kind 语义）
 
@@ -665,7 +681,8 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
       "properties": {
         "groupId":   { "$ref": "#/$defs/id" },
         "label":     { "type": "string", "maxLength": 64 },
-        "scope":     { "enum": ["global", "thread"], "default": "global" },
+        "scope":     { "enum": ["global", "thread", "key"], "default": "global" },
+        "keyPattern": { "type": "string", "maxLength": 512 },
         "filterIds": {
           "type": "array", "minItems": 1, "maxItems": 256,
           "uniqueItems": true,
@@ -917,6 +934,32 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 
 前端展示位：CEP 面板每个分组块的头部（`scope === 'thread'` 时才显示，全局作用域下
 分桶不生效、提示纯属噪音），实现见 `src/sequence/threadHint.ts`。
+
+#### 3.13.1 `keyStats`（关联键提取质量，仅 `scope:"key"` 且正则可用时产出）
+
+与 `threadStats` 同构的可观测性设计：`scope:"key"` 的退化同样是静默的——正则没提取到
+键时该组已按全局跑（§3.4.1），键粒度过细时链全部凑不齐。引擎仅在 key 路径真实生效时
+回传该字段（退化到 global 的组**不出现** `keyStats`，与"没走 key 路径"区分）：
+
+```json
+"keyStats": { "totalEvents": 800, "withKey": 795, "distinctKeys": 412 }
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `totalEvents` | 参与本组匹配的事件总数（与分桶用的是同一批事件） |
+| `withKey` | 其中正则提取到非空键的事件数 |
+| `distinctKeys` | distinct 键数（未命中正则的事件不计入） |
+
+判读指纹（与 §3.13 同款）：
+
+| 指纹 | 含义 | 后果 |
+| --- | --- | --- |
+| `withKey === 0` | 正则没匹配到任何事件 | 已按全局匹配（§3.4.1），链会跨请求串出伪链 |
+| `distinctKeys / withKey ≈ 1` | 几乎每个事件一个键 | 桶被拆碎 ⇒ 链凑不齐 ⇒ **全部漏报（零链）** |
+
+前端展示位：CEP 面板分组块头部（`scope === 'key'` 时才显示），实现见
+`src/sequence/keyHint.ts`。
 
 ### 3.14 跨行 filter（✅ engine ≥ 0.2.2 起引擎内自聚合并下推）
 

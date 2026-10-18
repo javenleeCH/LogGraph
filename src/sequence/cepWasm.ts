@@ -114,6 +114,8 @@ function toGroupSpec(g: {
     groupId: g.id,
     filterIds: g.filterIds,
     scope: s.scope ?? 'global',
+    // scope='key' 的关联键正则；undefined 时 JSON 省略 ⇒ 引擎 serde 缺省 None
+    keyPattern: s.keyPattern,
     edges: s.edges.map((e) => ({
       id: e.id,
       fromFilterId: e.fromFilterId,

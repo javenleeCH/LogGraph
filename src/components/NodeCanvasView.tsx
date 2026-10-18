@@ -11,7 +11,7 @@
 import { useEffect, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { FilterEngine } from '../filters/FilterEngine';
-import type { FilterGroup, SequenceEdge, SequenceMatchResult } from '../types';
+import type { FilterGroup, SequenceConfig, SequenceEdge, SequenceMatchResult } from '../types';
 import { ChevronLeft, X, Trash, Plus } from './Icon';
 import { GroupFlowCanvas } from './flow/GroupFlowCanvas';
 import styles from './NodeCanvasView.module.css';
@@ -29,6 +29,13 @@ export function formatGap(ms: number): string {
   if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
   return `${ms}ms`;
 }
+
+/** 作用域分段选项（value 与 SequenceConfig.scope / 引擎 GroupSpec.scope 对齐） */
+const SCOPE_OPTIONS: readonly [NonNullable<SequenceConfig['scope']>, string][] = [
+  ['global', '🌐 全局'],
+  ['thread', '🧵 按线程'],
+  ['key', '🔑 关联键'],
+];
 
 /**
  * 序列匹配统计标签。
@@ -67,6 +74,7 @@ export function GroupEditorPage() {
   const groups = useLogStore((s) => s.groups);
   const updateGroup = useLogStore((s) => s.updateGroup);
   const setSequenceScope = useLogStore((s) => s.setSequenceScope);
+  const setSequenceKeyPattern = useLogStore((s) => s.setSequenceKeyPattern);
   const sequenceResults = useLogStore((s) => s.sequenceResults);
 
   const groupId = activeGroupId ?? '';
@@ -101,15 +109,31 @@ export function GroupEditorPage() {
         <button className="ghost" onClick={() => setActiveGroup(null)}>← 返回</button>
         <span className={styles.crumbs}>分组编辑 / {group.label}</span>
         <div className={styles.spacer} />
-        <button
-          className={`ghost ${group.sequence?.scope === 'thread' ? styles.toolbarBtnActive : ''}`}
-          onClick={() =>
-            setSequenceScope(group.id, group.sequence?.scope === 'thread' ? 'global' : 'thread')
-          }
-          title="匹配作用域：全局=所有事件在同一条时间轴上竞争；按线程=每个 thread 独立匹配（推荐多线程日志开启）"
+        <div
+          className={styles.scopeSwitch}
+          role="group"
+          title="匹配作用域：全局=所有事件在同一条时间轴上竞争；按线程=每个 thread 独立匹配；关联键=按 traceId/requestId 等用户正则从原文提取的键分桶隔离"
         >
-          {group.sequence?.scope === 'thread' ? '🧵 按线程' : '🌐 全局'}
-        </button>
+          {SCOPE_OPTIONS.map(([value, label]) => (
+            <button
+              key={value}
+              className={`ghost ${(group.sequence?.scope ?? 'global') === value ? styles.toolbarBtnActive : ''}`}
+              onClick={() => setSequenceScope(group.id, value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {group.sequence?.scope === 'key' && (
+          <input
+            className={`${styles.keyPatternInput} mono`}
+            type="text"
+            value={group.sequence.keyPattern ?? ''}
+            onChange={(e) => setSequenceKeyPattern(group.id, e.target.value)}
+            placeholder="关联键正则，须含 1 个捕获组，如 traceId=([0-9a-f-]+)"
+            title="从事件原文（整行）提取关联键（traceId/requestId…）分桶隔离匹配；正则无效或无捕获组时自动退化为全局"
+          />
+        )}
         {seqResult && (
           <SeqStat result={seqResult} anomalyEnabled={!!group.sequence?.anomalyEnabled} />
         )}

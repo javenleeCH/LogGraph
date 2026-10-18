@@ -132,6 +132,8 @@ export function buildCepJson(
       groupId: sanitizeRuleId(g.id, 'g'),
       label: g.label,
       scope: seq.scope ?? 'global',
+      // scope=key 的关联键正则随组导出（缺省=引擎退化为全局）
+      ...(seq.scope === 'key' && seq.keyPattern ? { keyPattern: seq.keyPattern } : {}),
       // S03/S04：边引用的 filter 必须声明在本 group 内
       filterIds: g.filterIds.filter((id) => enabledIds.has(id)).map((id) => sanitizeRuleId(id)),
       edges: edges
@@ -268,10 +270,13 @@ export function parseRuleFile(text: string): ParsedRules {
       })
       .filter((e) => !!e.fromFilterId && !!e.toFilterId);
     const seq: Record<string, unknown> = { edges, anomalyEnabled: false };
-    // 注：scope:thread / nodeCounts / nodeConditions 均已由 engine ≥ 0.2.1
-    // 支持，导入不再告警降级（仅旧 v1 引擎需要提示）。
-    if (g?.scope === 'thread') {
-      seq.scope = 'thread';
+    // 注：scope:thread / scope:key / nodeCounts / nodeConditions 均已由
+    // engine ≥ 0.2.7 支持，导入不再告警降级（仅旧 v1 引擎需要提示）。
+    if (g?.scope === 'thread' || g?.scope === 'key') {
+      seq.scope = g.scope;
+      if (g.scope === 'key' && typeof g?.keyPattern === 'string' && g.keyPattern) {
+        seq.keyPattern = g.keyPattern;
+      }
     }
     if (g?.nodeCounts && Object.keys(g.nodeCounts).length) {
       const nc: Record<string, { min: number; max: number }> = {};

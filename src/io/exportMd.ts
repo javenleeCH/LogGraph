@@ -36,6 +36,8 @@ export interface ChainMdOptions {
   groupLabel?: string;
   /** 每步前是否带 [过滤器名] 标签 */
   showFilterLabel?: boolean;
+  /** 分桶标签名：链的 thread 字段在 scope='thread' 时是线程、'key' 时是关联键 */
+  scopeLabel?: string;
 }
 
 /** 一条链 → Markdown 小节（有序列表，一步一行） */
@@ -45,7 +47,9 @@ export function formatChainMarkdown(
   opts: ChainMdOptions = {},
 ): string {
   const dur = formatDuration(Math.max(0, chain.endTs - chain.startTs));
-  const scope = chain.thread ? ` · 线程 ${mdText(chain.thread)}` : '';
+  const scope = chain.thread
+    ? ` · ${opts.scopeLabel ?? '线程'} ${mdText(chain.thread)}`
+    : '';
   const lines: string[] = [
     `### 链 #${chain.chainIndex} · ${chain.steps.length} 步 · 时长 ${dur}${scope}`,
     '',

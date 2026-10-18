@@ -1930,6 +1930,7 @@ mod tests {
             filter_ids: vec!["f1".into(), "f2".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![edge],
             node_conditions: None,
             node_counts: None,
@@ -2043,6 +2044,7 @@ mod tests {
             filter_ids: vec!["A".into(), "B".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![crate::cep::EdgeSpec {
                 id: "e1".into(),
                 from_filter_id: "A".into(),
@@ -2068,6 +2070,7 @@ mod tests {
             filter_ids: vec!["A".into(), "C".into()],
             label: None,
             scope: "global".into(),
+            key_pattern: None,
             edges: vec![crate::cep::EdgeSpec {
                 id: "e2".into(),
                 from_filter_id: "A".into(),

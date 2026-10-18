@@ -84,6 +84,8 @@ export async function copyChainMarkdown(
     totalChains: trueChainCount(result),
     anomalyCount: group.sequence?.anomalyEnabled ? trueUncoveredCount(result) : 0,
     range: st.viewRange,
+    // scope='key' 时链的 thread 字段承载的是关联键（traceId…），不是线程
+    scopeLabel: group.sequence?.scope === 'key' ? '关联键' : '线程',
   });
   await copyWithFallback(md, {
     successTitle: '已复制链（Markdown）',

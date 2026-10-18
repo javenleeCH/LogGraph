@@ -98,8 +98,12 @@ export interface SequenceConfig {
   edges: SequenceEdge[];
   /** 异常开关：开启后未覆盖事件在视图中标红 */
   anomalyEnabled: boolean;
-  /** 匹配作用域：global=全局时间轴（默认）；thread=按 thread 字段分桶隔离 */
-  scope?: 'global' | 'thread';
+  /** 匹配作用域：global=全局时间轴（默认）；thread=按 thread 字段分桶隔离；
+   * key=按关联键（用户正则从 raw 提取，如 traceId/requestId）分桶隔离 */
+  scope?: 'global' | 'thread' | 'key';
+  /** scope='key' 时的关联键正则（须含 1 个捕获组，从事件原文提取 traceId/requestId…）。
+   * 缺省/无效/无捕获组 ⇒ 该组退化为全局（保守，不误分桶） */
+  keyPattern?: string;
   /** 节点循环次数：filterId → [min,max]；缺省 [1,1]（EPL A{2,5}） */
   nodeCounts?: Record<string, NodeCount>;
   /** 节点条件表达式：filterId → 表达式串（对 filter 匹配事件二次过滤；空/缺省=不过滤） */
@@ -114,7 +118,7 @@ export interface MatchedChain {
   steps: { edgeId: string | null; filterId: string; event: LogEvent }[];
   startTs: number;
   endTs: number;
-  /** 该链所属会话（scope='thread' 时的 thread 值；global 为 null） */
+  /** 该链所属桶（scope='thread' 时的 thread 值；scope='key' 时的关联键；global 为 null） */
   thread?: string | null;
 }
 
@@ -173,6 +177,8 @@ export interface SequenceMatchResult {
   coveredMarks?: Record<string, [number, number][]>;
   /** thread 解析质量统计（无论 scope 是否 thread 都产出，缺省=旧数据/未统计） */
   threadStats?: ThreadStats;
+  /** 关联键提取质量统计（仅 scope='key' 且正则可用时产出；缺省=未走 key 路径/旧数据） */
+  keyStats?: KeyStats;
 }
 
 /**
@@ -196,6 +202,22 @@ export interface ThreadStats {
   withThread: number;
   /** distinct thread 数（`∅` 桶不计入） */
   distinctThreads: number;
+}
+
+/**
+ * `scope='key'` 的关联键提取质量统计——与 ThreadStats 同构，纯可观测性。
+ *
+ * 键来自用户正则（`keyPattern` 捕获组 1，从事件原文提取 traceId/requestId…），
+ * 失效同样是静默的：正则没提取到键时该组已按全局跑（跨请求串伪链），键粒度过细时
+ * 每事件一桶、链全凑不齐（零链=全部漏报）。仅 key 路径真实生效时产出。
+ */
+export interface KeyStats {
+  /** 参与本组匹配的事件总数（与分桶用的是同一批事件） */
+  totalEvents: number;
+  /** 其中正则提取到非空关联键的事件数 */
+  withKey: number;
+  /** distinct 关联键数（未命中正则的事件不计入） */
+  distinctKeys: number;
 }
 
 // ===== 节点画布（draw.io 风格区域式画布）=====
