@@ -21,25 +21,37 @@ let timer: ReturnType<typeof setInterval> | null = null;
 async function pollTail(): Promise<void> {
   const st = useLogStore.getState();
   const tail = st.tail;
-  if (!tail || !tail.enabled) return;
-  // 跟随中再次确认仍是单文件 standalone（多文件追加会把 tail 置空）
-  if (st.dbMode || st.sessionFiles.length !== 1 || st.sessionFiles[0]?.path !== tail.path) {
-    return;
-  }
-  const { path, offset } = tail;
+  if (!tail || !tail.enabled || st.dbMode) return;
+  // 可跟随文件 = 启用中且有绝对路径的会话文件（单/多文件皆可）
+  const followable = st.sessionFiles.filter((f) => f.enabled && f.path);
+  if (followable.length === 0) return;
   try {
     const fs = await loadFs();
-    const stat = await fs.stat(path);
-    if (typeof stat.size !== 'number' || stat.size <= offset) return;
-    const res = await parseLogIncremental(path, offset);
-    if (!res || res.events.length === 0) return; // 暂无完整新行（写入中）
-    useLogStore.getState().appendTailEvents(
-      res.events as never,
-      res.rawLines,
-      res.newOffset,
-      res.skipped,
-      stat.size,
-    );
+    for (const f of followable) {
+      const path = f.path as string;
+      const stat = await fs.stat(path);
+      if (typeof stat.size !== 'number') continue;
+      const cur = useLogStore.getState().tail;
+      if (!cur || !cur.enabled) return; // 轮询中被关闭
+      const offset = cur.offsets[path];
+      if (offset === undefined) {
+        // 首次见到该文件：以当前大小为起点 priming（从现在跟随），不回溯历史
+        useLogStore.setState({
+          tail: { ...cur, offsets: { ...cur.offsets, [path]: stat.size } },
+        });
+        continue;
+      }
+      if (stat.size <= offset) continue; // 无增长
+      const res = await parseLogIncremental(path, offset);
+      if (!res || res.events.length === 0) continue; // 暂无完整新行（写入中）
+      useLogStore.getState().appendTailEvents(
+        path,
+        res.events as never,
+        res.rawLines,
+        res.newOffset,
+        res.skipped,
+      );
+    }
   } catch (err) {
     // 文件被移动/删除/权限变化：静默停止跟随，避免每轮抛错刷屏
     console.warn('[tailWatcher] 轮询失败，停止跟随:', err);

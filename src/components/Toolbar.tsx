@@ -32,6 +32,7 @@ export function Toolbar() {
   const setSplitOrientation = useLogStore((s) => s.setSplitOrientation);
   const dbMode = useLogStore((s) => s.dbMode);
   const tail = useLogStore((s) => s.tail);
+  const sessionFiles = useLogStore((s) => s.sessionFiles);
   const setTailEnabled = useLogStore((s) => s.setTailEnabled);
   const { theme, toggle } = useTheme();
   const setPaletteOpen = useCommandPalette();
@@ -39,6 +40,13 @@ export function Toolbar() {
   // 加载模式徽标（P1④：同一份数据两种能力边界，用户此前的行为差异无法归因）。
   // desktop 判定只需一次，不随主题/数据变化。
   const modeInfo = useMemo(() => describeLoadMode(dbMode, isTauri()), [dbMode]);
+
+  // 实时跟随可用性：桌面 standalone 且有 ≥1 个启用中带路径的文件（单/多文件皆可）
+  const followCount = useMemo(
+    () => sessionFiles.filter((f) => f.enabled && f.path).length,
+    [sessionFiles],
+  );
+  const tailAvailable = !dbMode && isTauri() && followCount > 0;
 
   const showShortcuts = () =>
     window.dispatchEvent(new CustomEvent('loggraph-show-shortcuts'));
@@ -106,20 +114,20 @@ export function Toolbar() {
       {/* 时间格式编辑器：内置预设识别不了时自定义（已载入才有意义） */}
       {meta && <TimestampFormatEditor />}
 
-      {/* 实时跟随（C 阶段一）：仅单文件 standalone + 桌面端可用；默认关闭 */}
-      {tail && (
+      {/* 实时跟随（C）：桌面 standalone 且有可跟随文件时可用（单/多文件） */}
+      {tailAvailable && (
         <button
-          className={`${styles.tailBtn} ${tail.enabled ? styles.tailBtnOn : ''}`}
-          onClick={() => setTailEnabled(!tail.enabled)}
+          className={`${styles.tailBtn} ${tail?.enabled ? styles.tailBtnOn : ''}`}
+          onClick={() => setTailEnabled(!(tail?.enabled ?? false))}
           title={
-            tail.enabled
-              ? '实时跟随已开启：文件新增内容会自动追加。点击停止'
-              : '实时跟随：自动监控文件增长并追加新行（单文件模式）'
+            tail?.enabled
+              ? `实时跟随已开启：${followCount} 个文件的新增内容会自动追加。点击停止`
+              : `实时跟随：自动监控 ${followCount} 个文件增长并追加新行`
           }
         >
           <span className={styles.tailDot} />
-          {tail.enabled
-            ? `实时跟随${tail.newCount > 0 ? ` · ${tail.newCount} 新行` : ''}`
+          {tail?.enabled
+            ? `实时跟随${followCount > 1 ? ` (${followCount} 文件)` : ''}${tail.newCount > 0 ? ` · ${tail.newCount} 新行` : ''}`
             : '实时跟随'}
         </button>
       )}

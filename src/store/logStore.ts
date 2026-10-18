@@ -178,15 +178,13 @@ interface SessionFile {
   enabled: boolean;
 }
 
-/** 实时 tail 状态（C 阶段一：单文件实时跟随，仅桌面 standalone 模式） */
+/** 实时 tail 状态（C：单/多文件实时跟随，仅桌面 standalone 模式） */
 export interface TailState {
-  /** 跟随的文件绝对路径 */
-  path: string;
-  /** 已消费到的字节偏移（下次从该处续读） */
-  offset: number;
   /** 是否正在轮询 */
   enabled: boolean;
-  /** 本次跟随累计新增事件数（UI 显示「N 新行」） */
+  /** path → 该文件「已反映到 events 的字节偏移」（下次从该处续读） */
+  offsets: Record<string, number>;
+  /** 本次开启累计新增事件数（UI 显示「N 新行」） */
   newCount: number;
 }
 
@@ -438,18 +436,18 @@ interface LogState {
    *  重新勾选恢复（时间窗尽量保持，CEP 结果同步重算） */
   toggleSessionFile: (name: string) => void;
 
-  // --- 实时 tail（C 阶段一） ---
-  /** 跟随配置；null=当前会话不支持/未启用实时跟随（多文件 / dbMode / 无路径） */
+  // --- 实时 tail（C） ---
+  /** 跟随配置；null=当前会话不支持实时跟随（无路径文件 / dbMode / 尚未初始化） */
   tail: TailState | null;
-  /** 开启/关闭跟随轮询（tail 存在时切换 enabled） */
+  /** 开启/关闭跟随轮询 */
   setTailEnabled: (on: boolean) => void;
-  /** 增量追加 tail 解析结果（重基 id + 稳定合并进全局 events + 重算） */
+  /** 增量追加某文件的 tail 解析结果（重基 id + 标记 sourceFile + 合并 + 更新偏移） */
   appendTailEvents: (
+    path: string,
     events: LogEvent[],
     rawLines: string[],
     newOffset: number,
     skipped: number,
-    fileSize: number,
   ) => void;
 
   // --- 主区域布局 ---
@@ -1727,6 +1725,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       const enabledNames = new Set(
         nextFiles.filter((f) => f.enabled).map((f) => f.name),
       );
+      const prevTail = get().tail;
       get().setLog(
         mergedEvents.filter((e) => enabledNames.has(e.sourceFile ?? '')),
         [...state.rawLines, ...result.rawLines],
@@ -1738,7 +1737,16 @@ export const useLogStore = create<LogState>((set, get) => ({
           timestampFormatId: meta?.timestampFormatId ?? result.timestampFormatId,
         },
       );
-      set({ sessionFiles: nextFiles, sessionEvents: mergedEvents, tail: null });
+      // 多文件：保留已有文件的已反映偏移，新增文件以其 parse-time size 为偏移
+      const offsets: Record<string, number> = { ...(prevTail?.offsets ?? {}) };
+      if (loaded.path) offsets[loaded.path] = loaded.size;
+      set({
+        sessionFiles: nextFiles,
+        sessionEvents: mergedEvents,
+        tail: Object.keys(offsets).length > 0
+          ? { enabled: prevTail?.enabled ?? false, offsets, newCount: prevTail?.newCount ?? 0 }
+          : null,
+      });
       return 'appended';
     }
     // 新开独立会话：清上一会话配置后载入（事件直接标记 sourceFile，
@@ -1758,7 +1766,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       sessionEvents: events,
       // 单文件 standalone：配置实时跟随（默认关闭，由工具栏开关启用）
       tail: loaded.path
-        ? { path: loaded.path, offset: loaded.size, enabled: false, newCount: 0 }
+        ? { enabled: false, offsets: { [loaded.path]: loaded.size }, newCount: 0 }
         : null,
     });
     return 'replaced';
@@ -1775,6 +1783,9 @@ export const useLogStore = create<LogState>((set, get) => ({
       nextFiles.filter((f) => f.enabled).map((f) => f.name),
     );
     const prevView = state.viewRange;
+    // 切换启用态不重读文件（复用已解析事件）→ 保留各文件「已反映偏移」，
+    // 否则 setLog 清空 tail 会让跟随无中生有地重读已解析区间。
+    const prevTail = state.tail;
     // 用启用过滤后的事件重建（rawLines 保留全量：事件 id 按行号寻址上下文）
     get().setLog(
       state.sessionEvents.filter((e) => enabledNames.has(e.sourceFile ?? '')),
@@ -1788,33 +1799,34 @@ export const useLogStore = create<LogState>((set, get) => ({
       const end = Math.min(prevView.end, fr.end);
       if (start < end) set({ viewRange: { start, end } });
     }
-    set({ sessionFiles: nextFiles });
+    // 恢复跟随配置（watcher 只跟随仍启用中的文件；禁用文件的偏移留待重新启用）
+    set({ sessionFiles: nextFiles, tail: prevTail });
     // CEP 结果含事件集合，需同步重算（setLog 只重算过滤器匹配）
     get().recomputeSequences();
   },
 
-  // ---- 实时 tail（C 阶段一） ----
+  // ---- 实时 tail（C） ----
 
   setTailEnabled: (on) => {
     const t = get().tail;
-    if (!t) return;
-    set({
-      tail: {
-        ...t,
-        enabled: on,
-        // 关闭时清空累计计数；重新开启从当前偏移继续（offset 不变）
-        newCount: on ? t.newCount : 0,
-      },
-    });
+    if (on) {
+      // 开启：已有配置→沿用 offsets（继续从已反映偏移续读，接上 [载入, 开启] 间的新行）；
+      // 无配置（重解析后 tail=null）→ 空 offsets，由 watcher 首次见到时按当前大小 priming（从现在跟随）
+      set({ tail: { enabled: true, offsets: t?.offsets ?? {}, newCount: 0 } });
+    } else if (t) {
+      // 关闭：保留 offsets，重开从此处继续
+      set({ tail: { ...t, enabled: false, newCount: 0 } });
+    }
   },
 
-  appendTailEvents: (events, rawLines, newOffset, skipped, fileSize) => {
+  appendTailEvents: (path, events, rawLines, newOffset, skipped) => {
     const state = get();
     const t = state.tail;
     if (!t) return;
+    const name = baseNameOf(path);
     const oldRawLen = state.rawLines.length;
-    // 段内事件 id 是段首行号 → 重基为全局 rawLines 行号（追加位置）
-    const rebased = events.map((e) => ({ ...e, id: oldRawLen + e.id }));
+    // 段内事件 id 是段首行号 → 重基为全局 rawLines 行号；sourceFile 标记来源文件
+    const rebased = events.map((e) => ({ ...e, id: oldRawLen + e.id, sourceFile: name }));
     // 全局 events 按 ts 升序；两段各自已排序 → 稳定合并（O(N)，不破坏 ts 不变式）
     const mergedEvents = mergeEventsByTs(state.events, rebased);
     const meta = state.meta;
@@ -1824,13 +1836,11 @@ export const useLogStore = create<LogState>((set, get) => ({
       meta: meta
         ? {
             ...meta,
-            fileSize,
             totalLines: meta.totalLines + rawLines.length,
             skipped: meta.skipped + skipped,
           }
         : meta,
-      tail: { ...t, offset: newOffset, newCount: t.newCount + rebased.length },
-      // 新数据到达时若有选中事件，刷新其关联窗口（保持跟随感）
+      tail: { ...t, offsets: { ...t.offsets, [path]: newOffset }, newCount: t.newCount + rebased.length },
       correlatedEventIds: state.correlatedEventIds,
     });
     get().recomputeMatches();
