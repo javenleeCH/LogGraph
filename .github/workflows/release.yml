@@ -66,10 +66,11 @@ jobs:
       - uses: actions/checkout@v4
 
       # 签名密钥预检 + 规范化：放在最前面，5 秒内失败，而不是构建 12 分钟后才在签名步爆炸。
-      # 背景：GitHub Secrets 的值可以带换行/首尾空白，而 Rust 的 base64 解码对空白零容忍
-      # （报 Invalid symbol 10/32）——v0.2.4 三平台全部"构建成功、签名步失败"正是此类污染
-      # 或密码 env 未设置所致。此处统一剥离 \r\n 与首尾空白，并校验解码后首行是
-      # minisign 注释行；通过后写入 $GITHUB_ENV 供后续 tauri-action 使用。
+      # 背景（v0.2.4/v0.2.5 实测）：GitHub Secrets 的值可带换行/首尾空白/夹带文字，而 Rust
+      # base64 解码对空白零容忍（Invalid symbol 10/32），且该错误只在构建末尾签名步才爆；
+      # v0.2.5 的预检还抓到真实案例——Secret 里粘的根本不是合法私钥（疑似多行原文/公钥）。
+      # 此处统一剥离 \r\n 与首尾空白，解码校验必须是 minisign **私钥**（公钥注释行也以
+      # 'untrusted comment:' 开头，只看前缀会漏检），并输出指纹注解便于匿名诊断。
       - name: 预检并规范化签名密钥
         shell: bash
         env:
@@ -80,10 +81,30 @@ jobs:
             echo "::error::TAURI_SIGNING_PRIVATE_KEY 为空——请到仓库 Settings → Secrets and variables → Actions，粘贴私钥文件内容（单行 base64，即 _t/loggraph-updater.key 的全部内容）。"
             exit 1
           fi
-          if ! printf '%s' "$KEY" | base64 -d 2>/dev/null | head -1 | grep -q '^untrusted comment:'; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY 不是合法的 minisign 私钥（base64 解码后首行应为 'untrusted comment: rsign encrypted secret key'）。常见原因：粘贴时带了换行/空格，或误粘了公钥内容。"
+          # 指纹诊断：只暴露长度/解码结果/注释行（公开元数据，不含密钥材料），
+          # 值不合法时据此精确判断粘错了什么（公钥 / 多行原文 / 夹带说明 / 截断）。
+          # 注意：base64 -d 退出码非零必须硬失败——GNU base64 对内部垃圾字符会
+          # "输出部分解码内容后报错"，若只看内容会让夹带文字的值蒙混过关，
+          # 写进 $GITHUB_ENV 后 Rust 的严格解码照样挂（只是推迟到 12 分钟后）。
+          if ! DECODED="$(printf '%s' "$KEY" | base64 -d 2>/dev/null)"; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY base64 解码失败（规范化后长度=${#KEY}）——值里夹带了换行/空格/说明文字，或根本不是 base64。请只粘贴私钥文件中的那一行内容（约 348 字符，勿带引号/备注/空行）。"
             exit 1
           fi
+          FIRSTLINE="$(printf '%s' "$DECODED" | head -1)"
+          LINES="$(printf '%s' "$DECODED" | grep -c . || true)"
+          echo "::notice::签名密钥指纹：规范化后长度=${#KEY}，base64 解码成功，非空行数=${LINES:-0}，首行=\"${FIRSTLINE:-（空）}\""
+          case "$FIRSTLINE" in
+            "untrusted comment: rsign encrypted secret key"|"untrusted comment: minisign encrypted secret key")
+              if [ "${LINES:-0}" -lt 2 ]; then
+                echo "::error::TAURI_SIGNING_PRIVATE_KEY 解码后只有注释行、缺少密钥本体——疑似粘贴被截断。请重新完整粘贴私钥文件内容。"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::TAURI_SIGNING_PRIVATE_KEY 不是合法的 minisign 私钥（解码后首行应为 'untrusted comment: rsign encrypted secret key' 且至少两行）。常见错误：粘了公钥（首行会是 minisign public key）、粘了多行原文、或值里夹带了换行/空格/说明文字。请到 Settings → Secrets 更新后重试。"
+              exit 1
+              ;;
+          esac
           printf 'TAURI_SIGNING_PRIVATE_KEY=%s\n' "$KEY" >> "$GITHUB_ENV"
           echo "签名密钥预检通过（已剥离首尾空白/换行，经 \$GITHUB_ENV 注入后续步骤）"
 
