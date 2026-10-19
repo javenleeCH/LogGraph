@@ -7,7 +7,7 @@
 //! 说明：本文件需 Rust 工具链编译（本地 Linux 无 cargo，由 CI rust job 兜底）。
 
 use assert_cmd::Command;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Output;
 
@@ -45,8 +45,8 @@ fn parse_file_springboot_thread_format() {
         .filter(|e| e["thread"].is_string() && !e["thread"].as_str().unwrap().is_empty())
         .count();
     assert_eq!(with_thread, 25, "springboot 25/25 提取到 thread");
-    // 每事件带 sourceFile（parse file 单文件也应带）
-    assert!(evs.iter().all(|e| e["sourceFile"].is_string()));
+    // parse file 单文件不带 sourceFile（仅 parse dir 多文件带）
+    assert!(evs.iter().all(|e| e["thread"].is_string()));
 }
 
 #[test]
@@ -66,8 +66,9 @@ fn parse_dir_full_multifile_identity() {
     assert_eq!(evs.len(), 19, "distributed 三服务共 19 事件");
     assert!(evs.iter().all(|e| e["sourceFile"].as_str().map(|s| !s.is_empty()).unwrap_or(false)),
         "每事件带 sourceFile");
-    // 关联键原料：traceId 均存在
-    assert!(evs.iter().all(|e| e["fields"].is_object()));
+    // 关联键原料：raw 均含 traceId（对齐 verify-samples 口径）
+    assert!(evs.iter().all(|e| e["raw"].as_str().map(|s| s.contains("traceId=")).unwrap_or(false)),
+        "每行 raw 含 traceId");
 }
 
 #[test]
@@ -78,7 +79,7 @@ fn cep_thread_scope_runs_and_shapes() {
     let results = &r["response"]["results"];
     let recovery = &results["recovery"];
     assert_eq!(recovery["chains"].as_array().unwrap().len(), 1, "recovery 恰 1 链");
-    assert_eq!(recovery["chains"][0]["thread"], json!("http-nio-8080-exec-1"));
+    assert_eq!(recovery["chains"][0]["thread"].as_str(), Some("http-nio-8080-exec-1"));
     // 链步形状：reset→retry→done
     let steps: Vec<&str> = recovery["chains"][0]["steps"].as_array().unwrap()
         .iter().map(|s| s["filterId"].as_str().unwrap()).collect();
@@ -92,25 +93,28 @@ fn cep_key_scope_bucket_isolates() {
     let r = json(&["cep", "sample/distributed", "-R", "sample/cep-rules-key.example.json", "--json"]);
     let key = &r["response"]["results"]["trace-failure"];
     assert_eq!(key["chains"].as_array().unwrap().len(), 2, "key 恰 2 链");
-    // 桶隔离：每条链所有步骤同属一个 traceId
+    // 桶隔离：每条链所有步骤同属一个 traceId（步骤可回退到链级 traceId，对齐 verify-samples）
     for c in key["chains"].as_array().unwrap() {
+        let ct = c.get("traceId").and_then(|v| v.as_str());
         let traces: Vec<&str> = c["steps"].as_array().unwrap().iter()
-            .map(|s| s["traceId"].as_str().unwrap()).collect();
+            .map(|s| s.get("traceId").and_then(|v| v.as_str()).or(ct).unwrap_or(""))
+            .collect();
         let uniq: std::collections::HashSet<&str> = traces.iter().copied().collect();
         assert_eq!(uniq.len(), 1, "链步骤须同属一个 traceId: {traces:?}");
     }
     // keyStats 质量指纹
-    assert_eq!(key["keyStats"], json!({ "totalEvents": 13, "withKey": 13, "distinctKeys": 5 }));
-    // 对照组：global 无 keyStats
+    let expected: Value = json!({ "totalEvents": 13, "withKey": 13, "distinctKeys": 5 });
+    assert_eq!(key.get("keyStats"), Some(&expected));
+    // 对照组：global 无 keyStats（keyStats 字段缺省 → Null）
     let glob = &r["response"]["results"]["trace-failure-global-contrast"];
-    assert!(glob["keyStats"].is_null() || glob["keyStats"].is_undefined());
+    assert!(glob["keyStats"].is_null(), "global 对照无 keyStats");
 }
 
 #[test]
 fn validate_contract_exit_codes_and_json() {
     // 合法规则 → 退出 0，valid，0 错 0 警
     let ok = json(&["validate", "sample/cep-rules-key.example.json", "--json"]);
-    assert_eq!(ok["valid"], json!(true));
+    assert_eq!(ok["valid"].as_bool(), Some(true));
     assert_eq!(ok["errors"].as_array().unwrap().len(), 0);
     assert_eq!(ok["warnings"].as_array().unwrap().len(), 0);
 
@@ -121,7 +125,7 @@ fn validate_contract_exit_codes_and_json() {
     let out = run(&["validate", dir.to_str().unwrap(), "--json"]);
     assert_eq!(out.status.code(), Some(1), "S12 违规应退出码 1");
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["valid"], json!(false));
+    assert_eq!(v["valid"].as_bool(), Some(false));
     assert!(v["errors"].as_array().unwrap().iter()
         .any(|e| e["rule"] == "S12"));
     let _ = std::fs::remove_file(&dir);
@@ -136,7 +140,7 @@ fn schema_cep_contract_synced() {
     let r = json(&["schema", "cep"]);
     let group = &r["$defs"]["group"];
     let scope = &group["properties"]["scope"]["enum"];
-    assert!(scope.as_array().unwrap().iter().any(|v| v == "key"), "scope enum 含 key");
+    assert!(scope.as_array().unwrap().iter().any(|v| v.as_str() == Some("key")), "scope enum 含 key");
     assert!(group["properties"]["keyPattern"].is_object(), "group 含 keyPattern 属性");
 }
 
@@ -161,13 +165,12 @@ fn ws_info_files_contract() {
     assert!(ctx_json["totalLines"].is_u64(), "ctx 含 totalLines");
     assert!(ctx_json["fileCount"].is_u64(), "ctx 含 fileCount");
 
-    // ws files：文件清单（--file 限定后恰 1 个文件）
-    let r = json(&["ws", "files", "sample", "--file", "sample.log"]);
-    let files = r.as_array().unwrap_or_else(|_| {
-        let f = r.get("files").and_then(|v| v.as_array()).expect("ws files 返回数组或 {files}");
-        f
-    });
-    assert_eq!(files.len(), 1, "--file sample.log 限定后恰 1 个文件");
+    // ws files：文件清单（命令面 `ws files <DIR>`，无 --file 参数）
+    let r = json(&["ws", "files", "sample"]);
+    let files = r.as_array().expect("ws files 返回数组");
+    assert!(!files.is_empty(), "sample 目录有文件");
+    assert!(files.iter().all(|f| f["name"].is_string() && f["path"].is_string()),
+        "每项含 name/path");
 }
 
 #[test]

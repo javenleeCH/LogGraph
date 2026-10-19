@@ -79,15 +79,13 @@ jobs:
       - name: 单元测试
         run: cargo test -p loggraph-engine -p loggraph-cli
 
-      # 覆盖率报告（P2-1 Rust 侧）：先出基线，阈值门禁待基线稳定后再设。
-      # continue-on-error：本机无 Rust 无法预验证 llvm-cov 装配，工具链问题
-      # 不应阻断主流水线；基线稳定后移除此标记并加阈值门禁。
+      # 覆盖率门禁（P2-1 Rust 侧）：对「单一实现」语义核心 engine 设行覆盖阈值。
+      # 基线（2026-10-19 本机 cargo llvm-cov 实测）：engine lines 88.34%。
+      # 阈值取 85%，留 ~3 点余量防 CI 环境抖动；cli 薄壳（~50%）不纳入门禁。
       - name: 安装 cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-        continue-on-error: true
-      - name: 覆盖率摘要（report-only）
-        run: cargo llvm-cov -p loggraph-engine -p loggraph-cli --summary-only
-        continue-on-error: true
+      - name: 覆盖率门禁（engine lines ≥ 85%）
+        run: cargo llvm-cov -p loggraph-engine --fail-under-lines 85 --summary-only
 
       # 样本数据端到端验收（真实 CLI 二进制 + sample/ 故事线断言，见 scripts/verify-samples.mjs）
       - name: 构建 CLI
