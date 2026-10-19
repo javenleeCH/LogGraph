@@ -30,8 +30,9 @@
 | **三实现一致性差分** | ✅ | `src/filters/regexConsistency.test.ts`（3 用例）：wasm 就绪 vs JS 兜底路径命中集一致，appendMatches 增量两态一致 |
 | **P1-4 引擎性质测试（proptest）** | ✅ CI 待确认 | `engine/tests/properties.rs`（7 性质）：CEP 序列匹配 soundness（256 随机用例验证「覆盖∪未覆盖==参与全集、无虚算/双计/漏算 + 链内保序 + 时间窗不逆序」）+ parser/expr/rules 全量性与确定性；proptest dev-dep；本机全绿且覆盖抬至 88.47% |
 | **P1-3 wasm 冒烟进 CI** | ✅ | `test:wasm:all` 聚合 3 冒烟脚本（regex 12 + cep 10 + filter 4 = 26 断言）；ci.yml 前端 job 增加「重建 filter wasm + wasm 冒烟」步骤；本机复刻 CI 链路验证 26/26 绿，两 wasm 二进制随源码同步重建提交 |
+| **P2-2 UI 组件冒烟** | ✅ CI 待确认 | 装 `jsdom` + `@testing-library/react` + `@testing-library/jest-dom`；vitest 放宽到 `*.test.{ts,tsx}`、加 setupFiles（jest-dom + ResizeObserver 桩）；3 冒烟：CommandPalette（开关）、LogStreamView（空态 WelcomeState 不崩）、NodeCanvasView/GroupEditorPage（activeGroup 数据装配，mock React Flow + FilterEngine）；本机 3/3 绿 + 全量 177 passed + tsc 0 错 |
 
-> vitest 计数：P0 后 157 → 加差分 3 → 本机 170 passed（keyScope 4 为本地旧 wasm 已知失败，CI 重建后绿）。
+> vitest 计数：P0 后 157 → 加差分 3 → 170 → P2-2 组件冒烟 +3 且本地重建 wasm 后 keyScope 4 转绿 → **177 passed（22 文件）**；tsc -b 0 错。
 > Rust 计数：engine 128 单测 + 7 性质 + cli 10 契约 = 全绿；覆盖基线 engine lines 88.47%（proptest 抬升）。
 
 ---
