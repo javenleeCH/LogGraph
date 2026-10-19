@@ -51,6 +51,14 @@ jobs:
       - name: 重建 cep wasm（当前引擎形状）
         run: npm run build:wasm:cep
 
+      - name: 重建 filter wasm（当前引擎形状）
+        run: npm run build:wasm
+
+      # wasm 冒烟（P1-3）：Node 直跑 3 个冒烟脚本（regex/cep/filter-agg，共 26 断言），
+      # 验证 Web 端 wasm 与桌面 native 引擎跑同一份 engine 语义。失败即红。
+      - name: wasm 冒烟（regex / cep / filter，26 断言）
+        run: npm run test:wasm:all
+
       - name: 类型检查
         run: npx tsc -b
 
