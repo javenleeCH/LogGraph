@@ -9,7 +9,8 @@ on:
 # 目的：把「构建偶发崩溃」这类问题从人工嘴里搬到机器上。
 # 桌面端打包（tauri build）暂不进 CI——它需要 webkit2gtk 系统依赖，
 # 会把单次流水线拉到 10 分钟以上；这里先守住类型 / 单测 / 前端构建 /
-# 引擎单测四道关。
+# 引擎单测四道关。前端单测前会用当前源码重建 cep wasm——keyScope 等
+# 用例直连 wasm 引擎，不该依赖「人工提交的二进制是否记得重建」。
 
 jobs:
   frontend:
@@ -27,6 +28,28 @@ jobs:
       - name: 安装依赖
         # 不依赖 package-lock.json（该锁文件按 .gitignore 不入库），故用 npm install
         run: npm install
+
+      # 库内 wasm 二进制由验证机人工重建提交，可能落后于 engine/src/cep.rs；
+      # CI 自己重建（首跑约 1 分钟，rust-cache 之后秒级），保证测试与前端
+      # 构建跑的都是当前源码的引擎。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'cep-wasm -> cep-wasm/target'
+
+      - name: 安装 wasm-bindgen-cli（版本随 cep-wasm/Cargo.toml 的 =x.y.z 同步）
+        run: |
+          VER=$(sed -n 's/^wasm-bindgen = "=\([0-9.]*\)"[[:space:]]*$/\1/p' cep-wasm/Cargo.toml)
+          test -n "$VER"
+          curl -sSfL "https://github.com/rustwasm/wasm-bindgen/releases/download/$VER/wasm-bindgen-$VER-x86_64-unknown-linux-musl.tar.gz" | tar xz
+          install -Dm755 "wasm-bindgen-$VER-x86_64-unknown-linux-musl/wasm-bindgen" /usr/local/bin/wasm-bindgen
+          wasm-bindgen --version
+
+      - name: 重建 cep wasm（当前引擎形状）
+        run: npm run build:wasm:cep
 
       - name: 类型检查
         run: npx tsc -b
