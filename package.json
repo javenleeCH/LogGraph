@@ -18,7 +18,8 @@
     "test:watch": "vitest",
     "test:wasm": "node scripts/test-wasm-regex.mjs",
     "test:wasm:cep": "node scripts/test-wasm-cep.mjs",
-    "test:wasm:filter": "node scripts/test-wasm-filter-agg.mjs"
+    "test:wasm:filter": "node scripts/test-wasm-filter-agg.mjs",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.2",
@@ -37,6 +38,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "@vitest/coverage-v8": "^5.0.5",
     "typescript": "^5.9.3",
     "vite": "^8.3.1",
     "vitest": "^5.0.5"

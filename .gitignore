@@ -40,3 +40,4 @@ perf-data/
 /Cargo.lock
 
 _t/
+coverage/

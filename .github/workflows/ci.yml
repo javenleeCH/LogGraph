@@ -54,8 +54,11 @@ jobs:
       - name: 类型检查
         run: npx tsc -b
 
-      - name: 单元测试
-        run: npm test
+      # 单测 + 覆盖率门禁（P2-1）：@vitest/coverage-v8 对 src/sequence|filters|parser|io
+      # 设阈值，跌破即红。阈值基线：2026-10-19 实测 Stmts 36.5 / Branch 37.6 /
+      # Funcs 32.5 / Lines 37.1，见 vitest.config.ts。
+      - name: 单元测试（含覆盖门禁）
+        run: npm run test:coverage
 
       - name: 构建
         run: npm run build
@@ -75,6 +78,16 @@ jobs:
       # 只测不依赖 tauri 的两个 crate（src-tauri 需要 webkit2gtk）
       - name: 单元测试
         run: cargo test -p loggraph-engine -p loggraph-cli
+
+      # 覆盖率报告（P2-1 Rust 侧）：先出基线，阈值门禁待基线稳定后再设。
+      # continue-on-error：本机无 Rust 无法预验证 llvm-cov 装配，工具链问题
+      # 不应阻断主流水线；基线稳定后移除此标记并加阈值门禁。
+      - name: 安装 cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+        continue-on-error: true
+      - name: 覆盖率摘要（report-only）
+        run: cargo llvm-cov -p loggraph-engine -p loggraph-cli --summary-only
+        continue-on-error: true
 
       # 样本数据端到端验收（真实 CLI 二进制 + sample/ 故事线断言，见 scripts/verify-samples.mjs）
       - name: 构建 CLI

@@ -17,6 +17,23 @@
 
 ---
 
+## 0.1 执行进度（2026-10-19 晚，本会话落地）
+
+| 事项 | 状态 | 说明 |
+|---|---|---|
+| P0-X verify-samples 挂 CI | ✅ | package.json `test:samples` + ci.yml rust job「构建 CLI + 样本数据验收」；CI 实测绿 |
+| P0-1 expr.ts 单测 | ✅ | `src/sequence/expr.test.ts`（20 用例）|
+| P0-2 templates.ts 单测 | ✅ | `src/sequence/templates.test.ts`（8 用例）|
+| P0-3 logStore 切片测试 | ✅ | `src/store/logStore.test.ts`（7 用例，tail 增量等价）|
+| **P1-1 CLI 契约测试** | ✅ 已写 | `cli/tests/contract.rs`（assert_cmd，10 用例：退出码 0/1/2 + JSON 信封 + parse/cep/validate/schema/search/ws）；**本地无 cargo，待 CI 验证** |
+| **P2-1 覆盖率门禁** | ✅ 前端 / ⏳ Rust | vitest `@vitest/coverage-v8`，阈值 lines 35/statements 34/functions 30/branches 35（基线 Stmts 36.5/Branch 37.6/Funcs 32.5/Lines 37.1，四语义核心目录）；本机验证通过；Rust `cargo-llvm-cov` 进 CI 为 report-only（先出基线再定阈值，continue-on-error 兜底）|
+| **三实现一致性差分** | ✅ | `src/filters/regexConsistency.test.ts`（3 用例）：wasm 就绪 vs JS 兜底路径命中集一致，appendMatches 增量两态一致 |
+
+> 待 CI 确认：CLI 契约测试（cargo test -p loggraph-cli 含 cli/tests）、Rust 覆盖基线。
+> vitest 计数：P0 后 157 → 本次新增差分 3 → 本机 170 passed（keyScope 4 为本地旧 wasm 已知失败，CI 重建后绿）。
+
+---
+
 ## 1. 设计原则（对齐 AGENT.md，不可违背）
 
 1. **测试跟随单一实现原则**：业务语义只在 engine 测一次，壳层不重复测业务——壳层只测
