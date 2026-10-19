@@ -39,6 +39,12 @@ function run(
   ];
   const resp = JSON.parse(run_sequences_json(JSON.stringify(groups), JSON.stringify(store)));
   expect(resp.fallback).toBe(false);
+  // 陈旧产物守卫：旧版 wasm 无 uncovered SoA 字段，后续 r.uncovered.ids 会以裸 TypeError 失败
+  if (!resp.results.g?.uncovered?.ids) {
+    throw new Error(
+      'wasm 产物为旧版结果形状（无 uncovered.ids SoA 字段）——请先运行 npm run build:wasm:cep 重建后重跑',
+    );
+  }
   return resp.results.g as SequenceMatchResult;
 }
 

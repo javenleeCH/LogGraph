@@ -14,7 +14,7 @@ import init, { run_sequences_json } from '../src/sequence/wasm-cep/pkg/cep_wasm.
 const bytes = readFileSync(
   new URL('../src/sequence/wasm-cep/pkg/cep_wasm_bg.wasm', import.meta.url),
 );
-await init(bytes);
+await init({ module_or_path: bytes });
 
 let pass = 0;
 let fail = 0;
@@ -45,9 +45,19 @@ console.log('[1] seq 边窗口内成链');
   const r = run(groups, store);
   check('未回退', r.fallback === false);
   const res = r.results.g1;
+  // 陈旧产物守卫：旧版 wasm 无 SoA 形状（uncovered.ids），直接崩 TypeError 不可读
+  if (!res?.uncovered?.ids) {
+    console.error(
+      '\n✗ wasm 产物为旧版结果形状（无 uncovered.ids SoA 字段）。\n' +
+        '  src/sequence/wasm-cep/pkg 下的二进制落后于 engine/src/cep.rs —— 请先运行：\n' +
+        '  npm run build:wasm:cep\n' +
+        '  重建成功后再重跑本脚本。（若构建报 rustc/cargo 错误，请把错误贴回来）',
+    );
+    process.exit(1);
+  }
   check('成 1 条链', res && res.chains.length === 1);
   check('链含 2 步', res && res.chains[0].steps.length === 2);
-  check('未覆盖事件为 0', res && res.uncovered.ids.length === 0);
+  check('未覆盖事件为 0', res.uncovered.ids.length === 0);
   check('threadStats 已产出', res && res.threadStats && res.threadStats.totalEvents === 2);
 }
 

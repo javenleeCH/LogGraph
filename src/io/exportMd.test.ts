@@ -198,20 +198,23 @@ describe('formatSequenceGroupMarkdown', () => {
     const result = seqResult({
       uncovered: { ids: [7, 8], ts: [1000, 2000] },
       uncoveredFull: [
-        ev({ id: 7, ts: 1000, raw: 'orphan a', level: 'WARN' }),
-        ev({ id: 8, ts: 2000, raw: 'orphan b', level: 'ERROR' }),
+        ev({ id: 7, ts: 1000, raw: 'orphan a', message: 'orphan a', level: 'WARN' }),
+        ev({ id: 8, ts: 2000, raw: 'orphan b', message: 'orphan b', level: 'ERROR' }),
       ],
       notViolations: [
         {
           edgeId: 'e1',
           fromEvent: ev({ id: 1, ts: 1000 }),
-          toEvent: ev({ id: 2, ts: 1500, raw: 'forbidden' }),
+          toEvent: ev({ id: 2, ts: 1500, raw: 'forbidden', message: 'forbidden' }),
         },
       ],
     });
     const md = formatSequenceGroupMarkdown(GROUP, result, FILTERS);
     expect(md).toContain('orphan a');
     expect(md).toContain('orphan b');
+    // 带"原文"= 完整事件行（时间 + 文件#行号 + 级别 + 正文），不是骨架占位
+    expect(md).toContain('app.log#7');
+    expect(md).toContain('**ERROR**');
     expect(md).toContain('### NOT 违规（共 1 条）');
     expect(md).toContain('forbidden');
     expect(md).toContain('✕');
