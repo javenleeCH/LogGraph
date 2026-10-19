@@ -12,12 +12,6 @@
  * - 分级阈值可配，默认按段内事件数。
  */
 
-/** SoA 未覆盖事件（引擎紧凑回传形态，见 types.ts SequenceMatchResult.uncovered） */
-export interface UncoveredSoa {
-  ids: number[];
-  ts: number[];
-}
-
 /** 异常时间窗口：一段连续异常 */
 export interface AnomalyWindow {
   startTs: number;

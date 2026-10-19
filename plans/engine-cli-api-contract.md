@@ -385,16 +385,17 @@ pub struct ThreadStats { pub total_events: usize, pub with_thread: usize,
 pub struct SeqResult {
     pub group_id: String,
     pub chains: Vec<MatchedChain>,
-    pub uncovered_events: Vec<SeqEvent>,
+    pub uncovered: UncoveredSoa,        // 全量 SoA 回传（不截断），见下方 UncoveredSoa
     pub edge_stats: Vec<EdgeStat>,
     pub not_violations: Vec<NotViolation>,
     pub heartbeats: Vec<Heartbeat>,
     pub total_chains: usize,
-    pub total_uncovered: usize,
     pub covered_marks: BTreeMap<String, Vec<(u32, u32)>>,
     pub thread_stats: ThreadStats,   // 不论 scope 是否 thread 都产出，见 §3.13
     pub key_stats: Option<KeyStats>, // 仅 scope="key" 且正则可用时产出，见 §3.13.1
 }
+pub struct UncoveredSoa { pub ids: Vec<u32>, pub ts: Vec<i64> } // (ts,id) 升序；camelCase: ids / ts
+// 全量回传、永不截断：百万级异常下对象数组载荷 150MB+，两列平铺 ~65MB
 pub struct RunSeqResponse { pub fallback: bool, pub results: BTreeMap<String, SeqResult> }
 // BTreeMap：--json 输出按 groupId 字典序，agent 可依赖键序
 
@@ -1205,7 +1206,6 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
         ],
         "heartbeats": [],
         "totalChains": 1,
-        "uncovered": { "ids": [], "ts": [] },
         "coveredMarks": {},
         "threadStats": { "totalEvents": 3, "withThread": 3, "distinctThreads": 3 }
       }

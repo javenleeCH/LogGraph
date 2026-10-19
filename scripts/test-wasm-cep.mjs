@@ -47,7 +47,7 @@ console.log('[1] seq 边窗口内成链');
   const res = r.results.g1;
   check('成 1 条链', res && res.chains.length === 1);
   check('链含 2 步', res && res.chains[0].steps.length === 2);
-  check('未覆盖事件为 0', res && res.uncoveredEvents.length === 0);
+  check('未覆盖事件为 0', res && res.uncovered.ids.length === 0);
   check('threadStats 已产出', res && res.threadStats && res.threadStats.totalEvents === 2);
 }
 
@@ -100,7 +100,7 @@ console.log('[4] nodeConditions 二次过滤');
   const r = run(groups, store);
   const res = r.results.g4;
   check('仅 level=E 的 B 参与成链', res && res.chains.length === 1);
-  check('level=W 的 B 计入未覆盖', res && res.uncoveredEvents.some((e) => e.id === 3));
+  check('level=W 的 B 计入未覆盖', res && res.uncovered.ids.includes(3));
 }
 
 console.log(`\n结果: ${pass} passed, ${fail} failed`);

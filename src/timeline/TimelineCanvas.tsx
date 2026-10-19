@@ -26,7 +26,7 @@ import { bisectLeft, nearestEvent } from './correlation';
 import { densityAlpha, withAlpha } from './density';
 import { ZoomPanAnimator } from './zoomPanAnimator';
 import { formatDateTime } from '../utils/timeFormat';
-import { trueChainCount, trueUncoveredCount } from '../utils/counts';
+import { trueChainCount, trueUncoveredCount, makeUncoveredLookup } from '../utils/counts';
 import type { Filter, FilterMatch, LogEvent, TimeRange } from '../types';
 import tipStyles from './Tooltip.module.css';
 
@@ -45,7 +45,7 @@ interface ChainData {
   chainIds: Set<number>;
   chainColor: string;
   chainIndexOf: (id: number) => number | null;
-  anomalyIds: Set<number> | null;
+  anomalyHit: ((ev: LogEvent) => boolean) | null;
   violationIds: Set<number>;
   jitterTs: Set<number>;
 }
@@ -282,7 +282,7 @@ export function TimelineCanvas() {
           hoveredEventId,
           correlatedEventIds,
           cd?.chainIds ?? null,
-          cd?.anomalyIds ?? null,
+          cd?.anomalyHit ?? null,
           cd?.chainColor ?? null,
           cd?.chainIndexOf ?? null,
           cd?.violationIds ?? null,
@@ -399,8 +399,9 @@ export function TimelineCanvas() {
             if (!chainIdx.has(stp.event.id)) chainIdx.set(stp.event.id, ch.chainIndex);
           }
         }
-        const anomalyIds = g.sequence?.anomalyEnabled
-          ? new Set(r.uncovered.ids)
+        // 异常命中判定走 SoA 二分（百万级 new Set 会拖垮 tail 增量重算）
+        const anomalyHit = g.sequence?.anomalyEnabled
+          ? makeUncoveredLookup(r)
           : null;
         // periodic 抖动事件（黄框，按 ts 存）
         const jitterIds = new Set<number>();
@@ -412,7 +413,7 @@ export function TimelineCanvas() {
           chainIds,
           chainColor: g.color,
           chainIndexOf: (id: number) => chainIdx.get(id) ?? null,
-          anomalyIds,
+          anomalyHit,
           violationIds,
           jitterTs: jitterIds,
         });

@@ -27,6 +27,28 @@ export function isSequenceTruncated(r: SequenceMatchResult | undefined): boolean
   return trueChainCount(r) > r.chains.length;
 }
 
+/** 未覆盖事件的 O(log n) 命中判定闭包：SoA 两列按 (ts, id) 升序，可整体二分。
+ *  替代 new Set(ids)——329 万项 Set 要 ~100MB 且构建 ~200ms（tail 模式每次
+ *  增量重算都重建）；二分零额外内存，按绘制事件逐个查也只在个位数毫秒级。 */
+export function makeUncoveredLookup(
+  r: Pick<SequenceMatchResult, 'uncovered'>,
+): (ev: { id: number; ts: number }) => boolean {
+  const ids = r.uncovered.ids;
+  const ts = r.uncovered.ts;
+  return (ev) => {
+    let lo = 0;
+    let hi = ids.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const d = ts[mid] - ev.ts || ids[mid] - ev.id;
+      if (d < 0) lo = mid + 1;
+      else if (d > 0) hi = mid - 1;
+      else return true;
+    }
+    return false;
+  };
+}
+
 /** 千分位（与 App/Toolbar 一致，跟随本机 locale） */
 export function fmtCount(n: number): string {
   return n.toLocaleString();

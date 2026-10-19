@@ -357,7 +357,7 @@ export function drawLaneEventsAt(
   hoveredId: number | null,
   correlatedIds: Set<number>,
   chainIds: Set<number> | null = null,
-  anomalyIds: Set<number> | null = null,
+  anomalyHit: ((ev: LogEvent) => boolean) | null = null,
   chainColor: string | null = null,
   chainIndexOf: ((eventId: number) => number | null) | null = null,
   violationIds: Set<number> | null = null,
@@ -434,7 +434,7 @@ export function drawLaneEventsAt(
     const isHov = ev.id === hoveredId;
     const isCorr = correlatedIds.has(ev.id);
     const isChain = chainIds?.has(ev.id) ?? false;
-    const isAnom = anomalyIds?.has(ev.id) ?? false;
+    const isAnom = anomalyHit?.(ev) ?? false;
     const isViol = violationIds?.has(ev.id) ?? false;
     const isJit = jitterTs?.has(ev.ts) ?? false;
     let fillColor = filter.color;

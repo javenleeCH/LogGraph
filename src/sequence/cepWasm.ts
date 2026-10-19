@@ -166,6 +166,19 @@ export function runCepWasm(
     );
     if (resp.fallback) return { kind: 'unsupported' };
     const results = resp.results as Record<string, SequenceMatchResult>;
+    // 形状守卫：陈旧 wasm 产物回的是旧 uncoveredEvents 形状，直接放行会在
+    // 消费点解构崩溃（渲染白屏）；这里显式降级为失败横幅 + 重建指引，
+    // 绝不把「产物过期」伪装成「没有匹配」
+    for (const r of Object.values(results)) {
+      if (!r || !Array.isArray(r.uncovered?.ids)) {
+        return {
+          kind: 'failed',
+          error: new Error(
+            'wasm 产物为旧版结果形状（缺少 uncovered SoA 列），请运行 npm run build:wasm:cep 重建后重试',
+          ),
+        };
+      }
+    }
     if (idToEvent.size > 0) {
       for (const r of Object.values(results)) {
         const ids = r.uncovered?.ids;

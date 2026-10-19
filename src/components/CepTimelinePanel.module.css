@@ -106,9 +106,17 @@
   overflow-x: hidden;
 }
 
+.viewport {
+  position: sticky;
+  top: 0;
+  overflow: hidden;
+}
+
 .block {
   border-bottom: 1px solid var(--cep-border);
   padding-bottom: 4px;
+  /* OVERSCAN 冗余行溢出块边界时裁掉，避免渗进相邻块 */
+  overflow: hidden;
 }
 
 /* 虚拟滚动：块内高度需可预测（HEADER_H=28，见 CepTimelinePanel.tsx）。

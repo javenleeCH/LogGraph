@@ -5,6 +5,7 @@ import {
   isSequenceTruncated,
   trueChainCount,
   trueUncoveredCount,
+  makeUncoveredLookup,
 } from './counts';
 import type { SequenceMatchResult } from '../types';
 
@@ -55,6 +56,36 @@ describe('计数真值（链护栏截断语义）', () => {
     expect(trueChainCount(undefined)).toBe(0);
     expect(trueUncoveredCount(undefined)).toBe(0);
     expect(isSequenceTruncated(undefined)).toBe(false);
+  });
+});
+
+describe('未覆盖事件二分命中（makeUncoveredLookup）', () => {
+  // SoA 按 (ts, id) 升序；同 ts 时按 id 排序是二分正确性的前提
+  const soa = {
+    ids: [7, 3, 9, 1, 5],
+    ts: [100, 200, 200, 300, 300],
+  };
+  const hit = makeUncoveredLookup({ uncovered: soa });
+
+  it('命中已存在的事件（含首尾）', () => {
+    expect(hit({ id: 7, ts: 100 })).toBe(true);
+    expect(hit({ id: 5, ts: 300 })).toBe(true);
+  });
+
+  it('同 ts 不同 id 不误命中（并列定序）', () => {
+    expect(hit({ id: 4, ts: 200 })).toBe(false);
+    expect(hit({ id: 3, ts: 200 })).toBe(true);
+    expect(hit({ id: 9, ts: 200 })).toBe(true);
+  });
+
+  it('ts 落在区间内但无该事件时 miss', () => {
+    expect(hit({ id: 8, ts: 250 })).toBe(false);
+    expect(hit({ id: 7, ts: 300 })).toBe(false);
+  });
+
+  it('空 SoA 恒 miss', () => {
+    const miss = makeUncoveredLookup({ uncovered: { ids: [], ts: [] } });
+    expect(miss({ id: 1, ts: 1 })).toBe(false);
   });
 });
 

@@ -40,6 +40,9 @@ function SeqNav({ count, cur, onNav }: { count: number; cur: number; onNav: (dir
 
 /** 未覆盖事件明细的渲染上限（SoA 全量回传后异常可达百万级，防全量 map） */
 const UNCOVERED_RENDER_CAP = 1000;
+/** 关键字过滤的扫描上限：SoA 全量可达百万级，逐条 toLowerCase().includes()
+ *  全量扫描每键入一次就阻塞主线程数百毫秒；只扫前 N 条并在标题明示 */
+const UNCOVERED_SCAN_CAP = 100_000;
 
 /** 未覆盖事件行：SoA 骨架 + wasm 模式下按 id 映射回的原文 */
 interface UncEntry {
@@ -80,20 +83,28 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
   /** 未覆盖事件明细（异常候选）：SoA 全量 + 渲染上限。
    *  引擎回传 SoA 两列（ids/ts），wasm 模式下 uncoveredFull 与 ids 同序
    *  对齐携带原文（db 模式缺省，原文在 SQLite）。百万级全量 map 会拖死
-   *  渲染进程，这里只取前 UNCOVERED_RENDER_CAP 条；完整滚动看 CEP 面板。 */
+   *  渲染进程，这里只取前 UNCOVERED_RENDER_CAP 条；完整滚动看 CEP 面板。
+   *  关键字过滤同样有 UNCOVERED_SCAN_CAP 扫描上限，见下。 */
   const uncovered = useMemo<UncEntry[]>(() => {
     if (!result || mode === 'chains') return [];
     const soa = result.uncovered;
     const full = result.uncoveredFull;
     const kwL = kw.toLowerCase();
     const out: UncEntry[] = [];
-    for (let i = 0; i < soa.ids.length && out.length < UNCOVERED_RENDER_CAP; i++) {
+    const scanLimit = kwL
+      ? Math.min(soa.ids.length, UNCOVERED_SCAN_CAP)
+      : soa.ids.length;
+    for (let i = 0; i < scanLimit && out.length < UNCOVERED_RENDER_CAP; i++) {
       const ev = full?.[i];
       if (kwL && !(ev?.raw ?? '').toLowerCase().includes(kwL)) continue;
       out.push({ id: soa.ids[i], ts: soa.ts[i], raw: ev?.raw, level: ev?.level });
     }
     return out;
   }, [result, kw, mode]);
+
+  /** 关键字是否只检索了前缀（SoA 超扫描上限）：标题明示，不静默截断 */
+  const uncScanCapped =
+    !!kw && !!result && mode !== 'chains' && result.uncovered.ids.length > UNCOVERED_SCAN_CAP;
 
   /** NOT 边违规（异常） */
   const violations = useMemo(() => {
@@ -318,7 +329,7 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
                         UNCOVERED_RENDER_CAP,
                       )} 条，完整滚动请用 CEP 时间线面板`
                     : kw
-                      ? `关键字命中 ${fmtCount(uncovered.length)} 条（共 ${fmtCount(uncTotal)} 条）`
+                      ? `关键字命中 ${fmtCount(uncovered.length)} 条（共 ${fmtCount(uncTotal)} 条${uncScanCapped ? `，仅检索前 ${fmtCount(UNCOVERED_SCAN_CAP)} 条` : ''}）`
                       : `${fmtCount(uncTotal)} 条`
                 }
               >

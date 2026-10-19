@@ -165,8 +165,9 @@ export interface SequenceMatchResult {
    *  ids[i]/ts[i] 为第 i 个，按 (ts, id) 升序。百万级异常下对象数组
    *  载荷 150MB+，平铺数字数组 ~65MB；db 模式引擎只回 id+ts。 */
   uncovered: { ids: number[]; ts: number[] };
-  /** 未覆盖事件全文（仅 TS 回退引擎填充，量级 ≤30 万事件护栏）：
-   *  GroupMatchesTab 全文显示/关键字过滤用；db 模式缺省，按需经事件流取 */
+  /** 未覆盖事件全文（wasm 模式由前端按 ids 从事件流回填，与 ids 同序对齐、
+   *  缺失处留洞；db 模式原文驻留 SQLite，该字段缺省）：
+   *  GroupMatchesTab 全文显示 / 关键字过滤 / Markdown 导出用 */
   uncoveredFull?: LogEvent[];
   /** 每条边命中统计 */
   edgeStats: SequenceEdgeStat[];

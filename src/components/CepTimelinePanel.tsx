@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { CEP_MAX_CHAINS, useLogStore } from '../store/logStore';
 import { formatTime, formatDateTime, parseDateTime } from '../utils/timeFormat';
 import type { FilterGroup, FilterMatch, LogEvent, SequenceMatchResult } from '../types';
@@ -28,6 +28,11 @@ const HINT_H = 26;
 const WHY_H = 96;
 /** .block 的 border-bottom(1) + padding-bottom(4) */
 const BLOCK_TAIL = 5;
+/** 滚动占位的浏览器高度上限（Chromium 布局钳制 ~33.55M px）：全量行高之和
+ *  超过它会被引擎钳断 → 尾部行永远滚不到，占位高度必须压进上限 */
+const MAX_SCROLL_PX = 33_000_000;
+/** 行窗口上下冗余行数（OVERSCAN，缓解边界抖动；溢出块外的由 .block overflow 裁掉） */
+const ROW_BUF = 2;
 /** 行类型编码（并列时间戳排序：异常 → 违规 → 链） */
 const KIND_ANOMALY = 0;
 const KIND_VIOLATION = 1;
@@ -265,7 +270,7 @@ export function CepTimelinePanel() {
   // 虚拟滚动状态
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(600);
-  const bodyRef = useRef<HTMLDivElement>(null);
+  const [bodyEl, setBodyEl] = useState<HTMLDivElement | null>(null);
 
   const openRange = () => {
     const vr = useLogStore.getState().viewRange;
@@ -310,26 +315,27 @@ export function CepTimelinePanel() {
         cepRange,
         cepEngineError === null && !cepEnginePending,
       ),
-    [groups, sequenceResults, filterMap, matches, cepRange, cepEngineError, cepEnginePending],
+    [groups, sequenceResults, matches, cepRange, cepEngineError, cepEnginePending],
   );
 
-  // 数据重建（重算/改规则/改时间窗）时复位滚动
+  // 数据重建（重算/改规则/改时间窗）或滚动区重挂（收纳再展开）时复位滚动
   useEffect(() => {
     setScrollTop(0);
-    bodyRef.current?.scrollTo(0, 0);
-  }, [vblocks]);
+    bodyEl?.scrollTo(0, 0);
+  }, [vblocks, bodyEl]);
 
-  // 视口尺寸跟随
+  // 视口尺寸跟随。bodyEl 用回调 ref 存 state：首渲染结果未出时面板提前
+  // return null，挂在 ref 上的 effect([]) 会空跑（元素尚未挂载）且永不重跑
+  // → viewH 永久停在初始值 600。依赖 bodyEl 才能在真正挂载后测量。
   useEffect(() => {
-    const el = bodyRef.current;
-    if (!el) return;
-    setViewH(el.clientHeight);
+    if (!bodyEl) return;
+    setViewH(bodyEl.clientHeight);
     const ro = new ResizeObserver((entries) => {
       for (const e of entries) setViewH(e.contentRect.height);
     });
-    ro.observe(el);
+    ro.observe(bodyEl);
     return () => ro.disconnect();
-  }, []);
+  }, [bodyEl]);
 
   // 布局：前缀和求各块落位（whyOpen / overLimit 影响块高）
   const { segs, totalH } = useMemo(() => {
@@ -363,8 +369,16 @@ export function CepTimelinePanel() {
     );
   }
 
-  const viewTop = scrollTop;
-  const viewBottom = scrollTop + viewH;
+  // 浏览器滚动高度上限（Chromium ~33.55M px）：329 万行 × 26px ≈ 8554 万 px
+  // 远超上限，超限的占位高度会被布局引擎钳制 → 尾部行永远滚不到。把占位
+  // 高度压进上限，物理滚动量按「滚动分数 × 逻辑可滚动量」仿射映射回逻辑
+  // 偏移（虚拟列表通例）：物理满滚时逻辑恰好到底，首尾行恒可达；压缩比
+  // 下滚动步长等比放大，属预期手感。
+  const physTotal = Math.min(totalH, MAX_SCROLL_PX);
+  const physScrollMax = Math.max(0, physTotal - viewH);
+  const viewTop =
+    physScrollMax > 0 ? (scrollTop / physScrollMax) * Math.max(0, totalH - viewH) : 0;
+  const viewBottom = viewTop + viewH;
 
   return (
     <div className={styles.panel}>
@@ -431,25 +445,26 @@ export function CepTimelinePanel() {
       )}
       <div
         className={styles.panelBody}
-        ref={bodyRef}
+        ref={setBodyEl}
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
       >
-        {/* 滚动占位：高度=全量行高之和，滚动条长度反映真实数据量 */}
-        <div style={{ height: totalH, position: 'relative' }}>
+        {/* 视口钉层：sticky 停在滚动区可视顶部，块按「逻辑位置 − 逻辑滚动量」
+            绝对定位落位，overflow hidden 裁掉窗外内容（含 OVERSCAN 冗余行） */}
+        <div className={styles.viewport} style={{ height: viewH }}>
           {segs
             .filter(
               (seg) => seg.top < viewBottom && seg.top + seg.h > viewTop,
             )
             .map((seg) => {
               const b = seg.b;
-              // 行窗口：视口映射到块内行号区间（含 OVERSCAN 冗余）
+              // 行窗口：视口映射到块内行号区间，上下各冗余 ROW_BUF 行
               const first = Math.max(
                 0,
-                Math.floor((viewTop - seg.top - seg.rowsTop) / ROW_H),
+                Math.floor((viewTop - seg.top - seg.rowsTop) / ROW_H) - ROW_BUF,
               );
               const last = Math.min(
                 b.rowCount,
-                Math.ceil((viewBottom - seg.top - seg.rowsTop) / ROW_H),
+                Math.ceil((viewBottom - seg.top - seg.rowsTop) / ROW_H) + ROW_BUF,
               );
               const rows: ReactNode[] = [];
               for (let i = first; i < last; i++) {
@@ -556,7 +571,7 @@ export function CepTimelinePanel() {
                 <div
                   key={b.groupId}
                   className={styles.block}
-                  style={{ position: 'absolute', top: seg.top, height: seg.h, left: 0, right: 0 }}
+                  style={{ position: 'absolute', top: seg.top - viewTop, height: seg.h, left: 0, right: 0 }}
                 >
                   <div className={styles.blockHeader} style={{ borderLeftColor: b.color }}>
                     <span className={styles.blockDot} style={{ background: b.color }} />
@@ -674,6 +689,10 @@ export function CepTimelinePanel() {
               );
             })}
         </div>
+        {/* 滚动占位：高度=全量行高之和（超浏览器上限时按比例压缩，见
+            MAX_SCROLL_PX），滚动条长度尽可能反映真实数据量；物理滚动量经
+            scale 映射回逻辑偏移，尾部行始终可达 */}
+        <div style={{ height: Math.max(0, physTotal - viewH) }} />
       </div>
       <div className={styles.panelFooter}>
         <button
