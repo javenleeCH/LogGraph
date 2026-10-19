@@ -14,6 +14,7 @@
     "build:wasm": "cd filter-wasm && cargo build --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/filter_wasm.wasm --target web --out-dir ../src/filters/wasm-filter/pkg --out-name filter_wasm",
     "build:wasm:cep": "cd cep-wasm && cargo build --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/cep_wasm.wasm --target web --out-dir ../src/sequence/wasm-cep/pkg --out-name cep_wasm",
     "test": "vitest run",
+    "test:samples": "node scripts/verify-samples.mjs",
     "test:watch": "vitest",
     "test:wasm": "node scripts/test-wasm-regex.mjs",
     "test:wasm:cep": "node scripts/test-wasm-cep.mjs",

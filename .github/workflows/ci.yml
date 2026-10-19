@@ -75,3 +75,9 @@ jobs:
       # 只测不依赖 tauri 的两个 crate（src-tauri 需要 webkit2gtk）
       - name: 单元测试
         run: cargo test -p loggraph-engine -p loggraph-cli
+
+      # 样本数据端到端验收（真实 CLI 二进制 + sample/ 故事线断言，见 scripts/verify-samples.mjs）
+      - name: 构建 CLI
+        run: cargo build -p loggraph-cli
+      - name: 样本数据验收
+        run: node scripts/verify-samples.mjs
