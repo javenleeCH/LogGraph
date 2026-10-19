@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { CEP_MAX_CHAINS, useLogStore } from '../store/logStore';
 import { formatTime, formatDateTime, parseDateTime } from '../utils/timeFormat';
 import type { FilterGroup, FilterMatch, LogEvent, SequenceMatchResult } from '../types';
 import styles from './CepTimelinePanel.module.css';
-import { ChevronLeft, ChevronRight, AlertTriangle } from './Icon';
+import { ChevronLeft, ChevronRight, AlertTriangle, Copy } from './Icon';
+import { copyWithFallback } from '../utils/copyFlow';
 import { fmtCompact, fmtCount } from '../utils/counts';
 import { threadHint, type ThreadHint } from '../sequence/threadHint';
 import { keyHint, type KeyHint } from '../sequence/keyHint';
@@ -24,8 +25,8 @@ const HEADER_H = 28;
 const EMPTY_H = 32;
 /** 块底护栏提示行高度（.blockMore） */
 const HINT_H = 26;
-/** 「为何没匹配」展开区高度（.whyList/.whyEmpty，内部滚动） */
-const WHY_H = 96;
+/** 「为何没匹配/诊断异常」展开区高度（.whyList/.whyEmpty，内部滚动） */
+const WHY_H = 128;
 /** .block 的 border-bottom(1) + padding-bottom(4) */
 const BLOCK_TAIL = 5;
 /** 滚动占位的浏览器高度上限（Chromium 布局钳制 ~33.55M px）：全量行高之和
@@ -272,6 +273,35 @@ export function CepTimelinePanel() {
   const [rangeOpen, setRangeOpen] = useState(false);
   const [rangeStart, setRangeStart] = useState('');
   const [rangeEnd, setRangeEnd] = useState('');
+  // 面板宽度拖拽（右缘拖柄）：与左侧文件树分隔条同款交互，像素钳位
+  const [panelW, setPanelW] = useState(258);
+  const panelDrag = useRef<{ startX: number; startW: number } | null>(null);
+  const onPanelResizeDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    panelDrag.current = { startX: e.clientX, startW: panelW };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [panelW]);
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const d = panelDrag.current;
+      if (!d) return;
+      // 钳位：窄到放不下时间+正文、宽到挤占右侧 filter 视图都不合理
+      setPanelW(Math.max(200, Math.min(640, d.startW + (e.clientX - d.startX))));
+    };
+    const onUp = () => {
+      if (!panelDrag.current) return;
+      panelDrag.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
 
   // 虚拟滚动状态
   const [scrollTop, setScrollTop] = useState(0);
@@ -402,7 +432,7 @@ export function CepTimelinePanel() {
   const viewBottom = viewTop + viewH;
 
   return (
-    <div className={styles.panel}>
+    <div className={styles.panel} style={{ width: panelW }}>
       <div className={styles.panelHeader}>
         <span className={styles.panelTitle}>CEP 规则</span>
         <span className={styles.spacer} />
@@ -666,6 +696,34 @@ export function CepTimelinePanel() {
                   </div>
                   {seg.hasWhy && (
                     <div className={styles.whyPane} style={{ top: hy + HEADER_H }}>
+                      {diag.length > 0 && (
+                        <button
+                          className={styles.whyCopy}
+                          title="复制诊断内容"
+                          onClick={() => {
+                            // 复制成可直接贴走的纯文本（工单/报告用）
+                            const sevLabel: Record<Diagnosis['severity'], string> = {
+                              blocker: '阻塞',
+                              anomaly: '异常',
+                              hint: '提示',
+                            };
+                            const text = [
+                              `【${b.label}】CEP 诊断`,
+                              ...diag.map(
+                                (d) =>
+                                  `[${sevLabel[d.severity]}] ${d.text}` +
+                                  (d.detail ? `\n  ${d.detail}` : ''),
+                              ),
+                            ].join('\n');
+                            void copyWithFallback(text, {
+                              successTitle: '诊断内容已复制',
+                              fallbackTitle: '手动复制诊断内容',
+                            });
+                          }}
+                        >
+                          <Copy size={12} />
+                        </button>
+                      )}
                       {diag.length > 0 ? (
                         <ul className={styles.whyList}>
                           {diag.map((d, i) => (
@@ -745,6 +803,12 @@ export function CepTimelinePanel() {
           <ChevronLeft size={16} strokeWidth={2.5} />
         </button>
       </div>
+      {/* 右缘拖柄：面板宽度可拉（收纳态无拖柄） */}
+      <div
+        className={styles.panelResizer}
+        onMouseDown={onPanelResizeDown}
+        title="拖拽调节面板宽度"
+      />
     </div>
   );
 }

@@ -14,10 +14,27 @@
   display: flex;
   flex-direction: column;
   flex: 0 0 auto;
+  /* 宽度由组件 inline style 控制（拖拽拉伸，钳位 200~640）；258 是初值 */
   width: 258px;
+  position: relative;
   min-height: 0;
   border-right: 1px solid var(--cep-border);
   background: var(--cep-bg);
+}
+/* 右缘拖柄：面板宽度拉伸（与左侧文件树分隔条同款交互） */
+.panelResizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 20;
+  background: transparent;
+}
+.panelResizer:hover,
+.panelResizer:active {
+  background: var(--cep-bg-hover);
 }
 
 :global([data-theme='dark']) .panel,
@@ -503,7 +520,7 @@
 .whyToggleOpen svg {
   transform: rotate(90deg);
 }
-/* 诊断面板槽位（WHY_H=96）：钉在块头下方，随块头一起钉层时盖住滚过的行 */
+/* 诊断面板槽位（WHY_H=128）：钉在块头下方，随块头一起钉层时盖住滚过的行 */
 .whyPane {
   position: absolute;
   left: 0;
@@ -513,14 +530,14 @@
 }
 .whyList {
   margin: 0;
-  padding: 6px 10px 8px 12px;
+  padding: 6px 26px 8px 12px;
   list-style: none;
   display: flex;
   flex-direction: column;
   gap: 5px;
   border-bottom: 1px solid var(--border-subtle, #eaeef2);
-  /* WHY_H=96：虚拟滚动要求定高，超出内部滚动 */
-  height: 96px;
+  /* WHY_H=128：虚拟滚动要求定高，超出内部滚动；右侧留出复制按钮位 */
+  height: 128px;
   box-sizing: border-box;
   overflow-y: auto;
 }
@@ -540,7 +557,7 @@
   border-left-color: var(--anomaly, #cf222e);
 }
 .whyText {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--fg, #1f2328);
 }
@@ -553,9 +570,31 @@
   color: var(--anomaly, #cf222e);
 }
 .whyDetail {
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
   color: var(--fg-muted, #57606a);
+}
+/* 复制按钮：钉在诊断面板右上角（内容非空才有） */
+.whyCopy {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 4px;
+  background: var(--cep-bg);
+  color: var(--fg-muted, #57606a);
+  cursor: pointer;
+}
+.whyCopy:hover {
+  border-color: var(--accent, #4ea2ff);
+  color: var(--accent, #4ea2ff);
 }
 /* 有链但无诊断时的中性入口：弱化、不抢 --danger 语义色 */
 .whyToggleNeutral {
@@ -574,7 +613,7 @@
   line-height: 1.5;
   color: var(--fg-muted, #57606a);
   border-bottom: 1px solid var(--border-subtle, #eaeef2);
-  /* WHY_H=96：与 whyList 同槽位定高 */
-  height: 96px;
+  /* WHY_H=128：与 whyList 同槽位定高 */
+  height: 128px;
   box-sizing: border-box;
 }
