@@ -17,3 +17,7 @@ grep-regex = "0.1"
 ignore = "0.4.33"
 # 会话命中缓存内层锁（无中毒错误路径）
 parking_lot = "0.12"
+
+[dev-dependencies]
+# 引擎性质测试（parser/expr/rules 全量性 + CEP 序列匹配 soundness，见 tests/properties.rs）
+proptest = "1"
