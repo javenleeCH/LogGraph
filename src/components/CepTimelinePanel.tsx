@@ -7,7 +7,7 @@ import { ChevronLeft, ChevronRight, AlertTriangle } from './Icon';
 import { fmtCompact, fmtCount } from '../utils/counts';
 import { threadHint, type ThreadHint } from '../sequence/threadHint';
 import { keyHint, type KeyHint } from '../sequence/keyHint';
-import { explainNoMatch, type Diagnosis } from '../sequence/explain';
+import { explainNoMatch, explainAnomalies, type Diagnosis } from '../sequence/explain';
 import {
   aggregateAnomalyWindows,
   windowAt,
@@ -67,6 +67,10 @@ interface VBlock {
   anomalySummary: AnomalySummary | null;
   /** 异常事件真值（SoA 全量回传，恒为真值） */
   anomalyTrueTotal: number;
+  /** 未覆盖 SoA 引用（恒为引擎回传原值，不受异常高亮开关影响）——诊断归因用 */
+  uncSoa: { ids: number[]; ts: number[] };
+  /** 未覆盖总数（真值，不受异常高亮开关影响）——诊断入口的判定用 */
+  uncTotal: number;
   /** 链渲染引用（cepRange 时为窗内子集，保持 startTs 升序） */
   chains: MatchedChain[];
   /** SoA 引用（anomalyEnabled 时非空） */
@@ -202,6 +206,8 @@ function buildVBlock(
     diagnoses: engineOk && g.sequence ? explainNoMatch(g.sequence, matches, totalChains === 0) : null,
     anomalySummary,
     anomalyTrueTotal,
+    uncSoa: r.uncovered,
+    uncTotal: r.uncovered.ids.length,
     chains,
     unc,
     violations: violList,
@@ -317,6 +323,21 @@ export function CepTimelinePanel() {
       ),
     [groups, sequenceResults, matches, cepRange, cepEngineError, cepEnginePending],
   );
+
+  // 异常归因诊断：explainAnomalies 是 O(参与过滤器命中总数) 的扫描，只在
+  // 用户展开某组诊断时才算那一组（平时零开销）。归因看的是引擎回传的
+  // uncovered 真值，不受异常高亮开关影响——高亮关着也不该说「未发现问题」。
+  const groupById = useMemo(() => new Map(groups.map((g) => [g.id, g] as const)), [groups]);
+  const anomalyDiag = useMemo(() => {
+    const out: Record<string, Diagnosis[]> = {};
+    for (const b of vblocks) {
+      if (!whyOpen[b.groupId] || b.uncTotal === 0) continue;
+      const g = groupById.get(b.groupId);
+      if (!g) continue;
+      out[b.groupId] = explainAnomalies(g.filterIds, b.uncSoa, matches);
+    }
+    return out;
+  }, [vblocks, whyOpen, matches, groupById]);
 
   // 数据重建（重算/改规则/改时间窗）或滚动区重挂（收纳再展开）时复位滚动
   useEffect(() => {
@@ -457,6 +478,13 @@ export function CepTimelinePanel() {
             )
             .map((seg) => {
               const b = seg.b;
+              // 块头钉层（手动 sticky）：块顶滚出视口后块头贴住视口顶、随
+              // 块尾离开——异常/诊断按钮在任意滚动位置都可达，展开的诊断
+              // 内容同样钉在块头下方（CSS sticky 在绝对定位布局下失效）
+              const hy = Math.max(0, Math.min(viewTop - seg.top, seg.h - HEADER_H));
+              // 诊断内容 = 配置诊断（为何没匹配）+ 异常归因（哪些过滤器的
+              // 命中没进链，展开时才计算）
+              const diag = [...(b.diagnoses ?? []), ...(anomalyDiag[b.groupId] ?? [])];
               // 行窗口：视口映射到块内行号区间，上下各冗余 ROW_BUF 行
               const first = Math.max(
                 0,
@@ -573,7 +601,7 @@ export function CepTimelinePanel() {
                   className={styles.block}
                   style={{ position: 'absolute', top: seg.top - viewTop, height: seg.h, left: 0, right: 0 }}
                 >
-                  <div className={styles.blockHeader} style={{ borderLeftColor: b.color }}>
+                  <div className={styles.blockHeader} style={{ top: hy, borderLeftColor: b.color }}>
                     <span className={styles.blockDot} style={{ background: b.color }} />
                     <span className={styles.blockTitle} title={b.label}>{b.label}</span>
                     <span className={styles.blockStat} title={blockStatTitle(b)}>
@@ -619,23 +647,37 @@ export function CepTimelinePanel() {
                     </button>
                     {b.diagnoses && (
                       <button
-                        className={`${styles.whyToggle} ${whyOpen[b.groupId] ? styles.whyToggleOpen : ''} ${b.diagnoses.length === 0 ? styles.whyToggleNeutral : ''}`}
-                        title={b.diagnoses.length > 0 ? '点开看规则为何没匹配上' : '点开运行诊断'}
+                        className={`${styles.whyToggle} ${whyOpen[b.groupId] ? styles.whyToggleOpen : ''} ${
+                          b.diagnoses.length === 0 && b.uncTotal === 0 ? styles.whyToggleNeutral : ''
+                        }`}
+                        title={
+                          b.diagnoses.length > 0
+                            ? '点开看规则为何没匹配上'
+                            : b.uncTotal > 0
+                              ? '点开看异常归因：哪些过滤器的命中没进链'
+                              : '点开运行诊断'
+                        }
                         onClick={() => setWhyOpen((p) => ({ ...p, [b.groupId]: !p[b.groupId] }))}
                       >
                         <ChevronRight size={12} />
-                        {b.diagnoses.length > 0 ? '为何没匹配' : '诊断规则'}
+                        {b.diagnoses.length > 0 ? '为何没匹配' : b.uncTotal > 0 ? '诊断异常' : '诊断规则'}
                       </button>
                     )}
                   </div>
                   {seg.hasWhy && (
-                    <div style={{ position: 'absolute', top: HEADER_H, left: 0, right: 0 }}>
-                      {b.diagnoses!.length > 0 ? (
+                    <div className={styles.whyPane} style={{ top: hy + HEADER_H }}>
+                      {diag.length > 0 ? (
                         <ul className={styles.whyList}>
-                          {b.diagnoses!.map((d, i) => (
+                          {diag.map((d, i) => (
                             <li
                               key={i}
-                              className={d.severity === 'blocker' ? styles.whyBlocker : styles.whyHint}
+                              className={
+                                d.severity === 'blocker'
+                                  ? styles.whyBlocker
+                                  : d.severity === 'anomaly'
+                                    ? styles.whyAnomaly
+                                    : styles.whyHint
+                              }
                             >
                               <span className={styles.whyText}>{d.text}</span>
                               {d.detail && <span className={styles.whyDetail}>{d.detail}</span>}

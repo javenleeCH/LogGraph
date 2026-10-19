@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { explainNoMatch } from './explain';
+import { explainNoMatch, explainAnomalies, ANOMALY_SCAN_CAP } from './explain';
 import type { FilterMatch, LogEvent, SequenceConfig, SequenceEdge } from '../types';
 
 let idc = 0;
@@ -166,5 +166,46 @@ describe('explainNoMatch', () => {
       true,
     );
     expect(r.length).toBeLessThanOrEqual(4);
+  });
+});
+
+describe('explainAnomalies', () => {
+  it('未覆盖为 0 → 无诊断', () => {
+    expect(explainAnomalies(['A', 'B'], { ids: [], ts: [] }, [fm('A', [1]), fm('B', [2])])).toEqual([]);
+  });
+
+  it('按过滤器归因：只列有未覆盖命中的过滤器，带 n/总命中', () => {
+    const A = fm('A', [100, 200, 300]);
+    const B = fm('B', [150]);
+    const C = fm('C', [120]); // 命中全部覆盖 → 不应出现
+    const r = explainAnomalies(
+      ['A', 'B', 'C'],
+      { ids: [A.events[0].id, A.events[2].id, B.events[0].id], ts: [100, 300, 150] },
+      [A, B, C],
+    );
+    expect(r).toHaveLength(2);
+    expect(r[0].severity).toBe('anomaly');
+    expect(r[0].text).toContain('3 条命中未成链');
+    expect(r[0].detail).toContain('「A」2 / 3 条命中');
+    expect(r[0].detail).toContain('「B」1 / 1 条命中');
+    expect(r[0].detail).not.toContain('「C」');
+    expect(r[1].severity).toBe('hint');
+  });
+
+  it('超扫描上限只归因前缀并明示', () => {
+    // CAP+2 条命中全未覆盖，A 的 id 排在 uncovered 前缀内、B 的排在后缀
+    const aTss: number[] = [];
+    for (let i = 0; i < ANOMALY_SCAN_CAP; i++) aTss.push(i);
+    const A = fm('A', aTss);
+    const B = fm('B', [1_000_000, 1_000_001]);
+    const r = explainAnomalies(
+      ['A', 'B'],
+      { ids: [...A.events.map((e) => e.id), ...B.events.map((e) => e.id)], ts: [...aTss, 1_000_000, 1_000_001] },
+      [A, B],
+    );
+    expect(r[0].text).toContain(`${(ANOMALY_SCAN_CAP + 2).toLocaleString()} 条命中未成链`);
+    expect(r[0].detail).toContain(`「A」${ANOMALY_SCAN_CAP.toLocaleString()} / ${ANOMALY_SCAN_CAP.toLocaleString()} 条命中`);
+    expect(r[0].detail).not.toContain('「B」'); // 后缀在 cap 外，未被归因
+    expect(r[0].detail).toContain(`仅归因前 ${ANOMALY_SCAN_CAP.toLocaleString()} 条`);
   });
 });

@@ -120,8 +120,13 @@
 }
 
 /* 虚拟滚动：块内高度需可预测（HEADER_H=28，见 CepTimelinePanel.tsx）。
-   sticky 在绝对定位布局下失效，块头随内容滚动。 */
+   CSS sticky 在绝对定位布局下失效，块头由组件手动钉层（inline top: hy 钳位：
+   块顶滚出视口后贴住视口顶、随块尾离开）；本类只负责脱离文档流与层级。 */
 .blockHeader {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -467,11 +472,11 @@
   text-align: center;
 }
 
-/* 「为何没匹配」诊断：引擎可用且有序列规则时**始终可点**——零链时给出完整卡点，
-   有链时给出「诊断规则」中性入口（点开若没问题则提示匹配正常）。
-   配色沿用既有语义——blocker 用 --danger（需要用户动手改的严重提示），
-   hint 用 faint（仅供参考）。刻意不用 --anomaly：那是引擎判定的数据异常，
-   这里说的是规则配置问题，混色会让人以为日志本身有毛病。 */
+/* 「诊断」面板：引擎可用且有序列规则时**始终可点**——零链给完整卡点，
+   有异常给归因（按钮变「诊断异常」），两者皆无才是「诊断规则」中性入口。
+   配色语义：blocker 用 --danger（要用户动手改的配置问题）；anomaly 用
+   --anomaly（引擎判定的数据异常=未覆盖命中，正是该色保留的语义）；
+   hint 用 faint（仅供参考）。 */
 .whyToggle {
   display: inline-flex;
   align-items: center;
@@ -498,6 +503,14 @@
 .whyToggleOpen svg {
   transform: rotate(90deg);
 }
+/* 诊断面板槽位（WHY_H=96）：钉在块头下方，随块头一起钉层时盖住滚过的行 */
+.whyPane {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  background: var(--cep-bg);
+}
 .whyList {
   margin: 0;
   padding: 6px 10px 8px 12px;
@@ -512,6 +525,7 @@
   overflow-y: auto;
 }
 .whyBlocker,
+.whyAnomaly,
 .whyHint {
   display: flex;
   flex-direction: column;
@@ -522,6 +536,9 @@
 .whyBlocker {
   border-left-color: var(--danger, #cf222e);
 }
+.whyAnomaly {
+  border-left-color: var(--anomaly, #cf222e);
+}
 .whyText {
   font-size: 11px;
   line-height: 1.5;
@@ -530,6 +547,10 @@
 .whyBlocker .whyText {
   font-weight: 600;
   color: var(--danger, #cf222e);
+}
+.whyAnomaly .whyText {
+  font-weight: 600;
+  color: var(--anomaly, #cf222e);
 }
 .whyDetail {
   font-size: 10px;

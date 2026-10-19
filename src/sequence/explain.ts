@@ -11,10 +11,11 @@
  * - 每条都给**具体数字**（间隔多少、超了多少），不说空话。
  */
 import type { FilterMatch, LogEvent, SequenceConfig, SequenceEdge } from '../types';
+import { fmtCount } from '../utils/counts';
 
 export interface Diagnosis {
-  /** blocker=必然阻塞；hint=可疑但非必然 */
-  severity: 'blocker' | 'hint';
+  /** blocker=必然阻塞；hint=可疑但非必然；anomaly=引擎判定的数据异常（未覆盖命中） */
+  severity: 'blocker' | 'hint' | 'anomaly';
   /** 一句话结论（可直接展示） */
   text: string;
   /** 补充细节（可选的进一步说明） */
@@ -175,4 +176,69 @@ export function explainNoMatch(
   // blocker 优先，其次 hint；同类保持原有顺序
   const rank = (d: Diagnosis) => (d.severity === 'blocker' ? 0 : 1);
   return out.sort((a, b) => rank(a) - rank(b)).slice(0, 4);
+}
+
+/** 异常归因扫描上限：SoA 百万级时只归因时间序前缀（与 GroupMatchesTab
+ *  的 UNCOVERED_SCAN_CAP 同哲学——上限明示，不静默截断） */
+export const ANOMALY_SCAN_CAP = 100_000;
+
+/**
+ * 诊断「异常」（未覆盖事件）：命中了过滤器、但没被任何完整链消费的事件
+ * 按过滤器归因，并给出排查方向。
+ *
+ * 与 explainNoMatch 互补：那边解释「为何零链/链太少」（配置问题），
+ * 这边解释「链之外的命中卡在哪个过滤器上」（数据异常）。
+ * 只在用户展开诊断时调用——O(参与过滤器的命中总数)，不做全量预计算。
+ *
+ * 语义对齐 engine/src/cep.rs：uncovered = filter_ids 全集中未被链消费的
+ * 命中（nodeConditions 过滤掉的也计入）；一条事件命中多个过滤器时按
+ * 过滤器各计一次（引擎同款口径）。
+ */
+export function explainAnomalies(
+  filterIds: readonly string[],
+  uncovered: { ids: number[]; ts: number[] },
+  matches: FilterMatch[],
+): Diagnosis[] {
+  const total = uncovered.ids.length;
+  if (total === 0) return [];
+  const byId = new Map(matches.map((m) => [m.filterId, m.events]));
+
+  // 未覆盖 id 集合（超上限只扫时间序前缀——最早的异常段）
+  const cap = Math.min(total, ANOMALY_SCAN_CAP);
+  const uncSet = new Set<number>();
+  for (let i = 0; i < cap; i++) uncSet.add(uncovered.ids[i]);
+
+  // 逐过滤器归因：命中里有多少没进链
+  const per: Array<{ fid: string; n: number; hit: number }> = [];
+  for (const fid of filterIds) {
+    const evs = byId.get(fid);
+    if (!evs || evs.length === 0) continue;
+    let n = 0;
+    for (const ev of evs) if (uncSet.has(ev.id)) n++;
+    if (n > 0) per.push({ fid, n, hit: evs.length });
+  }
+  per.sort((a, b) => b.n - a.n);
+
+  const out: Diagnosis[] = [
+    {
+      severity: 'anomaly',
+      text: `${fmtCount(total)} 条命中未成链（引擎判定的异常）`,
+      detail:
+        (per.length > 0
+          ? per
+              .slice(0, 4)
+              .map((p) => `「${p.fid}」${fmtCount(p.n)} / ${fmtCount(p.hit)} 条命中`)
+              .join('，')
+          : '归因到的过滤器在当前匹配集里没有命中') +
+        (cap < total ? `；仅归因前 ${fmtCount(ANOMALY_SCAN_CAP)} 条` : ''),
+    },
+    {
+      severity: 'hint',
+      text: '这些事件满足过滤器条件，但没赶上任何一条完整链',
+      detail:
+        '常见原因：前驱/后继未在 maxGapMs 窗口内出现、被 thread/key 分桶打散、' +
+        '或被 nodeConditions 过滤。可对照边方向放宽窗口，或用面板时间筛选圈定异常段细看。',
+    },
+  ];
+  return out;
 }
