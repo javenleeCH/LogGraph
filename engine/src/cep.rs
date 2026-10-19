@@ -201,8 +201,10 @@ pub struct SeqResult {
     #[serde(rename = "groupId")]
     pub group_id: String,
     pub chains: Vec<MatchedChain>,
-    #[serde(rename = "uncoveredEvents")]
-    pub uncovered_events: Vec<SeqEvent>,
+    /// 未覆盖事件（SoA 紧凑回传，全量不截断）：ids[i]/ts[i] 为第 i 个，
+    /// 按 (ts, id) 升序。百万级异常下对象数组 JSON 载荷 150MB+，平铺
+    /// 数字数组 ~65MB；面板行只消费 id+ts，原文按需经事件流取。
+    pub uncovered: UncoveredSoa,
     #[serde(rename = "edgeStats")]
     pub edge_stats: Vec<EdgeStat>,
     #[serde(rename = "notViolations")]
@@ -211,9 +213,6 @@ pub struct SeqResult {
     /// 完整链数（未截断时 = chains.len()）：截断后 UI 统计仍取真值
     #[serde(rename = "totalChains")]
     pub total_chains: usize,
-    /// 完整未覆盖事件数（语义同上）
-    #[serde(rename = "totalUncovered")]
-    pub total_uncovered: usize,
     /// fid → [(事件id, 链号)]：截断时链列表不全，全量 lane 标记由此回传
     /// （未截断时为空，前端从 chains 自行推导）
     #[serde(rename = "coveredMarks")]
@@ -226,6 +225,14 @@ pub struct SeqResult {
     /// （静默退化全局）与「每事件一个键」（桶拆碎全漏）两种失败可见。见契约 §3.13.1。
     #[serde(rename = "keyStats", skip_serializing_if = "Option::is_none")]
     pub key_stats: Option<KeyStats>,
+}
+
+/// 未覆盖事件两列（SoA），语义见 `SeqResult::uncovered`
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UncoveredSoa {
+    pub ids: Vec<u32>,
+    pub ts: Vec<i64>,
 }
 
 /// `thread` 字段的解析质量统计——纯可观测性，不改变任何匹配语义。
@@ -1000,15 +1007,21 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
     }
 
     // 未覆盖事件（用原始全局事件；nodeConditions 过滤掉的事件仍计入 uncovered，与前端一致）
-    let mut uncovered: Vec<SeqEvent> = Vec::new();
+    let mut uncovered: Vec<(i64, u32)> = Vec::new();
     for fid in &spec.filter_ids {
         for ev in get_orig(fid) {
             if !consumed.contains(&ev.id) {
-                uncovered.push(ev.clone());
+                uncovered.push((ev.ts, ev.id));
             }
         }
     }
-    uncovered.sort_by_key(|e| (e.ts, e.id));
+    uncovered.sort_unstable();
+    let mut uncovered_ids = Vec::with_capacity(uncovered.len());
+    let mut uncovered_ts = Vec::with_capacity(uncovered.len());
+    for (t, id) in uncovered {
+        uncovered_ts.push(t);
+        uncovered_ids.push(id);
+    }
 
     // 链按 startTs 排序重编 chainIndex（1-based）
     chains.sort_by_key(|c| (c.start_ts, c.end_ts, c.steps[0].event.id));
@@ -1017,7 +1030,6 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
     }
 
     let total_chains = chains.len();
-    let total_uncovered = uncovered.len();
 
     // thread 解析质量：与分桶/未覆盖统计用的是同一批事件，提示才不会和
     // 实际行为脱节。空串按「没有 thread」计（parse_rest 不会产出空串，防御性处理）。
@@ -1039,12 +1051,11 @@ pub fn match_group(spec: &GroupSpec, store: &EventStore<'_>) -> EngineResult<Seq
     Ok(SeqResult {
         group_id: spec.group_id.clone(),
         chains,
-        uncovered_events: uncovered,
+        uncovered: UncoveredSoa { ids: uncovered_ids, ts: uncovered_ts },
         edge_stats,
         not_violations: violations,
         heartbeats,
         total_chains,
-        total_uncovered,
         covered_marks: BTreeMap::new(),
         thread_stats: ThreadStats {
             total_events,
@@ -1068,7 +1079,7 @@ pub fn run_sequences(groups: &[GroupSpec], store: &EventStore<'_>) -> RunSeqResp
             Ok(mut r) => {
                 if let Some(max) = spec.max_chains {
                     r.total_chains = r.chains.len();
-                    r.total_uncovered = r.uncovered_events.len();
+                    // uncovered 全量 SoA 回传不截断
                     // 全量 lane 标记：截断后链列表不全，标记从完整链提取
                     let mut marks: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
                     for c in &r.chains {
@@ -1082,7 +1093,6 @@ pub fn run_sequences(groups: &[GroupSpec], store: &EventStore<'_>) -> RunSeqResp
                     r.covered_marks = marks;
                     let max = max as usize;
                     r.chains.truncate(max);
-                    r.uncovered_events.truncate(max);
                     r.not_violations.truncate(max);
                 }
                 results.insert(spec.group_id.clone(), r);
@@ -1146,7 +1156,7 @@ mod tests {
         };
         let r = match_group(&spec, &s).unwrap();
         assert_eq!(r.chains.len(), n, "每对 A→B(500ms 后) 都应成链");
-        assert_eq!(r.uncovered_events.len(), 0);
+        assert_eq!(r.uncovered.ids.len(), 0);
         assert_eq!(r.chains[0].steps[1].filter_id, "B");
     }
 
@@ -1173,7 +1183,7 @@ mod tests {
         let st = &r.edge_stats[0];
         assert_eq!(st.matched_count, 1);
         assert_eq!(st.miss_count, 1);
-        assert_eq!(r.uncovered_events.len(), 2);
+        assert_eq!(r.uncovered.ids.len(), 2);
     }
 
     #[test]
@@ -1197,7 +1207,7 @@ mod tests {
         let res = r.results.get("g").unwrap();
         assert_eq!(res.chains.len(), 1, "截断到 1 条链");
         assert_eq!(res.total_chains, 2, "完整链数保留真值");
-        assert_eq!(res.total_uncovered, 0);
+        assert_eq!(res.uncovered.ids.len(), 0);
         assert_eq!(res.covered_marks["A"].len(), 2, "A 全量标记（含截掉的链）");
         assert_eq!(res.covered_marks["B"].len(), 2);
         assert!(res.covered_marks["A"].iter().any(|&(id, _)| id == 2));
@@ -1365,7 +1375,7 @@ mod tests {
         assert_eq!(r.chains[0].steps.len(), 2);
         assert_eq!(r.chains[0].steps[1].event.id, 2);
         assert_eq!(r.edge_stats[0].matched_count, 1);
-        assert_eq!(r.uncovered_events.len(), 0);
+        assert_eq!(r.uncovered.ids.len(), 0);
     }
 
     #[test]
@@ -1397,7 +1407,7 @@ mod tests {
         assert_eq!(r.chains[0].steps[0].event.id, 1);
         assert_eq!(r.edge_stats[0].matched_count, 0);
         assert_eq!(r.edge_stats[0].miss_count, 1);
-        assert_eq!(r.uncovered_events.len(), 1, "B 未被任何链覆盖");
+        assert_eq!(r.uncovered.ids.len(), 1, "B 未被任何链覆盖");
     }
 
     #[test]
@@ -1592,7 +1602,7 @@ mod tests {
         assert_eq!(empty_chain.thread, None);
         // t2 的 A@200 不成链 ⇒ uncovered；且不得与 ∅ 的 B@350 跨桶成链
         assert!(
-            res.uncovered_events.iter().any(|e| e.id == 2),
+            res.uncovered.ids.contains(&2),
             "t2 事件应 uncovered"
         );
     }
@@ -1637,7 +1647,7 @@ mod tests {
         // 桶标签 = 关联键（链的 thread 字段承载桶标识）
         assert_eq!(res.chains[0].thread.as_deref(), Some("abc-1"));
         // 其余事件 uncovered：跨键的 def-2 / zzz-9、无键的 3
-        let unc: Vec<u32> = res.uncovered_events.iter().map(|e| e.id).collect();
+        let unc: Vec<u32> = res.uncovered.ids.clone();
         assert!(
             unc.contains(&2) && unc.contains(&3) && unc.contains(&5),
             "{unc:?}"
@@ -1949,7 +1959,7 @@ mod tests {
         assert_eq!(r.chains.len(), 1);
         assert_eq!(r.chains[0].steps[1].event.id, 2, "仅 B@(level=E) 参与链");
         assert_eq!(
-            r.uncovered_events.iter().filter(|e| e.id == 3).count(),
+            r.uncovered.ids.iter().filter(|&&e| e == 3).count(),
             1,
             "B@(level=W) 被条件过滤且计入未覆盖"
         );

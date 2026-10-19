@@ -20,7 +20,7 @@
  * - `ok`：正常结果。
  */
 
-import type { FilterMatch, SequenceConfig, SequenceMatchResult } from '../types';
+import type { FilterMatch, LogEvent, SequenceConfig, SequenceMatchResult } from '../types';
 import { CEP_MAX_CHAINS } from '../store/logStore';
 
 /** wasm-bindgen 生成的 pkg 模块形状 */
@@ -155,12 +155,30 @@ export function runCepWasm(
   if (seqGroups.length === 0) return { kind: 'ok', results: {} };
   const store: Record<string, unknown[]> = {};
   for (const fm of matches) store[fm.filterId] = fm.events;
+  // id → 全文事件：wasm 模式浏览器持全量事件（含原文），引擎只回 SoA 的
+  // id+ts，原文由前端按 id 映射重建（uncoveredFull，与 ids 同序对齐）。
+  // db 模式没有这张表（原文在 SQLite），该字段不填。
+  const idToEvent = new Map<number, LogEvent>();
+  for (const fm of matches) for (const ev of fm.events) idToEvent.set(ev.id, ev);
   try {
     const resp = JSON.parse(
       module.run_sequences_json(JSON.stringify(seqGroups.map(toGroupSpec)), JSON.stringify(store)),
     );
     if (resp.fallback) return { kind: 'unsupported' };
-    return { kind: 'ok', results: resp.results as Record<string, SequenceMatchResult> };
+    const results = resp.results as Record<string, SequenceMatchResult>;
+    if (idToEvent.size > 0) {
+      for (const r of Object.values(results)) {
+        const ids = r.uncovered?.ids;
+        if (!ids || ids.length === 0) continue;
+        const full: LogEvent[] = new Array(ids.length);
+        for (let i = 0; i < ids.length; i++) {
+          const ev = idToEvent.get(ids[i]);
+          if (ev) full[i] = ev;
+        }
+        r.uncoveredFull = full;
+      }
+    }
+    return { kind: 'ok', results };
   } catch (e) {
     console.warn('[cep-wasm] 运行失败：', e);
     return { kind: 'failed', error: e };

@@ -7,7 +7,7 @@ function res(keyStats: KeyStats | undefined): SequenceMatchResult {
   return {
     groupId: 'g',
     chains: [],
-    uncoveredEvents: [],
+    uncovered: { ids: [], ts: [] },
     edgeStats: [],
     notViolations: [],
     heartbeats: [],

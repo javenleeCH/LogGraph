@@ -52,7 +52,7 @@ describe("scope='key' 关联键分桶（wasm 引擎）", () => {
     expect(r.chains[0].steps.map((s) => s.event.id)).toEqual([1, 4]);
     // 桶标签 = 关联键（链的 thread 字段承载）
     expect(r.chains[0].thread).toBe('abc-1');
-    const unc = r.uncoveredEvents.map((e) => e.id);
+    const unc = r.uncovered.ids;
     expect(unc).toContain(2);
     expect(unc).toContain(3);
     expect(unc).toContain(5);

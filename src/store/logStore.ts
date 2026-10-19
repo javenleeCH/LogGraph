@@ -105,10 +105,11 @@ function skelEvents(hits: DbFilterHits | undefined): LogEvent[] {
   return out;
 }
 
-/** ws_sequences 下推时每组请求的链数上限：引擎只回传按时间序的前 N 条链，
- *  载荷随 N 线性增长（~200B/链，coveredMarks 不受影响）。面板按 RENDER_BATCH
- *  渐进渲染（见 CepTimelinePanel），2000 行 ≈ 50 屏，再深请收窄规则/时间窗。 */
-export const CEP_MAX_CHAINS = 2000;
+/** ws_sequences 下推时每组请求的链数上限（护栏，防极端规则链载荷爆炸）：
+ *  引擎只回传按时间序的前 N 条链，载荷随 N 线性增长（~200B/链；
+ *  coveredMarks/uncovered 不受影响——uncovered 已全量 SoA 回传）。
+ *  面板虚拟滚动按窗口渲染，DOM 恒定。 */
+export const CEP_MAX_CHAINS = 100_000;
 
 /** 引擎非 ok 结局的 UI 文案（ctx=失败场景前缀）。TS 副本已删除，
  *  失败必须显式呈现，绝不把"没跑"伪装成"没有匹配"。 */

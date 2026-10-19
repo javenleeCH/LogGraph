@@ -425,7 +425,8 @@ pub fn run_sequences(groups: &[GroupSpec], store: &EventStore) -> RunSeqResponse
 
 * 链产出后按 `(startTs, endTs)` 排序，`chainIndex` 排序后 **1-based** 重编号。
 
-* `uncoveredEvents` = group 的 filterIds 中未被任何链消耗的事件，按 `(ts, id)` 升序。
+* `uncovered` = group 的 filterIds 中未被任何链消耗的事件，按 `(ts, id)` 升序，
+  SoA 两列紧凑回传（`ids`/`ts`），全量不截断（§5.2）。
 
 * `is_supported() = false` 的 group 不计算；任一 group 不支持 → 整个
 
@@ -569,7 +570,7 @@ pub fn parse_rules(json: &str) -> EngineResult<RulesFile>;
 | `edges` | Edge[] | **是** | — | 0..256 条；可为空（该 group 只产出 uncovered 事件清单） |
 | `nodeCounts` | map | 否 | `{}` | 见 §3.6（engine ≥ 0.2.1 起支持） |
 | `nodeConditions` | map | 否 | `{}` | 见 §3.6（engine ≥ 0.2.1 起支持） |
-| `maxChains` | integer ≥1 | 否 | —（不限） | 返回链数上限（UI 防大目录载荷爆炸）。截断时 `totalChains`/`totalUncovered` 仍报全量真值，`coveredMarks` 回传全量 lane 标记 |
+| `maxChains` | integer ≥1 | 否 | —（不限） | 返回链数上限（UI 防大目录载荷爆炸）。截断时 `totalChains` 仍报全量真值，`coveredMarks` 回传全量 lane 标记；`uncovered` 不受影响（全量回传） |
 
 #### 3.4.1 `scope:"key"`（关联键分桶，engine ≥ 0.2.7）
 
@@ -578,7 +579,7 @@ thread 的启发式槽位里——thread 是位置启发式产物（§3.13），
 
 - 分桶键 = `keyPattern` 对每条事件 `raw` 的**捕获组 1**；
 - 未命中正则的事件**不进任何键桶**（不同于 thread 的 `∅` 桶）：没有键就无从关联，
-  混在一起匹配只会跨请求串出伪链。这类事件计入 `uncoveredEvents`；
+  混在一起匹配只会跨请求串出伪链。这类事件计入 `uncovered`；
 - 规则文件路径下 `keyPattern` 缺省 / 空 / 编译失败 / 无捕获组 ⇒ `validate` 报 S12
   （硬闸门，不放进引擎）；引擎库调用（跳过校验）才走保守退化：正则不可用 ⇒
   退化为 `global`，与 `thread` 覆盖率 0 时的保守方向一致；
@@ -920,7 +921,7 @@ kind 语义表（✅ 与 §2.4 实现一一对应）：
 
 | 字段 | 含义 |
 | --- | --- |
-| `totalEvents` | 参与本组匹配的事件总数（与分桶、`uncoveredEvents` 用的是同一批事件） |
+| `totalEvents` | 参与本组匹配的事件总数（与分桶、`uncovered` 用的是同一批事件） |
 | `withThread` | 其中解析出非空 thread 的事件数 |
 | `distinctThreads` | distinct thread 数（`∅` 桶不计入） |
 
@@ -1186,7 +1187,7 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
             "thread": null
           }
         ],
-        "uncoveredEvents": [],
+        "uncovered": { "ids": [], "ts": [] },
         "edgeStats": [
           { "edgeId": "e1", "matchedCount": 1, "missCount": 0,
             "lateCount": null, "jitterCount": null },
@@ -1204,7 +1205,7 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
         ],
         "heartbeats": [],
         "totalChains": 1,
-        "totalUncovered": 0,
+        "uncovered": { "ids": [], "ts": [] },
         "coveredMarks": {},
         "threadStats": { "totalEvents": 3, "withThread": 3, "distinctThreads": 3 }
       }
@@ -1224,8 +1225,11 @@ rg 习惯（默认正则、默认忽略隐藏、尊重 gitignore）：
   （Rust `BTreeMap`），agent 可依赖。
 * `thread: null` / `lateCount: null`：null 与缺省不同（字段存在、值未知 / 无）。
   `heartbeats` 由 periodic 边填充（engine ≥ 0.2.1 起支持；更早版本恒 `[]`）。
-* `totalChains`/`totalUncovered`：全量真值。未设 `maxChains` 时分别等于
-  `chains.length`/`uncoveredEvents.length`；截断后链表被裁但统计保真。
+* `uncovered`：SoA 两列（`ids[i]`/`ts[i]` 为第 i 个未覆盖事件，按 `(ts, id)`
+  升序），**全量回传不随 `maxChains` 截断**。百万级异常下对象数组 JSON 载荷
+  150MB+，平铺数字数组 ~65MB——消费方只需 id+ts 时优先此形态。
+* `totalChains`：全量真值。未设 `maxChains` 时等于 `chains.length`；截断后
+  链表被裁但统计保真。
 * `coveredMarks`：仅设 `maxChains` 截断时非空——`filterId → [[事件id, 链号], …]`
 * `threadStats`：thread 解析质量，**不论 scope 是否 thread 都产出**（§3.13）。
   全量 lane 标记（含被截掉的链），供 UI 时间线标链用；未截断为 `{}`，
@@ -1327,7 +1331,7 @@ v1 无流式进度 / 取消命令（引擎单次调用同步完成；大目录�
 * 跑分析：`loggraph cep <path> -R my-rules.cep.json --json`
 * 判读：`jq '.response.results.<groupId>.chains | length'`；
   违规 `.response.results.<groupId>.notViolations`；
-  未覆盖事件 `.response.results.<groupId>.uncoveredEvents`。
+  未覆盖事件 `.response.results.<groupId>.uncovered.ids | length`。
 * **用 `scope:"thread"` 的规则必读** `.response.results.<groupId>.threadStats`
   （§3.13）：`withThread === 0` 表示**分桶根本没生效、结果等同全局**，此时
   结论不可按线程解读（会串出跨线程伪链）；`distinctThreads ≈ withThread`

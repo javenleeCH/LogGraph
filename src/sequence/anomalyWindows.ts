@@ -11,7 +11,12 @@
  * - 输入必须 ts 升序（引擎与 TS 回退路径都保证），否则二分/合并都失效；
  * - 分级阈值可配，默认按段内事件数。
  */
-import type { LogEvent } from '../types';
+
+/** SoA 未覆盖事件（引擎紧凑回传形态，见 types.ts SequenceMatchResult.uncovered） */
+export interface UncoveredSoa {
+  ids: number[];
+  ts: number[];
+}
 
 /** 异常时间窗口：一段连续异常 */
 export interface AnomalyWindow {
@@ -48,24 +53,24 @@ function levelOf(count: number, t: { med: number; high: number }): AnomalyWindow
 }
 
 /**
- * 把 ts 升序的异常事件聚合成时间窗口。
+ * 把 ts 升序的异常事件聚合成时间窗口（输入为 SoA 的 ts 列，或等价形态）。
  * 空输入 → total=0、windows=[]（调用方据此判断「无异常」）。
  */
 export function aggregateAnomalyWindows(
-  events: LogEvent[],
+  tsList: ArrayLike<number>,
   gapMs: number = DEFAULT_ANOMALY_GAP_MS,
   thresholds: { med: number; high: number } = DEFAULT_LEVEL_THRESHOLDS,
 ): AnomalySummary {
   const windows: AnomalyWindow[] = [];
-  if (events.length === 0) {
+  if (tsList.length === 0) {
     return { total: 0, windows, counts: { low: 0, med: 0, high: 0 } };
   }
   // 单趟扫描：输入已按 ts 升序，相邻间隔 <= gapMs 即并入当前段
-  let start = events[0].ts;
-  let end = events[0].ts;
+  let start = tsList[0];
+  let end = tsList[0];
   let count = 1;
-  for (let i = 1; i < events.length; i++) {
-    const ts = events[i].ts;
+  for (let i = 1; i < tsList.length; i++) {
+    const ts = tsList[i];
     if (ts - end <= gapMs) {
       end = ts;
       count++;
@@ -80,7 +85,7 @@ export function aggregateAnomalyWindows(
 
   const counts = { low: 0, med: 0, high: 0 };
   for (const w of windows) counts[w.level]++;
-  return { total: events.length, windows, counts };
+  return { total: tsList.length, windows, counts };
 }
 
 /** 分级的中文标签 */

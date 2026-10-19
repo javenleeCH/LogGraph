@@ -111,6 +111,8 @@
   padding-bottom: 4px;
 }
 
+/* 虚拟滚动：块内高度需可预测（HEADER_H=28，见 CepTimelinePanel.tsx）。
+   sticky 在绝对定位布局下失效，块头随内容滚动。 */
 .blockHeader {
   display: flex;
   align-items: center;
@@ -118,10 +120,9 @@
   padding: 6px 8px 4px;
   border-left: 3px solid transparent;
   font-size: 12px;
-  position: sticky;
-  top: 0;
+  height: 28px;
+  box-sizing: border-box;
   background: var(--cep-bg);
-  z-index: 1;
 }
 
 .blockDot {
@@ -168,17 +169,27 @@
   background: color-mix(in srgb, var(--warn, #e69f00) 12%, transparent);
 }
 
+/* EMPTY_H=32：空态行（flex 居中） */
 .blockEmpty {
-  padding: 8px 12px;
+  padding: 0 12px;
   color: var(--cep-faint);
   font-size: 11px;
+  height: 32px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
 }
 
+/* HINT_H=26：块底提示行（链超护栏时显示） */
 .blockMore {
-  padding: 4px 12px 6px;
+  padding: 0 12px;
   color: var(--cep-faint);
   font-size: 11px;
   border-top: 1px dashed var(--cep-border);
+  height: 26px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
 }
 
 /* 引擎不可用横幅（wasm 加载/运行失败）：UI 报错专用 --danger，刻意不用
@@ -243,6 +254,7 @@
   font-size: 10.5px;
 }
 
+/* ROW_H=26：单行高度定值，虚拟滚动窗口数学的前提 */
 .row {
   display: flex;
   align-items: center;
@@ -250,6 +262,8 @@
   padding: 2px 8px 2px 11px;
   font-size: 11px;
   line-height: 20px;
+  height: 26px;
+  box-sizing: border-box;
 }
 .row:hover {
   background: var(--cep-bg-hover);
@@ -484,6 +498,10 @@
   flex-direction: column;
   gap: 5px;
   border-bottom: 1px solid var(--border-subtle, #eaeef2);
+  /* WHY_H=96：虚拟滚动要求定高，超出内部滚动 */
+  height: 96px;
+  box-sizing: border-box;
+  overflow-y: auto;
 }
 .whyBlocker,
 .whyHint {
@@ -527,4 +545,7 @@
   line-height: 1.5;
   color: var(--fg-muted, #57606a);
   border-bottom: 1px solid var(--border-subtle, #eaeef2);
+  /* WHY_H=96：与 whyList 同槽位定高 */
+  height: 96px;
+  box-sizing: border-box;
 }

@@ -159,10 +159,15 @@ export interface HeartbeatGroup {
 /** group 的序列匹配结果 */
 export interface SequenceMatchResult {
   groupId: string;
-  /** 完整匹配链（按 startTs 升序） */
+  /** 完整匹配链（按 startTs 升序；引擎 maxChains 截断时仅前 N 条） */
   chains: MatchedChain[];
-  /** 未被任何链覆盖的组内事件（异常候选） */
-  uncoveredEvents: LogEvent[];
+  /** 未被任何链覆盖的组内事件（异常候选，SoA 紧凑回传全量）：
+   *  ids[i]/ts[i] 为第 i 个，按 (ts, id) 升序。百万级异常下对象数组
+   *  载荷 150MB+，平铺数字数组 ~65MB；db 模式引擎只回 id+ts。 */
+  uncovered: { ids: number[]; ts: number[] };
+  /** 未覆盖事件全文（仅 TS 回退引擎填充，量级 ≤30 万事件护栏）：
+   *  GroupMatchesTab 全文显示/关键字过滤用；db 模式缺省，按需经事件流取 */
+  uncoveredFull?: LogEvent[];
   /** 每条边命中统计 */
   edgeStats: SequenceEdgeStat[];
   /** NOT 边违规列表 */
@@ -171,8 +176,6 @@ export interface SequenceMatchResult {
   heartbeats: HeartbeatGroup[];
   /** 完整链数（引擎 maxChains 截断时 ≠ chains.length；未截断时缺省= chains.length） */
   totalChains?: number;
-  /** 完整未覆盖事件数（语义同上） */
-  totalUncovered?: number;
   /** fid → [事件id, 链号]：截断时链列表不全，全量 lane 标记由此回传（未截断时缺省） */
   coveredMarks?: Record<string, [number, number][]>;
   /** thread 解析质量统计（无论 scope 是否 thread 都产出，缺省=旧数据/未统计） */

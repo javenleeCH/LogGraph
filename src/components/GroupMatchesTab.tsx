@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
 import { Link, AlertTriangle, Copy } from './Icon';
-import type { FilterGroup, MatchedChain, LogEvent } from '../types';
+import type { FilterGroup, MatchedChain } from '../types';
 import styles from './DetailPanel.module.css';
 import { copyChainMarkdown } from '../io/exportActions';
 import {
@@ -38,7 +38,16 @@ function SeqNav({ count, cur, onNav }: { count: number; cur: number; onNav: (dir
   );
 }
 
-/** group 匹配结果 tab：链列表 + 异常列表 + 筛选按钮 + 关键字检索 */
+/** 未覆盖事件明细的渲染上限（SoA 全量回传后异常可达百万级，防全量 map） */
+const UNCOVERED_RENDER_CAP = 1000;
+
+/** 未覆盖事件行：SoA 骨架 + wasm 模式下按 id 映射回的原文 */
+interface UncEntry {
+  id: number;
+  ts: number;
+  raw?: string;
+  level?: string;
+}
 /** memo：group 引用稳定；缩放期间（correlatedEventIds 更新等父级重渲）跳过
  *  本组件重渲——2 万链 + 数十万 uncovered 的 DOM reconcile 是长帧来源 */
 export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group: FilterGroup }) {
@@ -68,13 +77,22 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
     );
   }, [result, kw, filters]);
 
-  /** 关键字过滤未覆盖事件（异常候选） */
-  const uncovered = useMemo(() => {
-    if (!result || mode === 'chains') return [] as LogEvent[];
-    if (!kw) return result.uncoveredEvents;
-    return result.uncoveredEvents.filter((e) =>
-      e.raw.toLowerCase().includes(kw),
-    );
+  /** 未覆盖事件明细（异常候选）：SoA 全量 + 渲染上限。
+   *  引擎回传 SoA 两列（ids/ts），wasm 模式下 uncoveredFull 与 ids 同序
+   *  对齐携带原文（db 模式缺省，原文在 SQLite）。百万级全量 map 会拖死
+   *  渲染进程，这里只取前 UNCOVERED_RENDER_CAP 条；完整滚动看 CEP 面板。 */
+  const uncovered = useMemo<UncEntry[]>(() => {
+    if (!result || mode === 'chains') return [];
+    const soa = result.uncovered;
+    const full = result.uncoveredFull;
+    const kwL = kw.toLowerCase();
+    const out: UncEntry[] = [];
+    for (let i = 0; i < soa.ids.length && out.length < UNCOVERED_RENDER_CAP; i++) {
+      const ev = full?.[i];
+      if (kwL && !(ev?.raw ?? '').toLowerCase().includes(kwL)) continue;
+      out.push({ id: soa.ids[i], ts: soa.ts[i], raw: ev?.raw, level: ev?.level });
+    }
+    return out;
   }, [result, kw, mode]);
 
   /** NOT 边违规（异常） */
@@ -140,14 +158,15 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
   const showChains = mode !== 'anomaly';
   const showAnomaly = mode !== 'chains';
 
-  // 计数口径：无关键字时取真值（引擎截断时 length 只是上限）；有关键字时显示命中数
+  // 计数口径：链明细可能被护栏截断（totalChains 携带真值）；未覆盖事件
+  // 为 SoA 全量回传，恒为真值
+  const uncTotal = trueUncoveredCount(result);
   const shownChains = kw ? chains.length : trueChainCount(result);
   const shownAnomalies = kw
     ? uncovered.length + violations.length
-    : trueUncoveredCount(result) + result.notViolations.length;
-  const truncated = isSequenceTruncated(result);
-  const truncTip = truncated
-    ? `\n明细按上限回传，此处为完整统计（点击可逐条查看前若干条）`
+    : uncTotal + result.notViolations.length;
+  const truncTip = isSequenceTruncated(result)
+    ? `\n链明细按护栏上限回传（CEP_MAX_CHAINS），此处为完整统计`
     : '';
 
   return (
@@ -294,22 +313,26 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
             <div className={styles['gm-section-title']}>
               <span
                 title={
-                  trueUncoveredCount(result) > result.uncoveredEvents.length
-                    ? `共 ${fmtCount(trueUncoveredCount(result))} 条；引擎单次最多回传 ${fmtCount(
-                        result.uncoveredEvents.length,
-                      )} 条明细，收窄时间窗可看其余`
-                    : `${fmtCount(trueUncoveredCount(result))} 条`
+                  !kw && uncTotal > UNCOVERED_RENDER_CAP
+                    ? `共 ${fmtCount(uncTotal)} 条；列表仅显示前 ${fmtCount(
+                        UNCOVERED_RENDER_CAP,
+                      )} 条，完整滚动请用 CEP 时间线面板`
+                    : kw
+                      ? `关键字命中 ${fmtCount(uncovered.length)} 条（共 ${fmtCount(uncTotal)} 条）`
+                      : `${fmtCount(uncTotal)} 条`
                 }
               >
                 未覆盖事件（
-                {truncated
-                  ? `${fmtCompact(result.uncoveredEvents.length)}/${fmtCompact(trueUncoveredCount(result))}`
-                  : fmtCount(trueUncoveredCount(result))}
+                {kw
+                  ? `${fmtCompact(uncovered.length)}${
+                      uncovered.length === UNCOVERED_RENDER_CAP ? '+' : ''
+                    }/${fmtCompact(uncTotal)}`
+                  : fmtCount(uncTotal)}
                 ）
               </span>
               <SeqNav count={uncovered.length} cur={uncovIdx} onNav={(d) => setUncovIdx(navIdx(uncovIdx, d, uncovered.length))} />
             </div>
-            {result.uncoveredEvents.length === 0 && (
+            {uncTotal === 0 && (
               <div className={styles['gm-empty']}>全部事件均已匹配</div>
             )}
             {uncovered.map((e, ui) => (
@@ -323,8 +346,8 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
                 <span className={styles['gm-step-dot']} style={{ background: 'var(--warn)' }} />
                 <span className={styles['gm-step-label']}>{e.level ?? ''}</span>
                 <span className={styles['gm-step-ts']}>{formatDateTime(e.ts)}</span>
-                <span className={styles['gm-step-raw']} title={e.raw}>
-                  {e.raw}
+                <span className={styles['gm-step-raw']} title={e.raw ?? '原文未随结果回传（数据驻留模式）'}>
+                  {e.raw ?? ''}
                 </span>
               </div>
             ))}

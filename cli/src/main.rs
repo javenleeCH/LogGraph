@@ -790,8 +790,8 @@ fn print_cep_text(resp: &RunSeqResponse, stats: &PipelineStats, labels: &HashMap
         for st in &result.edge_stats {
             println!("edge {}：匹配 {}，断裂/违规 {}", st.edge_id, st.matched_count, st.miss_count);
         }
-        if !result.uncovered_events.is_empty() {
-            println!("未覆盖事件 {} 条", result.uncovered_events.len());
+        if !result.uncovered.ids.is_empty() {
+            println!("未覆盖事件 {} 条", result.uncovered.ids.len());
         }
     }
 }

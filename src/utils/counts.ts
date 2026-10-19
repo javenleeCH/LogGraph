@@ -1,11 +1,11 @@
 /**
  * 序列匹配（CEP）统计口径统一
  *
- * 背景：引擎与 TS 回退对「明细列表」有上限（CEP_MAX_CHAINS）。被截断时
- * `chains` / `uncoveredEvents` 只有前 N 条，真正的总数由 `totalChains` /
- * `totalUncovered` 携带。直接读 `.length` 会把上限当成真值——历史 bug：
- * 画布头部显示「2000 异常」而 CEP 面板显示「335,780 异常」，同一分组
- * 两个入口两个数。所有对外展示的计数**必须**走这里，禁止直接读 length。
+ * 背景：引擎对链明细（`chains`）有上限（CEP_MAX_CHAINS 护栏）。被截断时
+ * 真值由 `totalChains` 携带；`uncovered` 为 SoA 全量回传、从不截断。
+ * 直接读 `.length` 会把上限当成真值——历史 bug：画布头部显示「2000 异常」
+ * 而 CEP 面板显示「335,780 异常」，同一分组两个入口两个数。所有对外展示
+ * 的计数**必须**走这里，禁止直接读 length。
  */
 import type { SequenceMatchResult } from '../types';
 
@@ -15,18 +15,16 @@ export function trueChainCount(r: SequenceMatchResult | undefined): number {
   return r.totalChains ?? r.chains.length;
 }
 
-/** 完整未覆盖事件数（异常数） */
+/** 完整未覆盖事件数（异常数）：SoA 全量回传，恒为真值 */
 export function trueUncoveredCount(r: SequenceMatchResult | undefined): number {
   if (!r) return 0;
-  return r.totalUncovered ?? r.uncoveredEvents.length;
+  return r.uncovered?.ids.length ?? 0;
 }
 
-/** 明细是否被上限截断（真值多于已回传条数） */
+/** 链明细是否被上限截断（真值多于已回传条数） */
 export function isSequenceTruncated(r: SequenceMatchResult | undefined): boolean {
   if (!r) return false;
-  return (
-    trueChainCount(r) > r.chains.length || trueUncoveredCount(r) > r.uncoveredEvents.length
-  );
+  return trueChainCount(r) > r.chains.length;
 }
 
 /** 千分位（与 App/Toolbar 一致，跟随本机 locale） */

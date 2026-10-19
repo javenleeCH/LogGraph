@@ -13,22 +13,22 @@ function result(opts: {
   chains: number;
   uncovered: number;
   totalChains?: number;
-  totalUncovered?: number;
 }): SequenceMatchResult {
-  const mk = (n: number) => Array.from({ length: n }, () => ({} as never));
+  const mkChains = Array.from({ length: opts.chains }, () => ({} as never));
+  const ids = Array.from({ length: opts.uncovered }, (_, i) => i);
+  const ts = Array.from({ length: opts.uncovered }, () => 0);
   return {
     groupId: 'g1',
-    chains: mk(opts.chains),
-    uncoveredEvents: mk(opts.uncovered),
+    chains: mkChains,
+    uncovered: { ids, ts },
     edgeStats: [],
     notViolations: [],
     heartbeats: [],
     ...(opts.totalChains !== undefined ? { totalChains: opts.totalChains } : {}),
-    ...(opts.totalUncovered !== undefined ? { totalUncovered: opts.totalUncovered } : {}),
   } as SequenceMatchResult;
 }
 
-describe('计数真值（引擎截断语义）', () => {
+describe('计数真值（链护栏截断语义）', () => {
   it('未截断时退回数组长度', () => {
     const r = result({ chains: 10, uncovered: 3 });
     expect(trueChainCount(r)).toBe(10);
@@ -36,17 +36,19 @@ describe('计数真值（引擎截断语义）', () => {
     expect(isSequenceTruncated(r)).toBe(false);
   });
 
-  it('截断时取 total*，而不是被引擎上限卡住的 length', () => {
-    // 历史 bug 现场：画布头部读了 length 显示「2000 异常」，真值是 335780
-    const r = result({
-      chains: 1615,
-      uncovered: 2000,
-      totalChains: 1615,
-      totalUncovered: 335780,
-    });
+  it('链截断时取 totalChains；uncovered 为 SoA 全量、恒为真值', () => {
+    // 历史 bug 现场：画布头部读了 length 显示「2000 异常」，真值是 335780。
+    // SoA 回传后异常不再有截断语义——ids.length 即全量
+    const r = result({ chains: 1615, uncovered: 335_780, totalChains: 1615 });
     expect(trueChainCount(r)).toBe(1615);
-    expect(trueUncoveredCount(r)).toBe(335780);
+    expect(trueUncoveredCount(r)).toBe(335_780);
+    expect(isSequenceTruncated(r)).toBe(false);
+  });
+
+  it('链超护栏（totalChains > chains.length）才判截断', () => {
+    const r = result({ chains: 100_000, uncovered: 5, totalChains: 250_000 });
     expect(isSequenceTruncated(r)).toBe(true);
+    expect(trueChainCount(r)).toBe(250_000);
   });
 
   it('undefined 结果一律按 0 处理，不抛错', () => {

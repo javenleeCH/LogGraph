@@ -400,7 +400,7 @@ export function TimelineCanvas() {
           }
         }
         const anomalyIds = g.sequence?.anomalyEnabled
-          ? new Set(r.uncoveredEvents.map((u) => u.id))
+          ? new Set(r.uncovered.ids)
           : null;
         // periodic 抖动事件（黄框，按 ts 存）
         const jitterIds = new Set<number>();

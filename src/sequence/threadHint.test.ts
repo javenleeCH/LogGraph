@@ -91,7 +91,7 @@ function resultWith(stats: ThreadStats | undefined): SequenceMatchResult {
   return {
     groupId: 'g',
     chains: [],
-    uncoveredEvents: [],
+    uncovered: { ids: [], ts: [] },
     edgeStats: [],
     notViolations: [],
     heartbeats: [],

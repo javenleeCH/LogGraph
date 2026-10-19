@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { CEP_MAX_CHAINS, useLogStore } from '../store/logStore';
 import { formatTime, formatDateTime, parseDateTime } from '../utils/timeFormat';
-import type { Filter, FilterGroup, FilterMatch, LogEvent, SequenceMatchResult } from '../types';
+import type { FilterGroup, FilterMatch, LogEvent, SequenceMatchResult } from '../types';
 import styles from './CepTimelinePanel.module.css';
 import { ChevronLeft, ChevronRight, AlertTriangle } from './Icon';
 import { fmtCompact, fmtCount } from '../utils/counts';
@@ -15,37 +15,33 @@ import {
   type AnomalySummary,
 } from '../sequence/anomalyWindows';
 
-interface CepNode {
-  eventId: number;
-  /** 图标色：链节点=来源 filter 色；异常/违规=红 */
-  color: string;
-  /** 节点序号（链内第几步，1-based）——图标上显示的数字 */
-  stepNo: number;
-  /** 悬浮提示：来源 filter 名 */
-  filterLabel?: string;
-  anomaly?: boolean;
-  violation?: boolean;
-}
+// ---- 虚拟滚动布局常量（与 CepTimelinePanel.module.css 定高声明一一对应） ----
+/** 单行高度（.row） */
+const ROW_H = 26;
+/** 块头高度（.blockHeader） */
+const HEADER_H = 28;
+/** 空态行高度（.blockEmpty） */
+const EMPTY_H = 32;
+/** 块底护栏提示行高度（.blockMore） */
+const HINT_H = 26;
+/** 「为何没匹配」展开区高度（.whyList/.whyEmpty，内部滚动） */
+const WHY_H = 96;
+/** .block 的 border-bottom(1) + padding-bottom(4) */
+const BLOCK_TAIL = 5;
+/** 行类型编码（并列时间戳排序：异常 → 违规 → 链） */
+const KIND_ANOMALY = 0;
+const KIND_VIOLATION = 1;
+const KIND_CHAIN = 2;
 
-/** CEP 面板一行：一条匹配链 / 一个异常事件 / 一对 NOT 违规 */
-interface CepRow {
-  /** 行序号（块内按 startTime 排序后 1-based） */
-  count: number;
-  startTs: number;
-  endTs: number;
-  /** 行类型（悬浮提示与样式） */
-  kind: 'chain' | 'anomaly' | 'violation';
-  /** 链号（链行标识；异常/违规为 0） */
-  chainIndex: number;
-  /** 右侧节点图标：有多少节点就有多少个 */
-  nodes: CepNode[];
-  /** 异常行专属：所属异常窗口的标注（如「连发 60 条 · 密集爆发」），
-   *  让用户看出这几条是一伙的；非异常行为空 */
-  note?: string;
-}
+type MatchedChain = SequenceMatchResult['chains'][number];
+type NotViolation = SequenceMatchResult['notViolations'][number];
 
-/** 一个 CEP 规则分组的块 */
-interface CepBlock {
+/**
+ * 一个 CEP 规则分组的虚拟块：只保存**引用与索引**，不物化行对象。
+ * 百万级异常（SoA 全量回传）下物化 CepRow[] 会把渲染进程拖死；
+ * rowKind/rowRef 两个 typed array 每行仅 ~5B，滚到哪才构造哪行的 DOM。
+ */
+interface VBlock {
   groupId: string;
   label: string;
   color: string;
@@ -53,29 +49,38 @@ interface CepBlock {
   anomalyCount: number;
   /** 该组异常高亮开关是否开启（从 group 编辑器迁入的开关，按组控制） */
   anomalyEnabled: boolean;
-  /** 引擎/TS 回退仅回传了前 CEP_MAX_CHAINS 条链（真值更多） */
+  /** 链明细超护栏（totalChains > CEP_MAX_CHAINS） */
   overLimit: boolean;
-  /** 行按 startTs 升序（全量，≤ 三类输入上限之和；渲染时按 limit 渐进切片） */
-  rows: CepRow[];
   /** 仅按线程作用域时给出：thread 解析质量提示（无提示=null） */
   threadHint: ThreadHint | null;
   /** 仅关联键作用域时给出：key 提取质量提示（无提示=null） */
   keyHint: KeyHint | null;
-  /** 仅零链时给出：「为何没匹配」诊断（无诊断=null）。基于各 filter 的实际
-   *  命中反推，不参与匹配语义，故永远不会改变结果 */
+  /** 引擎可用且有序列规则时给出：「为何没匹配」诊断（无诊断=null） */
   diagnoses: Diagnosis[] | null;
-  /** 异常按时间聚合后的窗口（未开异常高亮时=null）。逐个事件报异常在大目录
-   *  下是纯噪声，聚成段后段数本身就是信号 */
+  /** 异常按时间聚合后的窗口（未开异常高亮时=null）。**在未筛选事件上聚合**：
+   *  筛选后的子集会人为造出不存在的段落边界 */
   anomalySummary: AnomalySummary | null;
-  /** 异常事件真值（引擎/TS 回传的 totalUncovered；明细受上限截断） */
+  /** 异常事件真值（SoA 全量回传，恒为真值） */
   anomalyTrueTotal: number;
+  /** 链渲染引用（cepRange 时为窗内子集，保持 startTs 升序） */
+  chains: MatchedChain[];
+  /** SoA 引用（anomalyEnabled 时非空） */
+  unc: { ids: number[]; ts: number[] } | null;
+  /** NOT 违规渲染引用（按区间起点稳定排序） */
+  violations: NotViolation[];
+  /** 与 violations 同序的区间起点（含 cepRange 筛选） */
+  violStart: Float64Array;
+  /** 合并行流：行类型 + 该类型数组内的下标 */
+  rowKind: Uint8Array;
+  rowRef: Uint32Array;
+  rowCount: number;
 }
 
 /**
  * 块头统计的悬浮说明。异常部分刻意报**两件事**：段数（人能理解的规模）与
- * 原始条数（真值，明细可能受上限截断）——只报其中一个都会误导。
+ * 原始条数（真值）——只报其中一个都会误导。
  */
-function blockStatTitle(b: CepBlock): string {
+function blockStatTitle(b: VBlock): string {
   const lines = [`${fmtCount(b.chainCount)} 条链`];
   if (b.anomalySummary && b.anomalySummary.windows.length > 0) {
     lines.push(
@@ -85,146 +90,155 @@ function blockStatTitle(b: CepBlock): string {
     if (high > 0) lines.push(`其中 ${fmtCount(high)} 段密集爆发`);
     else if (med > 0) lines.push(`其中 ${fmtCount(med)} 段成簇`);
   }
-  if (b.overLimit) lines.push('（明细按上限回传，此处为完整统计）');
+  if (b.overLimit) lines.push('（链明细按护栏上限回传，此处为完整统计）');
   return lines.join('\n');
 }
 
-/** 渲染批次：首屏渲染 200 行，滚动到底部（哨兵进入视口）自动续一批。
- *  数据侧上限 CEP_MAX_CHAINS（引擎/TS 回退每类行最多取该数），行对象
- *  全量构建但 DOM 按需增长——大目录宽松规则（数十万链）下全量渲染会
- *  把渲染进程 OOM 拖死。 */
-const RENDER_BATCH = 200;
-
-/** 链行：节点=各步 filter 色块 + 链内步序号 */
-function chainRow(
+/** 构建单个分组的虚拟块。engineOk=false（引擎不可用/加载中）时抑制
+ *  「为何没匹配」诊断——零链是"没跑"而非"跑过没匹配上"，此时给出的
+ *  诊断全是误诊。 */
+function buildVBlock(
   g: FilterGroup,
-  chain: SequenceMatchResult['chains'][number],
-  filters: Map<string, Filter>,
-): CepRow {
-  return {
-    count: 0,
-    startTs: chain.startTs,
-    endTs: chain.endTs,
-    kind: 'chain',
-    chainIndex: chain.chainIndex,
-    nodes: chain.steps.map((stp, i) => {
-      const f = filters.get(stp.filterId);
-      return {
-        eventId: stp.event.id,
-        color: f?.color ?? g.color,
-        stepNo: i + 1,
-        filterLabel: f?.label,
-      };
-    }),
-  };
-}
-
-/** 从 sequenceResults 构建每分组的行列表（按 startTs 升序，时间纵轴与 filter 视图无关）。
- *  engineOk=false（引擎不可用/加载中）时抑制「为何没匹配」诊断——零链是
- *  "没跑"而非"跑过没匹配上"，此时给出的诊断全是误诊。 */
-function buildBlocks(
-  groups: FilterGroup[],
-  sequenceResults: Record<string, SequenceMatchResult>,
-  filters: Map<string, Filter>,
+  r: SequenceMatchResult,
   matches: FilterMatch[],
   cepRange: { start: number; end: number } | null,
   engineOk: boolean,
-): CepBlock[] {
-  const out: CepBlock[] = [];
+): VBlock {
+  const anomalyEnabled = !!g.sequence?.anomalyEnabled;
+  const totalChains = r.totalChains ?? r.chains.length;
+  // 异常窗口聚合：必须先于逐条标注、且在**未筛选**事件上做
+  const anomalySummary = anomalyEnabled ? aggregateAnomalyWindows(r.uncovered.ts) : null;
+  const anomalyTrueTotal = anomalyEnabled ? r.uncovered.ids.length : 0;
+
+  // 链：cepRange 时按区间重叠过滤（保持 startTs 升序）
+  const chains = cepRange
+    ? r.chains.filter((c) => c.startTs <= cepRange.end && c.endTs >= cepRange.start)
+    : r.chains;
+  const chainCount = cepRange ? chains.length : totalChains;
+
+  // NOT 违规：区间 [min(from,to), max(from,to)]，按起点稳定排序
+  const violations = cepRange
+    ? r.notViolations.filter((v) => {
+        const a = (v.fromEvent as LogEvent).ts;
+        const b = (v.toEvent as LogEvent).ts;
+        return Math.min(a, b) <= cepRange.end && Math.max(a, b) >= cepRange.start;
+      })
+    : r.notViolations;
+  // NOT 违规：按区间起点稳定排序（带下标，避免比较器里反查）
+  const order = violations
+    .map((v, i) => ({
+      i,
+      start: Math.min((v.fromEvent as LogEvent).ts, (v.toEvent as LogEvent).ts),
+    }))
+    .sort((a, b) => a.start - b.start || a.i - b.i);
+  const violList = order.map((o) => violations[o.i]);
+  const violStart = Float64Array.from(order, (o) => o.start);
+
+  // 异常流：SoA 已按 (ts,id) 升序；cepRange 时统计窗内条数（流内只含窗内行）
+  const unc = anomalyEnabled ? r.uncovered : null;
+  let uncInRange = 0;
+  if (unc && cepRange) {
+    for (let i = 0; i < unc.ts.length; i++) {
+      if (unc.ts[i] >= cepRange.start && unc.ts[i] <= cepRange.end) uncInRange++;
+    }
+  }
+
+  // 三路归并（并列时间戳按 异常→违规→链 定序）填 rowKind/rowRef；
+  // 三条输入流各自升序，ui 沿 SoA 推进时跳过窗外行
+  const nChain = chains.length;
+  const nViol = violList.length;
+  const nUnc = unc ? (cepRange ? uncInRange : unc.ids.length) : 0;
+  const rowKind = new Uint8Array(nChain + nViol + nUnc);
+  const rowRef = new Uint32Array(nChain + nViol + nUnc);
+  let ci = 0;
+  let vi = 0;
+  let ui = 0;
+  let n = 0;
+  for (;;) {
+    while (unc && ui < unc.ids.length && cepRange && (unc.ts[ui] < cepRange.start || unc.ts[ui] > cepRange.end)) ui++;
+    const hasC = ci < nChain;
+    const hasV = vi < nViol;
+    const hasU = !!unc && ui < unc.ids.length;
+    if (!hasC && !hasV && !hasU) break;
+    const minTs = Math.min(
+      hasC ? chains[ci].startTs : Infinity,
+      hasV ? violStart[vi] : Infinity,
+      hasU ? unc!.ts[ui] : Infinity,
+    );
+    if (hasU && unc!.ts[ui] === minTs) {
+      rowKind[n] = KIND_ANOMALY;
+      rowRef[n] = ui;
+      ui++;
+    } else if (hasV && violStart[vi] === minTs) {
+      rowKind[n] = KIND_VIOLATION;
+      rowRef[n] = vi;
+      vi++;
+    } else {
+      rowKind[n] = KIND_CHAIN;
+      rowRef[n] = ci;
+      ci++;
+    }
+    n++;
+  }
+
+  return {
+    groupId: g.id,
+    label: g.label,
+    color: g.color,
+    chainCount,
+    anomalyCount: cepRange ? uncInRange : anomalyTrueTotal,
+    anomalyEnabled,
+    overLimit: totalChains > CEP_MAX_CHAINS,
+    threadHint: g.sequence?.scope === 'thread' ? threadHint(r) : null,
+    keyHint: g.sequence?.scope === 'key' ? keyHint(r) : null,
+    // 「为何没匹配」诊断：引擎可用且有序列规则时**始终可点**。零链给完整
+    // 诊断（含 overtaken hint），有链给 blocker/hint。诊断只按总链数判定，
+    // 不受面板内时间窗筛选影响——否则筛选掉几行就弹出诊断，纯属误导。
+    diagnoses: engineOk && g.sequence ? explainNoMatch(g.sequence, matches, totalChains === 0) : null,
+    anomalySummary,
+    anomalyTrueTotal,
+    chains,
+    unc,
+    violations: violList,
+    violStart,
+    rowKind,
+    rowRef,
+    rowCount: n,
+  };
+}
+
+/** 从 sequenceResults 构建每分组的虚拟块（时间纵轴与 filter 视图无关） */
+function buildVBlocks(
+  groups: FilterGroup[],
+  sequenceResults: Record<string, SequenceMatchResult>,
+  matches: FilterMatch[],
+  cepRange: { start: number; end: number } | null,
+  engineOk: boolean,
+): VBlock[] {
+  const out: VBlock[] = [];
   for (const g of groups) {
     const r = sequenceResults[g.id];
     if (!r) continue;
-    // 每类行取数据上限（引擎路径已截断；TS 回退无上限，防全量物化行对象）
-    const anomalyEnabled = !!g.sequence?.anomalyEnabled;
-    // 先聚合异常窗口（必须在逐条标注之前）：聚合只对**未筛选**的事件做，
-    // 筛选后的子集会人为造出不存在的段落边界。
-    const anomalySummary = anomalyEnabled ? aggregateAnomalyWindows(r.uncoveredEvents) : null;
-    const anomalyTrueTotal = anomalyEnabled
-      ? (r.totalUncovered ?? r.uncoveredEvents.length)
-      : 0;
-    const rows: CepRow[] = r.chains.slice(0, CEP_MAX_CHAINS).map((ch) => chainRow(g, ch, filters));
-    if (anomalyEnabled) {
-      const wins = anomalySummary?.windows ?? [];
-      for (const ev of r.uncoveredEvents.slice(0, CEP_MAX_CHAINS)) {
-        const w = windowAt(wins, ev.ts);
-        rows.push({
-          count: 0,
-          startTs: ev.ts,
-          endTs: ev.ts,
-          kind: 'anomaly',
-          chainIndex: 0,
-          nodes: [{ eventId: ev.id, color: 'var(--anomaly, #cf222e)', stepNo: 1, anomaly: true }],
-          note: w ? `连发 ${fmtCount(w.count)} 条 · ${LEVEL_LABEL[w.level]}` : undefined,
-        });
-      }
-    }
-    for (const v of r.notViolations.slice(0, CEP_MAX_CHAINS)) {
-      const from = v.fromEvent as LogEvent;
-      const to = v.toEvent as LogEvent;
-      rows.push({
-        count: 0,
-        startTs: Math.min(from.ts, to.ts),
-        endTs: Math.max(from.ts, to.ts),
-        kind: 'violation',
-        chainIndex: 0,
-        nodes: [
-          { eventId: from.id, color: 'var(--anomaly, #cf222e)', stepNo: 1, violation: true },
-          { eventId: to.id, color: 'var(--anomaly, #cf222e)', stepNo: 2, violation: true },
-        ],
-      });
-    }
-    rows.sort((a, b) => a.startTs - b.startTs || a.chainIndex - b.chainIndex);
-    // CEP 面板内时间窗筛选：保留与窗口重叠的行（链/违规按区间，点按时刻）
-    const inRange = cepRange
-      ? rows.filter((row) => row.endTs >= cepRange.start && row.startTs <= cepRange.end)
-      : rows;
-    // 行序号：块内按 startTime 排序后 1-based
-    inRange.forEach((row, i) => {
-      row.count = i + 1;
-    });
-    // 无时间窗筛选时取真值（inRange 受 CEP_MAX_CHAINS 限制），有筛选时取窗内行数
-    const chainCount = cepRange
-      ? inRange.filter((row) => row.kind === 'chain').length
-      : (r.totalChains ?? r.chains.length);
-    let anomalyCount = 0;
-    if (anomalyEnabled) {
-      const filtered = inRange.filter((row) => row.kind === 'anomaly').length;
-      anomalyCount = cepRange ? filtered : anomalyTrueTotal;
-    }
-    const overLimit = (r.totalChains ?? r.chains.length) > CEP_MAX_CHAINS;
-    // 诊断只按**总链数**判定，不受面板内时间窗筛选影响——否则筛选掉几行就
-    // 弹出「为何没匹配」，纯属误导。
-    const totalChains = r.totalChains ?? r.chains.length;
-    out.push({
-      groupId: g.id,
-      label: g.label,
-      color: g.color,
-      chainCount,
-      anomalyCount,
-      anomalyEnabled,
-      overLimit,
-      rows: inRange,
-      threadHint: g.sequence?.scope === 'thread' ? threadHint(r) : null,
-      keyHint: g.sequence?.scope === 'key' ? keyHint(r) : null,
-      // 「为何没匹配」诊断：引擎可用且有序列规则时**始终可点**（不再仅零链时出现）。
-      // 零链给完整诊断（含 overtaken hint），有链给 blocker/hint（zero=false 不报 overtaken）。
-      diagnoses:
-        engineOk && g.sequence ? explainNoMatch(g.sequence, matches, totalChains === 0) : null,
-      anomalySummary,
-      anomalyTrueTotal,
-    });
+    out.push(buildVBlock(g, r, matches, cepRange, engineOk));
   }
   return out;
 }
 
-function rowTitle(row: CepRow): string {
-  if (row.kind === 'chain') return `链 ${row.chainIndex} · ${row.nodes.length} 节点`;
-  if (row.kind === 'violation') return `NOT 违规 · A 窗口内出现禁止事件`;
-  // 异常行带所属窗口标注——否则密密麻麻的异常列表里看不出哪几条是一伙的
-  return row.note ? `异常 · 未被任何链覆盖（${row.note}）` : `异常 · 未被任何链覆盖`;
+/** 虚拟布局段：一个块在滚动坐标系中的落位 */
+interface Seg {
+  b: VBlock;
+  top: number;
+  h: number;
+  /** 行区起始 y（块内相对，= HEADER_H + (why?WHY_H:0)） */
+  rowsTop: number;
+  /** 行区高度（rowCount*ROW_H；0 行时用 EMPTY_H 占位） */
+  rowsH: number;
+  hasWhy: boolean;
+  hasHint: boolean;
 }
 
-/** CEP 规则筛选结果面板：每行一条匹配链/异常（独立时间纵轴，仅在有结果时显示） */
+/** CEP 规则筛选结果面板：每行一条匹配链/异常（独立时间纵轴，仅在有结果时显示）。
+ *  虚拟滚动：DOM 行数只随视口大小变化，滚动条长度反映全量行数。 */
 export function CepTimelinePanel() {
   const groups = useLogStore((s) => s.groups);
   const sequenceResults = useLogStore((s) => s.sequenceResults);
@@ -240,9 +254,6 @@ export function CepTimelinePanel() {
   const retryCepEngine = useLogStore((s) => s.retryCepEngine);
   // 面板收纳（收纳后留 24px 竖条作展开入口）
   const [collapsed, setCollapsed] = useState(false);
-  // 每组渐进渲染上限（groupId → 已加载行数）：首屏 RENDER_BATCH 批，
-  // 滚动到块底哨兵自动续一批；数据重建（重算/改规则）时全部复位
-  const [limits, setLimits] = useState<Record<string, number>>({});
   // 「为何没匹配」诊断展开态（groupId → 是否展开）
   const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
   // CEP 面板内时间窗筛选（仅本面板生效，不动全局 viewRange）
@@ -250,6 +261,11 @@ export function CepTimelinePanel() {
   const [rangeOpen, setRangeOpen] = useState(false);
   const [rangeStart, setRangeStart] = useState('');
   const [rangeEnd, setRangeEnd] = useState('');
+
+  // 虚拟滚动状态
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewH, setViewH] = useState(600);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   const openRange = () => {
     const vr = useLogStore.getState().viewRange;
@@ -280,23 +296,58 @@ export function CepTimelinePanel() {
   const engineDown = cepEngineError !== null && seqGroupCount > 0;
   const enginePending = cepEnginePending && seqGroupCount > 0;
 
-  const blocks = useMemo(() => {
-    const filterMap = new Map(filters.map((f) => [f.id, f] as const));
-    return buildBlocks(
-      groups,
-      sequenceResults,
-      filterMap,
-      matches,
-      cepRange,
-      cepEngineError === null && !cepEnginePending,
-    );
-  }, [groups, sequenceResults, filters, matches, cepRange, cepEngineError, cepEnginePending]);
+  // filter 色板查询（构建块与渲染行共用）
+  const filterMap = useMemo(
+    () => new Map(filters.map((f) => [f.id, f] as const)),
+    [filters],
+  );
+  const vblocks = useMemo(
+    () =>
+      buildVBlocks(
+        groups,
+        sequenceResults,
+        matches,
+        cepRange,
+        cepEngineError === null && !cepEnginePending,
+      ),
+    [groups, sequenceResults, filterMap, matches, cepRange, cepEngineError, cepEnginePending],
+  );
 
+  // 数据重建（重算/改规则/改时间窗）时复位滚动
   useEffect(() => {
-    setLimits({});
-  }, [blocks]);
+    setScrollTop(0);
+    bodyRef.current?.scrollTo(0, 0);
+  }, [vblocks]);
 
-  if (blocks.length === 0 && !engineDown && !enginePending) return null;
+  // 视口尺寸跟随
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    setViewH(el.clientHeight);
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setViewH(e.contentRect.height);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // 布局：前缀和求各块落位（whyOpen / overLimit 影响块高）
+  const { segs, totalH } = useMemo(() => {
+    const segList: Seg[] = [];
+    let top = 0;
+    for (const b of vblocks) {
+      const hasWhy = whyOpen[b.groupId] && !!b.diagnoses;
+      const hasHint = b.overLimit;
+      const rowsH = b.rowCount > 0 ? b.rowCount * ROW_H : EMPTY_H;
+      const rowsTop = HEADER_H + (hasWhy ? WHY_H : 0);
+      const h = rowsTop + rowsH + (hasHint ? HINT_H : 0) + BLOCK_TAIL;
+      segList.push({ b, top, h, rowsTop, rowsH, hasWhy, hasHint });
+      top += h;
+    }
+    return { segs: segList, totalH: top };
+  }, [vblocks, whyOpen]);
+
+  if (vblocks.length === 0 && !engineDown && !enginePending) return null;
 
   if (collapsed) {
     return (
@@ -312,13 +363,16 @@ export function CepTimelinePanel() {
     );
   }
 
+  const viewTop = scrollTop;
+  const viewBottom = scrollTop + viewH;
+
   return (
     <div className={styles.panel}>
       <div className={styles.panelHeader}>
         <span className={styles.panelTitle}>CEP 规则</span>
         <span className={styles.spacer} />
         <span className={styles.panelCount}>
-          {engineDown ? seqGroupCount : blocks.length} 组规则
+          {engineDown ? seqGroupCount : vblocks.length} 组规则
         </span>
         <button
           className={`${styles.rangeBtn} ${cepRange ? styles.rangeActive : ''}`}
@@ -375,142 +429,251 @@ export function CepTimelinePanel() {
       {enginePending && !engineDown && (
         <div className={styles.enginePending}>CEP 引擎加载中…</div>
       )}
-      <div className={styles.panelBody}>
-        {blocks.map((b) => {
-          // 渐进渲染：只挂载已加载批次，行号 count 已在全量 rows 上编好
-          const limit = limits[b.groupId] ?? RENDER_BATCH;
-          const visible = b.rows.slice(0, limit);
-          const hidden = b.rows.length - visible.length;
-          return (
-          <div key={b.groupId} className={styles.block}>
-            <div className={styles.blockHeader} style={{ borderLeftColor: b.color }}>
-              <span className={styles.blockDot} style={{ background: b.color }} />
-              <span className={styles.blockTitle} title={b.label}>{b.label}</span>
-              <span className={styles.blockStat} title={blockStatTitle(b)}>
-                {fmtCompact(b.chainCount)} 链
-                {/* 逐条报异常在大目录下是纯噪声，这里报**段**而不是条 */}
-                {b.anomalySummary && b.anomalySummary.windows.length > 0
-                  ? ` · ${fmtCompact(b.anomalySummary.windows.length)} 段异常`
-                  : ''}
-              </span>
-              {b.threadHint && (
-                <span
-                  className={`${styles.threadStat} ${b.threadHint.warn ? styles.threadStatWarn : ''}`}
-                  title={b.threadHint.title}
-                >
-                  {b.threadHint.text}
-                </span>
-              )}
-              {b.keyHint && (
-                <span
-                  className={`${styles.threadStat} ${b.keyHint.warn ? styles.threadStatWarn : ''}`}
-                  title={b.keyHint.title}
-                >
-                  {b.keyHint.text}
-                </span>
-              )}
-              <button
-                className={`${styles.anomalyToggle} ${b.anomalyEnabled ? styles.anomalyToggleActive : ''}`}
-                title={
-                  b.anomalyEnabled
-                    ? `异常高亮已开启：${fmtCount(b.anomalyTrueTotal)} 个未覆盖事件` +
-                      `（聚成 ${fmtCount(b.anomalySummary?.windows.length ?? 0)} 段）标红`
-                    : '异常高亮已关闭：点击开启'
-                }
-                onClick={() => toggleSequenceAnomaly(b.groupId)}
-              >
-                <AlertTriangle size={13} />
-                {/* 徽标也报段数：33 万条挤不进徽标，段数才是有用的信号 */}
-                {b.anomalyEnabled && b.anomalySummary && b.anomalySummary.windows.length > 0 && (
-                  <span className={styles.anomalyBadge}>
-                    {fmtCompact(b.anomalySummary.windows.length)}
-                  </span>
-                )}
-              </button>
-              {b.diagnoses && (
-                <button
-                  className={`${styles.whyToggle} ${whyOpen[b.groupId] ? styles.whyToggleOpen : ''} ${b.diagnoses.length === 0 ? styles.whyToggleNeutral : ''}`}
-                  title={b.diagnoses.length > 0 ? '点开看规则为何没匹配上' : '点开运行诊断'}
-                  onClick={() => setWhyOpen((p) => ({ ...p, [b.groupId]: !p[b.groupId] }))}
-                >
-                  <ChevronRight size={12} />
-                  {b.diagnoses.length > 0 ? '为何没匹配' : '诊断规则'}
-                </button>
-              )}
-            </div>
-            {b.diagnoses && whyOpen[b.groupId] && (
-              b.diagnoses.length > 0 ? (
-                <ul className={styles.whyList}>
-                  {b.diagnoses.map((d, i) => (
-                    <li
-                      key={i}
-                      className={d.severity === 'blocker' ? styles.whyBlocker : styles.whyHint}
+      <div
+        className={styles.panelBody}
+        ref={bodyRef}
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      >
+        {/* 滚动占位：高度=全量行高之和，滚动条长度反映真实数据量 */}
+        <div style={{ height: totalH, position: 'relative' }}>
+          {segs
+            .filter(
+              (seg) => seg.top < viewBottom && seg.top + seg.h > viewTop,
+            )
+            .map((seg) => {
+              const b = seg.b;
+              // 行窗口：视口映射到块内行号区间（含 OVERSCAN 冗余）
+              const first = Math.max(
+                0,
+                Math.floor((viewTop - seg.top - seg.rowsTop) / ROW_H),
+              );
+              const last = Math.min(
+                b.rowCount,
+                Math.ceil((viewBottom - seg.top - seg.rowsTop) / ROW_H),
+              );
+              const rows: ReactNode[] = [];
+              for (let i = first; i < last; i++) {
+                const kind = b.rowKind[i];
+                const ref = b.rowRef[i];
+                if (kind === KIND_CHAIN) {
+                  const ch = b.chains[ref];
+                  rows.push(
+                    <div
+                      key={`c${ref}`}
+                      className={styles.row}
+                      title={`链 ${ch.chainIndex} · ${ch.steps.length} 节点`}
                     >
-                      <span className={styles.whyText}>{d.text}</span>
-                      {d.detail && <span className={styles.whyDetail}>{d.detail}</span>}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <div className={styles.whyEmpty}>
-                  {b.chainCount > 0
-                    ? '规则匹配正常，未发现问题'
-                    : '未匹配出链，但未发现明显配置问题（可放宽间隔、检查作用域或时间窗）'}
-                </div>
-              )
-            )}
-            {b.rows.length === 0 ? (
-              <div className={styles.blockEmpty}>
-                {b.diagnoses && b.diagnoses.length > 0
-                  ? '零匹配 —— 展开上方「为何没匹配」看卡点'
-                  : '无匹配结果'}
-              </div>
-            ) : (
-              visible.map((row, ri) => (
-                <div
-                  key={`${row.startTs}-${ri}`}
-                  className={`${styles.row} ${row.kind !== 'chain' ? styles.rowAnomaly : ''}`}
-                  title={rowTitle(row)}
-                >
-                  <span className={styles.count}>{row.count}</span>
-                  <span className={styles.timeRange}>
-                    {formatTime(row.startTs)}
-                    {row.endTs > row.startTs ? ` ~ ${formatTime(row.endTs)}` : ''}
-                  </span>
-                  <span className={styles.nodes}>
-                    {row.nodes.map((n) => (
-                      <button
-                        key={n.eventId}
-                        className={[
-                          styles.node,
-                          n.eventId === selectedEventId ? styles.nodeSelected : '',
-                        ].join(' ')}
-                        style={{ background: n.color }}
-                        title={`${n.filterLabel ? n.filterLabel + ' · ' : ''}${n.anomaly ? '异常' : n.violation ? 'NOT 违规' : '点击跳转'}（事件 #${n.eventId}）`}
-                        onClick={() => focusEvent(n.eventId)}
-                      >
-                        {n.stepNo}
-                      </button>
-                    ))}
-                  </span>
-                </div>
-              ))
-            )}
-            {hidden > 0 && (
-              <LoadMore
-                onLoad={() =>
-                  setLimits((p) => ({ ...p, [b.groupId]: (p[b.groupId] ?? RENDER_BATCH) + RENDER_BATCH }))
+                      <span className={styles.count}>{i + 1}</span>
+                      <span className={styles.timeRange}>
+                        {formatTime(ch.startTs)}
+                        {ch.endTs > ch.startTs ? ` ~ ${formatTime(ch.endTs)}` : ''}
+                      </span>
+                      <span className={styles.nodes}>
+                        {ch.steps.map((stp, si) => {
+                          const f = filterMap.get(stp.filterId);
+                          return (
+                            <button
+                              key={`${stp.event.id}-${si}`}
+                              className={`${styles.node} ${
+                                stp.event.id === selectedEventId ? styles.nodeSelected : ''
+                              }`}
+                              style={{ background: f?.color ?? b.color }}
+                              title={`${f?.label ? f.label + ' · ' : ''}点击跳转（事件 #${stp.event.id}）`}
+                              onClick={() => focusEvent(stp.event.id)}
+                            >
+                              {si + 1}
+                            </button>
+                          );
+                        })}
+                      </span>
+                    </div>,
+                  );
+                } else if (kind === KIND_VIOLATION) {
+                  const v = b.violations[ref];
+                  const from = v.fromEvent as LogEvent;
+                  const to = v.toEvent as LogEvent;
+                  rows.push(
+                    <div
+                      key={`v${ref}`}
+                      className={`${styles.row} ${styles.rowAnomaly}`}
+                      title="NOT 违规 · A 窗口内出现禁止事件"
+                    >
+                      <span className={styles.count}>{i + 1}</span>
+                      <span className={styles.timeRange}>
+                        {formatTime(Math.min(from.ts, to.ts))}
+                        {to.ts !== from.ts ? ` ~ ${formatTime(Math.max(from.ts, to.ts))}` : ''}
+                      </span>
+                      <span className={styles.nodes}>
+                        {[
+                          { ev: from, no: 1 },
+                          { ev: to, no: 2 },
+                        ].map(({ ev, no }) => (
+                          <button
+                            key={`${ev.id}-${no}`}
+                            className={`${styles.node} ${
+                              ev.id === selectedEventId ? styles.nodeSelected : ''
+                            }`}
+                            style={{ background: 'var(--anomaly, #cf222e)' }}
+                            title={`NOT 违规 · 点击跳转（事件 #${ev.id}）`}
+                            onClick={() => focusEvent(ev.id)}
+                          >
+                            {no}
+                          </button>
+                        ))}
+                      </span>
+                    </div>,
+                  );
+                } else {
+                  const id = b.unc!.ids[ref];
+                  const ts = b.unc!.ts[ref];
+                  const w = windowAt(b.anomalySummary?.windows ?? [], ts);
+                  const note = w ? `连发 ${fmtCount(w.count)} 条 · ${LEVEL_LABEL[w.level]}` : undefined;
+                  rows.push(
+                    <div
+                      key={`u${ref}`}
+                      className={`${styles.row} ${styles.rowAnomaly}`}
+                      title={note ? `异常 · 未被任何链覆盖（${note}）` : '异常 · 未被任何链覆盖'}
+                    >
+                      <span className={styles.count}>{i + 1}</span>
+                      <span className={styles.timeRange}>{formatTime(ts)}</span>
+                      <span className={styles.nodes}>
+                        <button
+                          className={`${styles.node} ${
+                            id === selectedEventId ? styles.nodeSelected : ''
+                          }`}
+                          style={{ background: 'var(--anomaly, #cf222e)' }}
+                          title={`异常 · 点击跳转（事件 #${id}）`}
+                          onClick={() => focusEvent(id)}
+                        >
+                          1
+                        </button>
+                      </span>
+                    </div>,
+                  );
                 }
-              />
-            )}
-            {b.overLimit && (
-              <div className={styles.blockMore}>
-                引擎仅回传按时间序的前 {CEP_MAX_CHAINS} 条链（共 {b.chainCount}）——收窄规则或时间窗可查看其余
-              </div>
-            )}
-          </div>
-          );
-        })}
+              }
+              return (
+                <div
+                  key={b.groupId}
+                  className={styles.block}
+                  style={{ position: 'absolute', top: seg.top, height: seg.h, left: 0, right: 0 }}
+                >
+                  <div className={styles.blockHeader} style={{ borderLeftColor: b.color }}>
+                    <span className={styles.blockDot} style={{ background: b.color }} />
+                    <span className={styles.blockTitle} title={b.label}>{b.label}</span>
+                    <span className={styles.blockStat} title={blockStatTitle(b)}>
+                      {fmtCompact(b.chainCount)} 链
+                      {/* 逐条报异常在大目录下是纯噪声，这里报**段**而不是条 */}
+                      {b.anomalySummary && b.anomalySummary.windows.length > 0
+                        ? ` · ${fmtCompact(b.anomalySummary.windows.length)} 段异常`
+                        : ''}
+                    </span>
+                    {b.threadHint && (
+                      <span
+                        className={`${styles.threadStat} ${b.threadHint.warn ? styles.threadStatWarn : ''}`}
+                        title={b.threadHint.title}
+                      >
+                        {b.threadHint.text}
+                      </span>
+                    )}
+                    {b.keyHint && (
+                      <span
+                        className={`${styles.threadStat} ${b.keyHint.warn ? styles.threadStatWarn : ''}`}
+                        title={b.keyHint.title}
+                      >
+                        {b.keyHint.text}
+                      </span>
+                    )}
+                    <button
+                      className={`${styles.anomalyToggle} ${b.anomalyEnabled ? styles.anomalyToggleActive : ''}`}
+                      title={
+                        b.anomalyEnabled
+                          ? `异常高亮已开启：${fmtCount(b.anomalyTrueTotal)} 个未覆盖事件` +
+                            `（聚成 ${fmtCount(b.anomalySummary?.windows.length ?? 0)} 段）标红`
+                          : '异常高亮已关闭：点击开启'
+                      }
+                      onClick={() => toggleSequenceAnomaly(b.groupId)}
+                    >
+                      <AlertTriangle size={13} />
+                      {/* 徽标也报段数：33 万条挤不进徽标，段数才是有用的信号 */}
+                      {b.anomalyEnabled && b.anomalySummary && b.anomalySummary.windows.length > 0 && (
+                        <span className={styles.anomalyBadge}>
+                          {fmtCompact(b.anomalySummary.windows.length)}
+                        </span>
+                      )}
+                    </button>
+                    {b.diagnoses && (
+                      <button
+                        className={`${styles.whyToggle} ${whyOpen[b.groupId] ? styles.whyToggleOpen : ''} ${b.diagnoses.length === 0 ? styles.whyToggleNeutral : ''}`}
+                        title={b.diagnoses.length > 0 ? '点开看规则为何没匹配上' : '点开运行诊断'}
+                        onClick={() => setWhyOpen((p) => ({ ...p, [b.groupId]: !p[b.groupId] }))}
+                      >
+                        <ChevronRight size={12} />
+                        {b.diagnoses.length > 0 ? '为何没匹配' : '诊断规则'}
+                      </button>
+                    )}
+                  </div>
+                  {seg.hasWhy && (
+                    <div style={{ position: 'absolute', top: HEADER_H, left: 0, right: 0 }}>
+                      {b.diagnoses!.length > 0 ? (
+                        <ul className={styles.whyList}>
+                          {b.diagnoses!.map((d, i) => (
+                            <li
+                              key={i}
+                              className={d.severity === 'blocker' ? styles.whyBlocker : styles.whyHint}
+                            >
+                              <span className={styles.whyText}>{d.text}</span>
+                              {d.detail && <span className={styles.whyDetail}>{d.detail}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className={styles.whyEmpty}>
+                          {b.chainCount > 0
+                            ? '规则匹配正常，未发现问题'
+                            : '未匹配出链，但未发现明显配置问题（可放宽间隔、检查作用域或时间窗）'}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {b.rowCount === 0 ? (
+                    <div
+                      className={styles.blockEmpty}
+                      style={{ position: 'absolute', top: seg.rowsTop, left: 0, right: 0 }}
+                    >
+                      {b.diagnoses && b.diagnoses.length > 0
+                        ? '零匹配 —— 展开上方「为何没匹配」看卡点'
+                        : '无匹配结果'}
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: seg.rowsTop + first * ROW_H,
+                        left: 0,
+                        right: 0,
+                      }}
+                    >
+                      {rows}
+                    </div>
+                  )}
+                  {seg.hasHint && (
+                    <div
+                      className={styles.blockMore}
+                      style={{
+                        position: 'absolute',
+                        top: seg.rowsTop + seg.rowsH,
+                        left: 0,
+                        right: 0,
+                      }}
+                    >
+                      引擎仅回传按时间序的前 {fmtCount(CEP_MAX_CHAINS)} 条链（共 {fmtCount(b.chainCount)}）——收窄规则或时间窗可查看其余
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+        </div>
       </div>
       <div className={styles.panelFooter}>
         <button
@@ -521,30 +684,6 @@ export function CepTimelinePanel() {
           <ChevronLeft size={16} strokeWidth={2.5} />
         </button>
       </div>
-    </div>
-  );
-}
-
-/** 滚动到底自动续批的哨兵：进入视口（IntersectionObserver）即触发 onLoad。
- *  onLoad 用 ref 存最新回调，observer 只挂一次，避免每次渲染重建。 */
-function LoadMore({ onLoad }: { onLoad: () => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onLoadRef = useRef(onLoad);
-  onLoadRef.current = onLoad;
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver((entries) => {
-      entries.forEach((e) => {
-        if (e.isIntersecting) onLoadRef.current();
-      });
-    });
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
-  return (
-    <div ref={ref} className={styles.blockMore}>
-      下滑加载更多…
     </div>
   );
 }
