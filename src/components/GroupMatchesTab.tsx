@@ -1,10 +1,10 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useLogStore } from '../store/logStore';
 import { formatDateTime } from '../utils/timeFormat';
-import { Link, AlertTriangle, Copy } from './Icon';
+import { Link, AlertTriangle, Copy, FileText } from './Icon';
 import type { FilterGroup, MatchedChain } from '../types';
 import styles from './DetailPanel.module.css';
-import { copyChainMarkdown } from '../io/exportActions';
+import { copyChainMarkdown, exportSequenceGroupMarkdown } from '../io/exportActions';
 import {
   fmtCompact,
   fmtCount,
@@ -209,8 +209,15 @@ export const GroupMatchesTab = memo(function GroupMatchesTab({ group }: { group:
           异常{' '}
           <b title={`${fmtCount(shownAnomalies)} 条`}>{fmtCompact(shownAnomalies)}</b>
         </button>
+        <button
+          className={styles['gm-stat']}
+          onClick={() => void exportSequenceGroupMarkdown(group)}
+          title="导出本组 CEP 结果为 Markdown 文件（链 / 异常窗口 / NOT 违规 / 未覆盖事件，每类明细最多 500 条）"
+        >
+          <FileText size={12} />
+          导出
+        </button>
       </div>
-
       {/* 检索框 */}
       <div className={styles['gm-search']}>
         <input

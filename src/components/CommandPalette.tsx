@@ -35,6 +35,7 @@ import {
   copySelectedEventMarkdown,
   exportMatchesMarkdown,
   exportRulesFile,
+  exportSequenceResultsMarkdown,
   importRulesFile,
 } from '../io/exportActions';
 import { RULE_TEMPLATES, createGroupFromTemplate } from '../sequence/templates';
@@ -301,6 +302,18 @@ function buildCommands(ctx: { closeAll: () => void }): Command[] {
     run: () => {
       ctx.closeAll();
       void exportMatchesMarkdown();
+    },
+  });
+  commands.push({
+    id: 'export.cep',
+    group: '导出',
+    label: '导出 CEP 结果 (Markdown)…',
+    hint: '链 / 异常窗口 / NOT 违规 / 未覆盖事件，每类明细最多 500 条',
+    keywords: 'export cep markdown sequence chains anomaly 导出 序列 链 异常 结果',
+    icon: <FileText size={14} />,
+    run: () => {
+      ctx.closeAll();
+      void exportSequenceResultsMarkdown();
     },
   });
   commands.push({

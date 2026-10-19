@@ -10,7 +10,7 @@
 import { useLogStore } from '../store/logStore';
 import { toast, beginBusy } from '../store/uiStore';
 import { copyWithFallback } from '../utils/copyFlow';
-import { formatChainsMarkdown, formatEventsMarkdown } from './exportMd';
+import { formatChainsMarkdown, formatEventsMarkdown, formatSequenceResultsMarkdown, SEQUENCE_EXPORT_MAX } from './exportMd';
 import { saveTextFile, pickTextFile } from './exportFile';
 import { buildCepJson, buildLoggraphJson, parseRuleFile } from './rulesIo';
 import { trueChainCount, trueUncoveredCount, fmtCount } from '../utils/counts';
@@ -169,6 +169,76 @@ export async function exportMatchesMarkdown(): Promise<void> {
       toast.success(
         '命中已导出',
         `${fmtCount(total)} 条 · 每个过滤器最多 ${EXPORT_MAX_PER_FILTER} 条`,
+      );
+    }
+  } catch (e) {
+    toast.error('导出失败', (e as Error).message);
+  } finally {
+    end();
+  }
+}
+
+/** 把各分组的 CEP 序列匹配结果导出为 .md 文件（链 / 异常窗口 / NOT 违规 / 未覆盖事件，
+ *  各类明细均有上限，计数走真值口径） */
+export async function exportSequenceResultsMarkdown(): Promise<void> {
+  const st = useLogStore.getState();
+  const entries = st.groups
+    .filter((g) => st.sequenceResults[g.id])
+    .map((g) => ({ group: g, result: st.sequenceResults[g.id] }));
+  if (entries.length === 0) {
+    toast.warn('没有可导出的 CEP 结果', '先给分组配置序列关系（边）并完成一次匹配');
+    return;
+  }
+  const end = beginBusy('导出 CEP 结果…');
+  try {
+    const md = formatSequenceResultsMarkdown(entries, st.filters, {
+      sourceDir: st.logsDirName ?? st.sessionDirPath ?? null,
+    });
+    const path = await saveTextFile(`loggraph-CEP结果-${stamp()}.md`, md, {
+      extensions: ['md'],
+    });
+    if (path) {
+      toast.success(
+        'CEP 结果已导出',
+        `${entries.length} 个分组 · 每类明细最多 ${SEQUENCE_EXPORT_MAX} 条`,
+      );
+    }
+  } catch (e) {
+    toast.error('导出失败', (e as Error).message);
+  } finally {
+    end();
+  }
+}
+
+/** 导出单个分组的 CEP 结果（GroupMatchesTab 按钮；与全量导出共用同一份格式化） */
+export async function exportSequenceGroupMarkdown(group: FilterGroup): Promise<void> {
+  const st = useLogStore.getState();
+  const result = st.sequenceResults[group.id];
+  if (!result) {
+    toast.warn('该分组没有 CEP 结果', '先配置序列关系（边）并完成一次匹配');
+    return;
+  }
+  const end = beginBusy(`导出分组「${group.label}」…`);
+  try {
+    const md = formatSequenceResultsMarkdown(
+      [{ group, result }],
+      st.filters,
+      {
+        title: `logGraph CEP 结果 · ${group.label}`,
+        sourceDir: st.logsDirName ?? st.sessionDirPath ?? null,
+      },
+    );
+    // 文件名里的分组名去掉 Windows 非法字符
+    const safeLabel = group.label.replace(/[\\/:*?"<>|]/g, '_');
+    const path = await saveTextFile(
+      `loggraph-CEP结果-${safeLabel}-${stamp()}.md`,
+      md,
+      { extensions: ['md'] },
+    );
+    if (path) {
+      toast.success(
+        '本组 CEP 结果已导出',
+        `${group.label} · 每类明细最多 ${SEQUENCE_EXPORT_MAX} 条`,
       );
     }
   } catch (e) {
