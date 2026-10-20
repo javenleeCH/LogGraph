@@ -70,6 +70,11 @@ pub fn formats() -> &'static [TsFormat] {
                 extract: extract_syslog,
             },
             TsFormat {
+                id: "nginx",
+                is_match: is_match_nginx,
+                extract: extract_nginx,
+            },
+            TsFormat {
                 id: "time-only-ms",
                 is_match: is_match_time_only,
                 extract: extract_time_only,
@@ -241,6 +246,42 @@ fn extract_syslog(line: &str) -> Option<ExtractedTimestamp> {
         start: whole.start(),
         end: whole.end(),
         format_id: "syslog",
+    })
+}
+
+// nginx access $time_local：`[10/Oct/2026:13:55:36 +0000]`（dd/Mon/yyyy:HH:mm:ss +zzzz，含括号整体剥除）
+fn re_nginx() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        build_re(r"\[(\d{2}/[A-Za-z]{3}/\d{4}:\d{2}:\d{2}:\d{2})\s+([+-]\d{4})\]\s*")
+    })
+}
+
+fn is_match_nginx(line: &str) -> bool {
+    re_nginx().is_match(line)
+}
+
+/// 取 group1 `10/Oct/2026:13:55:36` 与 group2 偏移 `+0000`，转 UTC 毫秒。
+fn extract_nginx(line: &str) -> Option<ExtractedTimestamp> {
+    let caps = re_nginx().captures(line)?;
+    let date = &caps[1];
+    let mon = month_from_abbr(&date[3..6])?;
+    let d: i64 = date[0..2].parse().ok()?;
+    let y: i64 = date[7..11].parse().ok()?;
+    let h: i64 = date[12..14].parse().ok()?;
+    let mi: i64 = date[15..17].parse().ok()?;
+    let s: i64 = date[18..20].parse().ok()?;
+    let tz = &caps[2];
+    let sign: i64 = if tz.starts_with('-') { -1 } else { 1 };
+    let tzh: i64 = tz[1..3].parse().ok()?;
+    let tzm: i64 = tz[3..5].parse().ok()?;
+    let ts = date_utc_like(y, mon, d, h, mi, s, 0) - sign * (tzh * 3600 + tzm * 60) * 1000;
+    let whole = caps.get(0)?;
+    Some(ExtractedTimestamp {
+        ts,
+        start: whole.start(),
+        end: whole.end(),
+        format_id: "nginx",
     })
 }
 
@@ -493,6 +534,25 @@ mod tests {
     }
 
     #[test]
+    fn nginx_values() {
+        // [10/Oct/2026:13:55:36 +0000]：Oct=9，+0000 不调整
+        let expect = date_utc_like(2026, 9, 10, 13, 55, 36, 0);
+        let r = extract_nginx("[10/Oct/2026:13:55:36 +0000] \"GET / HTTP/1.1\" 200 612").unwrap();
+        assert_eq!(r.ts, expect);
+        assert_eq!(r.start, 0);
+        // 带前导字段（remote addr - - [）→ start 在其后
+        let r2 = extract_nginx("1.2.3.4 - - [10/Oct/2026:13:55:36 +0000] \"GET\" 200 612").unwrap();
+        assert_eq!(r2.ts, expect);
+        assert_eq!(r2.start, "1.2.3.4 - - ".len());
+        // +0800：比 UTC 早 8 小时（offset 修正）
+        let r3 = extract_nginx("[10/Oct/2026:13:55:36 +0800] x").unwrap();
+        assert_eq!(r3.ts, expect - 8 * 3600 * 1000);
+        // 月份非法 / 格式不匹配 → None
+        assert!(extract_nginx("[10/xyz/2026:13:55:36 +0000] x").is_none());
+        assert!(extract_nginx("no timestamp here").is_none());
+    }
+
+    #[test]
     fn time_only_values() {
         // Date.UTC(1970,0,1,12,34,56,789) = 45296789
         let r = extract_time_only("12:34:56.789 x").unwrap();
@@ -584,6 +644,14 @@ mod tests {
         // 与 time-only 平局 → syslog 胜出；但逐行解析时 syslog parse 失败落 time-only
         let f = detect_timestamp_format(&["Xyz 01 12:00:00 a"]).unwrap();
         assert_eq!(f.id, "syslog");
+
+        // nginx 行：nginx 与 time-only 都匹配 → 平局保留在前者 → nginx
+        let f = detect_timestamp_format(&[
+            "1.2.3.4 - - [10/Oct/2026:13:55:36 +0000] \"GET\" 200",
+            "5.6.7.8 - - [10/Oct/2026:13:55:37 +0000] \"POST\" 201",
+        ])
+        .unwrap();
+        assert_eq!(f.id, "nginx");
 
         // 无一样本 → None
         assert!(detect_timestamp_format(&["plain text", ""]).is_none());

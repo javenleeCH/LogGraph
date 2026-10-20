@@ -57,6 +57,28 @@ describe('parseRest 家族感知 thread 提取（对齐 engine::parser::line）'
   it('detectLogFamily 不把 nginx [error] 误判为任何族', () => {
     expect(detectLogFamily(['[error] 12345#0: *1 open() failed', '[error] 12346#0: *2 closed'])).toBe('unknown');
   });
+
+  it('Python logging %(threadName)s：家族探测 + 提取', () => {
+    expect(
+      detectLogFamily(['INFO Thread-1: worker done', 'INFO Thread-2: done', 'WARN MainThread: init ok'])
+    ).toBe('pythonThread');
+    const r = parseRest('INFO Thread-1: worker done', 'pythonThread');
+    expect(r.thread).toBe('Thread-1');
+    expect(r.level).toBe('INFO');
+    expect(r.message).toBe('worker done');
+    const r2 = parseRest('WARN MainThread: init', 'pythonThread');
+    expect(r2.thread).toBe('MainThread');
+    expect(r2.message).toBe('init');
+  });
+
+  it('syslog program[pid]：家族探测 + 组件标识提取', () => {
+    expect(
+      detectLogFamily(['web01 nginx[1234]: 10.0.0.1 GET /', 'web01 app[5678]: timeout', 'web01 nginx[1234]: 10.0.0.2 POST'])
+    ).toBe('syslogComponent');
+    const r = parseRest('web01 nginx[1234]: 10.0.0.1 GET /', 'syslogComponent');
+    expect(r.thread).toBe('nginx[1234]');
+    expect(r.message).toBe('web01 10.0.0.1 GET /');
+  });
 });
 
 describe('LogParser.parse 端到端：家族探测后 thread 正确流入事件', () => {
@@ -72,5 +94,24 @@ describe('LogParser.parse 端到端：家族探测后 thread 正确流入事件'
     expect(res.events.length).toBe(2);
     const threads = res.events.map((e: LogEvent) => e.thread).sort();
     expect(threads).toEqual(['main', 'scheduler-1']);
+  });
+
+  it('nginx access：时间戳解析，消息为请求行（无线程，正确）', () => {
+    const text = [
+      '1.2.3.4 - - [10/Oct/2026:13:55:36 +0000] "GET /index HTTP/1.1" 200 612',
+      '5.6.7.8 - - [10/Oct/2026:13:55:37 +0800] "POST /api HTTP/1.1" 201 120',
+      '',
+    ].join('\n');
+    const p = new LogParser();
+    const res = p.parse(text);
+    expect(res.skipped).toBe(1);
+    expect(res.events.length).toBe(2);
+    expect(res.timestampFormatId).toBe('nginx');
+    // 两条均无线程/级别
+    expect(res.events.every((e: LogEvent) => e.thread === undefined)).toBe(true);
+    // 排序后：+0800（更早的 UTC 时刻）在前，+0000 在后
+    expect(res.events[0].message).toContain('POST /api');
+    expect(res.events[1].message).toContain('GET /index');
+    expect(res.events[0].ts).toBeLessThan(res.events[1].ts);
   });
 });

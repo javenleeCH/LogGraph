@@ -85,6 +85,26 @@ export const TIMESTAMP_FORMATS: TimestampFormat[] = [
       return Date.UTC(year, mon, +m[2], +m[3], +m[4], +m[5], 0);
     },
   },
+  // [10/Oct/2026:13:55:36 +0000]  (nginx access $time_local，含括号整体剥除)
+  {
+    id: 'nginx',
+    label: 'nginx access (dd/Mon/yyyy:HH:mm:ss +zzzz)',
+    pattern: '%d/%b/%Y:%H:%M:%S %z',
+    sample: '10/Oct/2026:13:55:36 +0000',
+    regex: /\[(\d{2}\/[A-Za-z]{3}\/\d{4}:\d{2}:\d{2}:\d{2})\s+([+-]\d{4})\]\s*/,
+    parse: (m) => {
+      const [d, mon, yhms] = m[1].split('/');
+      const monIdx = MONTHS[mon];
+      if (monIdx === undefined) return null;
+      const [y, hh, mi, ss] = yhms.split(':');
+      const base = Date.UTC(+y, monIdx, +d, +hh, +mi, +ss, 0);
+      const tz = m[2];
+      const sign = tz[0] === '-' ? -1 : 1;
+      const tzh = +(tz.slice(1, 3));
+      const tzm = +(tz.slice(3, 5));
+      return base - sign * (tzh * 3600 + tzm * 60) * 1000;
+    },
+  },
   // 12:00:00.123  (仅有时分秒，取当天 -> 用 epoch 的 date 部分=1970/1/1)
   // 这类日志通常只有当天数据，时序仍正确
   {

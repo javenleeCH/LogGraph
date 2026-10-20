@@ -39,26 +39,37 @@ export interface ParseResult {
 const LEVEL_BRACKET_RE = /(?:\[|\()(?<level>[A-Za-z]+)(?:\]|\))\s*/;
 
 /** 日志布局族——由样本后段探测，决定 thread 的额外提取槽位（对齐 engine::parser::line::LogFamily）。 */
-export type LogFamily = 'unknown' | 'springLogback' | 'log4jThreadAfter';
+export type LogFamily =
+  | 'unknown'
+  | 'springLogback'
+  | 'log4jThreadAfter'
+  | 'pythonThread'
+  | 'syslogComponent';
 
 const SPRING_RE = / --- \[[^\]]+\]/;
 const LOG4J_RE = /^[A-Za-z][A-Za-z]*\s+\[[^\]]+\]/;
+const PYTHON_THREAD_RE = /Thread-\d+|MainThread|Dummy-\d+|ThreadPoolExecutor-\d+_\d+|asyncio_loop/;
+const SYSLOG_COMP_RE = /\s*(\S+)\[(\d+)\]:\s*/;
 const BRACKET_RE = /\[([^\]]+)\]/;
 
 /** 由样本后段（已去时间戳）探测布局族，多数决（>50% 才采用）。对齐 engine::parser::line::detect_log_family。 */
 export function detectLogFamily(rests: string[]): LogFamily {
-  let total = 0, sb = 0, lj = 0;
+  let total = 0, sb = 0, lj = 0, py = 0, sys = 0;
   for (const r of rests.slice(0, 200)) {
     const t = r.trim();
     if (!t) continue;
     total++;
     if (SPRING_RE.test(t)) sb++;
     if (LOG4J_RE.test(t)) lj++;
+    if (PYTHON_THREAD_RE.test(t)) py++;
+    if (SYSLOG_COMP_RE.test(t)) sys++;
   }
   if (total === 0) return 'unknown';
   const half = Math.floor(total / 2);
   if (sb > half) return 'springLogback';
   if (lj > half) return 'log4jThreadAfter';
+  if (py > half) return 'pythonThread';
+  if (sys > half) return 'syslogComponent';
   return 'unknown';
 }
 
@@ -80,6 +91,28 @@ function applyFamilyThread(message: string, family: LogFamily): [string | undefi
     const c = message.match(BRACKET_RE);
     if (c && c.index !== undefined) {
       const thread = c[1];
+      const replaced = (message.slice(0, c.index) + ' ' + message.slice(c.index + c[0].length)).trim();
+      return [thread, replaced];
+    }
+    return [undefined, message];
+  }
+  if (family === 'pythonThread') {
+    // logging %(threadName)s：取首个标记并剥除（连残留分隔符 :/- 一起清，对齐引擎 trim_delim）
+    const m = message.match(PYTHON_THREAD_RE);
+    if (m && m.index !== undefined) {
+      const thread = m[0];
+      const replaced = (message.slice(0, m.index) + ' ' + message.slice(m.index + m[0].length))
+        .replace(/^[:-\s]+/, '')
+        .trim();
+      return [thread, replaced];
+    }
+    return [undefined, message];
+  }
+  if (family === 'syslogComponent') {
+    // syslog program[pid]: → 组件标识取 name[pid]，连前导空格/冒号一起剥
+    const c = message.match(SYSLOG_COMP_RE);
+    if (c && c.index !== undefined) {
+      const thread = `${c[1]}[${c[2]}]`;
       const replaced = (message.slice(0, c.index) + ' ' + message.slice(c.index + c[0].length)).trim();
       return [thread, replaced];
     }

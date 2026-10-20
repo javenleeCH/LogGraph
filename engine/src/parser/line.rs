@@ -26,6 +26,10 @@ pub enum LogFamily {
     /// log4j2 变体 / 自定义布局：`LEVEL [thread] logger - msg`
     /// thread 是紧跟级别词之后的第一个 `[..]`。
     Log4jThreadAfter,
+    /// Python logging `%(threadName)s`：`Thread-N` / `MainThread` / `Dummy-N` / 池线程
+    PythonThread,
+    /// syslog（RFC3164/5424 传统）：`program[pid]` 组件标识（name[digits]）
+    SyslogComponent,
 }
 
 // 位置约束的家族标记（不锚行首，但要求固定的 `--- [thread]` 分隔符）
@@ -33,6 +37,13 @@ static SPRING_RE: LazyLock<Regex> = LazyLock::new(|| build_re(r" --- \[[^\]]+\]"
 // 行首 `LEVEL [thread]`：级别词（纯字母）后紧跟 `[thread]`
 static LOG4J_RE: LazyLock<Regex> =
     LazyLock::new(|| build_re(r"^[A-Za-z][A-Za-z]*\s+\[[^\]]+\]"));
+// Python threading 标记：Thread-N / MainThread / Dummy-N / 池线程（独特，不误抓）
+static PYTHON_THREAD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    build_re(r"Thread-\d+|MainThread|Dummy-\d+|ThreadPoolExecutor-\d+_\d+|asyncio_loop")
+});
+// syslog 组件：program[pid]:（含前导与冒号后空格一并剥，避免残留分隔符/双空格）
+static SYSLOG_COMP_RE: LazyLock<Regex> =
+    LazyLock::new(|| build_re(r"\s*(\S+)\[(\d+)\]:\s*"));
 // 通用括号捕获（取第一个 `[..]` 内容）
 static BRACKET_RE: LazyLock<Regex> = LazyLock::new(|| build_re(r"\[([^\]]+)\]"));
 
@@ -42,6 +53,8 @@ pub fn detect_log_family(rests: &[&str]) -> LogFamily {
     let mut total = 0usize;
     let mut sb = 0usize;
     let mut lj = 0usize;
+    let mut py = 0usize;
+    let mut sys = 0usize;
     for r in rests.iter().take(200) {
         let t = js_trim(r);
         if t.is_empty() {
@@ -54,6 +67,12 @@ pub fn detect_log_family(rests: &[&str]) -> LogFamily {
         if LOG4J_RE.is_match(t) {
             lj += 1;
         }
+        if PYTHON_THREAD_RE.is_match(t) {
+            py += 1;
+        }
+        if SYSLOG_COMP_RE.is_match(t) {
+            sys += 1;
+        }
     }
     if total == 0 {
         return LogFamily::Unknown;
@@ -63,6 +82,10 @@ pub fn detect_log_family(rests: &[&str]) -> LogFamily {
         LogFamily::SpringLogback
     } else if lj > half {
         LogFamily::Log4jThreadAfter
+    } else if py > half {
+        LogFamily::PythonThread
+    } else if sys > half {
+        LogFamily::SyslogComponent
     } else {
         LogFamily::Unknown
     }
@@ -100,7 +123,36 @@ fn extract_family_thread(msg: &str, family: LogFamily) -> (Option<String>, Strin
                 (None, msg.to_string())
             }
         }
+        LogFamily::PythonThread => {
+            // logging %(threadName)s：Thread-N / MainThread / Dummy-N / 池线程，取首个并剥除
+            if let Some(m) = PYTHON_THREAD_RE.find(msg) {
+                let thread = m.as_str().to_string();
+                let replaced = trim_delim(&format!("{} {}", &msg[..m.start()], &msg[m.end()..]));
+                (Some(thread), replaced)
+            } else {
+                (None, msg.to_string())
+            }
+        }
+        LogFamily::SyslogComponent => {
+            // syslog program[pid]: → 组件标识取 name[pid]，连前导空格/冒号一起剥（对齐 spring 干净剥法）
+            if let Some(c) = SYSLOG_COMP_RE.captures(msg) {
+                let thread = format!("{}[{}]", c.get(1).unwrap().as_str(), c.get(2).unwrap().as_str());
+                let range = c.get(0).unwrap().range();
+                let mut s = msg.to_string();
+                s.replace_range(range, " ");
+                (Some(thread), js_trim(&s).to_string())
+            } else {
+                (None, msg.to_string())
+            }
+        }
     }
+}
+
+/// 剥除 token 后残留的分隔符（`:` 与 `-`）再 js_trim；Python/syslog 的 thread token
+/// 常紧贴 `:`（`Thread-1:` / `nginx[1234]:`），移除 token 后需要一并清掉。
+fn trim_delim(s: &str) -> String {
+    let t = s.trim_start_matches([':', '-', ' ', '\t']);
+    js_trim(t).to_string()
 }
 
 /// 家族感知版：默认启发式之后，若未取到 thread，再按家族在预期槽位补取。
@@ -399,5 +451,46 @@ mod tests {
         // （保持现状：由行首启发式把 [error] 当 thread，见契约 §3.13 不变量）
         let rests = ["[error] 12345#0: *1 open() failed", "[error] 12346#0: *2 closed"];
         assert_eq!(detect_log_family(&rests), LogFamily::Unknown);
+    }
+
+    #[test]
+    fn detect_python_thread_and_syslog_component() {
+        // Python logging %(threadName)s
+        let py = [
+            "INFO Thread-1: worker done",
+            "INFO Thread-2: worker done",
+            "WARN MainThread: init ok",
+        ];
+        assert_eq!(detect_log_family(&py), LogFamily::PythonThread);
+
+        // syslog：hostname program[pid]:
+        let sys = [
+            "web01 nginx[1234]: 10.0.0.1 GET /",
+            "web01 app[5678]: connect timeout",
+            "web01 nginx[1234]: 10.0.0.2 POST /api",
+        ];
+        assert_eq!(detect_log_family(&sys), LogFamily::SyslogComponent);
+    }
+
+    #[test]
+    fn extract_python_thread_from_rest() {
+        // 家族感知补取：行首无 [thread]，靠 PythonThread 槽位
+        let r = parse_rest_fam("INFO Thread-1: worker done", LogFamily::PythonThread);
+        assert_eq!(r.thread.as_deref(), Some("Thread-1"));
+        assert_eq!(r.level.as_deref(), Some("INFO"));
+        assert_eq!(r.message, "worker done");
+
+        // MainThread 也能取
+        let r2 = parse_rest_fam("WARN MainThread: init", LogFamily::PythonThread);
+        assert_eq!(r2.thread.as_deref(), Some("MainThread"));
+        assert_eq!(r2.message, "init");
+    }
+
+    #[test]
+    fn extract_syslog_component_from_rest() {
+        // hostname program[pid]: → 组件标识取 name[pid]
+        let r = parse_rest_fam("web01 nginx[1234]: 10.0.0.1 GET /", LogFamily::SyslogComponent);
+        assert_eq!(r.thread.as_deref(), Some("nginx[1234]"));
+        assert_eq!(r.message, "web01 10.0.0.1 GET /");
     }
 }
