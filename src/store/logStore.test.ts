@@ -191,3 +191,116 @@ describe('实时 tail 增量等价性（store 层路由）', () => {
     expect(hitIds(filterId)).not.toContain(2);
   });
 });
+
+describe('自动发现关联键（store 集成）', () => {
+  const traceRaws = [
+    '2024-01-15 10:00:00.000 [nio-1] INFO  GET /api/orders traceId=4bf92f35 duration=42ms',
+    '2024-01-15 10:00:00.050 [nio-1] ERROR response sent traceId=4bf92f35 status=502',
+    '2024-01-15 10:00:00.400 [nio-3] ERROR response sent traceId=f00dcafe status=500',
+    '2024-01-15 10:00:05.000 [nio-2] INFO  GET /api/orders traceId=a1b2c3d4 duration=610ms',
+    '2024-01-15 10:00:10.000 [nio-1] INFO  GET /api/orders traceId=e5f6a7b8 duration=15ms',
+    '2024-01-15 10:00:10.400 [nio-1] ERROR response sent traceId=e5f6a7b8 status=401',
+  ];
+  const traceEvents = traceRaws.map((r, i) => EV(i, i * 10, r));
+  const seqGroup = {
+    id: 'g1',
+    label: 'g',
+    color: '#000',
+    collapsed: false,
+    visible: true,
+    filterIds: ['f1'],
+    sequence: {
+      edges: [{ id: 'e1', fromFilterId: 'f1', toFilterId: 'f2', maxGapMs: 1000 }],
+      anomalyEnabled: false,
+      scope: 'global' as const,
+    },
+  };
+
+  beforeEach(() => {
+    useLogStore.setState({
+      sniffedAutoKey: null,
+      autoDetectedKey: null,
+      autoKeyDismissed: false,
+      autoKeyAppliedTo: [],
+      groups: [],
+      filters: [],
+      matches: [],
+    });
+  });
+
+  it('setLog 后嗅探出关联键；global 组重算时自动注入 scope=key', () => {
+    const store = useLogStore.getState();
+    store.setLog(traceEvents, traceRaws, {
+      fileName: 't.log',
+      fileSize: 0,
+      totalLines: traceRaws.length,
+      skipped: 0,
+      timestampFormatId: null,
+    });
+    expect(useLogStore.getState().sniffedAutoKey).not.toBeNull();
+
+    useLogStore.setState({ groups: [seqGroup] });
+    useLogStore.getState().recomputeSequences();
+    const s = useLogStore.getState();
+    expect(s.autoDetectedKey).not.toBeNull();
+    expect(s.autoDetectedKey!.fieldName).toBe('traceId');
+    expect(s.autoKeyAppliedTo).toContain('g1');
+  });
+
+  it('存在手配 scope=key 规则 ⇒ 不兜底注入（返回 null）', () => {
+    const store = useLogStore.getState();
+    store.setLog(traceEvents, traceRaws, {
+      fileName: 't.log',
+      fileSize: 0,
+      totalLines: traceRaws.length,
+      skipped: 0,
+      timestampFormatId: null,
+    });
+    useLogStore.setState({
+      groups: [{ ...seqGroup, sequence: { ...seqGroup.sequence, scope: 'key', keyPattern: 'traceId=([0-9a-f]{8})' } }],
+    });
+    useLogStore.getState().recomputeSequences();
+    const s = useLogStore.getState();
+    expect(s.autoDetectedKey).toBeNull();
+    expect(s.autoKeyAppliedTo).toEqual([]);
+  });
+
+  it('用户手动关闭自动发现 ⇒ 不再注入', () => {
+    const store = useLogStore.getState();
+    store.setLog(traceEvents, traceRaws, {
+      fileName: 't.log',
+      fileSize: 0,
+      totalLines: traceRaws.length,
+      skipped: 0,
+      timestampFormatId: null,
+    });
+    useLogStore.setState({ groups: [seqGroup] });
+    useLogStore.getState().dismissAutoKey();
+    const s = useLogStore.getState();
+    expect(s.autoKeyDismissed).toBe(true);
+    expect(s.autoDetectedKey).toBeNull();
+    expect(s.autoKeyAppliedTo).toEqual([]);
+  });
+
+  it('一键转显式：写入被自动应用组的 keyPattern 并清除自动状态', () => {
+    const store = useLogStore.getState();
+    store.setLog(traceEvents, traceRaws, {
+      fileName: 't.log',
+      fileSize: 0,
+      totalLines: traceRaws.length,
+      skipped: 0,
+      timestampFormatId: null,
+    });
+    useLogStore.setState({ groups: [seqGroup] });
+    useLogStore.getState().recomputeSequences();
+    expect(useLogStore.getState().autoKeyAppliedTo).toContain('g1');
+
+    useLogStore.getState().acceptAutoKey();
+    const s = useLogStore.getState();
+    expect(s.sniffedAutoKey).toBeNull();
+    expect(s.autoDetectedKey).toBeNull();
+    expect(s.autoKeyAppliedTo).toEqual([]);
+    expect(s.groups[0].sequence!.scope).toBe('key');
+    expect(s.groups[0].sequence!.keyPattern).toBe('traceId=([^\\s,"\']+)');
+  });
+});

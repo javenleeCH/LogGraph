@@ -17,6 +17,7 @@ import {
   runCepWasm,
   type CepWasmOutcome,
 } from '../sequence/cepWasm';
+import { sniffAutoKey, type AutoKeyCandidate } from '../sequence/autoDetectKey';
 import {
   openWorkspaceDir,
   readFilters,
@@ -301,6 +302,20 @@ interface LogState {
   setSequenceScope: (groupId: string, scope: 'global' | 'thread' | 'key') => void;
   /** 设置 scope='key' 的关联键正则（非空才生效；空串=清除并退回全局语义由引擎兜底） */
   setSequenceKeyPattern: (groupId: string, keyPattern: string) => void;
+  // --- 自动发现关联键（需求维：仅无手配 scope=key 规则时兜底启用） ---
+  /** load 时一次性嗅探得到的高置信关联键候选；null=无候选（且未持久化） */
+  sniffedAutoKey: AutoKeyCandidate | null;
+  /** 当前实际生效的自动关联键（recompute 派生）；null=未在注入 */
+  autoDetectedKey: AutoKeyCandidate | null;
+  /** 用户手动关闭自动发现（关后不再注入，直到下次 load 前可手动清除） */
+  autoKeyDismissed: boolean;
+  /** 当前实际被自动注入关联键的 groupId 列表（供 UI 标注「自动发现」） */
+  autoKeyAppliedTo: string[];
+  /** 关闭自动发现：清除注入并重算 */
+  dismissAutoKey: () => void;
+  /** 一键转显式：把自动键写入所有被自动应用的组的 sequence（scope=key + keyPattern），
+   *  随后清除自动状态；此后该键作为显式规则持久化，不再算「自动」 */
+  acceptAutoKey: () => void;
   /** 设置节点循环次数（EPL A{min,max}）；null 删除约束 */
   setNodeCount: (
     groupId: string,
@@ -491,6 +506,10 @@ export const useLogStore = create<LogState>((set, get) => ({
   sequenceResults: {},
   cepEngineError: null,
   cepEnginePending: false,
+  sniffedAutoKey: null,
+  autoDetectedKey: null,
+  autoKeyDismissed: false,
+  autoKeyAppliedTo: [],
 
   viewRange: null,
   fullRange: null,
@@ -607,11 +626,13 @@ export const useLogStore = create<LogState>((set, get) => ({
         scrubberTs: null,
         correlatedEventIds: new Set(),
         tail: null,
+        sniffedAutoKey: null,
+        autoKeyAppliedTo: [],
       });
       return;
     }
     const fullRange = { start: events[0].ts, end: events[events.length - 1].ts };
-    // 初始视图 = 全量
+    // 初始视图 = 全量；load 时一次性嗅探关联键候选（超大量语料自动抽样）
     set({
       events,
       rawLines,
@@ -624,8 +645,11 @@ export const useLogStore = create<LogState>((set, get) => ({
       scrubberTs: null,
       correlatedEventIds: new Set(),
       tail: null,
+      sniffedAutoKey: sniffAutoKey(events),
+      autoKeyAppliedTo: [],
     });
     get().recomputeMatches();
+    get().recomputeSequences();
   },
 
   setLogDb: (range, meta) => {
@@ -907,7 +931,41 @@ export const useLogStore = create<LogState>((set, get) => ({
    *  wasm 首次加载窗口期：保留旧结果，注册 onCepWasmSettled 就绪后自动重算；
    *  失败写 cepEngineError 由 UI 横幅 + 重试呈现，绝不静默空跑。 */
   recomputeSequences: () => {
-    const { groups, matches, dbMode, filters } = get();
+    const { groups, matches, dbMode, filters, autoKeyDismissed, sniffedAutoKey } = get();
+    // 自动发现关联键：仅无手配 scope=key 规则 + 未手动关闭 时兜底注入。
+    // 只对「global/未声明作用域」且有边的组生效，绝不覆盖 thread/key 显式组。
+    const hasManualKey = groups.some(
+      (g) => g.sequence?.scope === 'key' && g.sequence.keyPattern,
+    );
+    const applyKey =
+      !autoKeyDismissed && sniffedAutoKey && !hasManualKey ? sniffedAutoKey : null;
+    const effGroups = applyKey
+      ? groups.map((g) => {
+          if (
+            g.sequence &&
+            g.sequence.edges.length > 0 &&
+            (g.sequence.scope ?? 'global') === 'global'
+          ) {
+            return {
+              ...g,
+              sequence: {
+                ...g.sequence,
+                scope: 'key' as const,
+                keyPattern: applyKey.keyPattern,
+              },
+            };
+          }
+          return g;
+        })
+      : groups;
+    const autoKeyAppliedTo = applyKey
+      ? groups
+          .filter(
+            (g) =>
+              g.sequence && g.sequence.edges.length > 0 && (g.sequence.scope ?? 'global') === 'global',
+          )
+          .map((g) => g.id)
+      : [];
     // 幂等启动 wasm CEP 引擎（App 启动时已预热，这里双保险）
     void ensureCepWasm();
     if (dbMode) {
@@ -915,7 +973,7 @@ export const useLogStore = create<LogState>((set, get) => ({
         // engine ≥ 0.2.2 起引擎自带跨行聚合（拆分下推 fid\0i + 引擎内取交集），
         // 含跨行 filter 的 group 也能下推；仅「全排除」仍需走 wasm——它需要全量
         // 行基集，目录模式拿不到（与 dbStore 的全排除提示同源）。
-        const seqGroups = groups.filter((g) => g.sequence && g.sequence.edges.length > 0);
+        const seqGroups = effGroups.filter((g) => g.sequence && g.sequence.edges.length > 0);
         const tsGroups = seqGroups.filter((g) =>
           g.filterIds.some((fid) => {
             const p = filters.find((f) => f.id === fid)?.pattern ?? '';
@@ -1010,13 +1068,15 @@ export const useLogStore = create<LogState>((set, get) => ({
           sequenceResults: results,
           cepEngineError: engineError,
           cepEnginePending: false,
+          autoDetectedKey: applyKey,
+          autoKeyAppliedTo,
         });
         get().recomputeCorrelations();
       })();
       return;
     }
     // Web 端：wasm 是唯一引擎（与桌面 native 同一份 cep.rs）
-    const w = runCepWasm(groups, matches);
+    const w = runCepWasm(effGroups, matches);
     if (w.kind === 'loading') {
       // 首次加载窗口期：保留旧结果不闪空，就绪/失败后自动重算
       set({ cepEnginePending: true });
@@ -1027,7 +1087,13 @@ export const useLogStore = create<LogState>((set, get) => ({
       return;
     }
     if (w.kind === 'ok') {
-      set({ sequenceResults: w.results, cepEngineError: null, cepEnginePending: false });
+      set({
+        sequenceResults: w.results,
+        cepEngineError: null,
+        cepEnginePending: false,
+        autoDetectedKey: applyKey,
+        autoKeyAppliedTo,
+      });
     } else {
       // 引擎不可用：清空结果 + 显式错误（UI 横幅 + 重试）——
       // 绝不把"没跑"伪装成"没有匹配"
@@ -1035,6 +1101,8 @@ export const useLogStore = create<LogState>((set, get) => ({
         sequenceResults: {},
         cepEngineError: cepFailureText(w),
         cepEnginePending: false,
+        autoDetectedKey: applyKey,
+        autoKeyAppliedTo,
       });
     }
   },
@@ -1165,6 +1233,38 @@ export const useLogStore = create<LogState>((set, get) => ({
       return { ...g, sequence: next };
     });
     set({ groups });
+    get().recomputeSequences();
+    schedulePersist(get);
+  },
+
+  dismissAutoKey: () => {
+    // 关闭自动发现：记录停用 + 清除自动注入状态，重算退回原（global）语义
+    set({ autoKeyDismissed: true, autoDetectedKey: null, autoKeyAppliedTo: [] });
+    get().recomputeSequences();
+  },
+
+  acceptAutoKey: () => {
+    // 一键转显式：把自动发现的关联键写成显式规则（scope=key + keyPattern）
+    // 到所有被自动应用的组，随后清除自动状态。此后该键持久化，不再算「自动」。
+    const { sniffedAutoKey, autoKeyAppliedTo } = get();
+    if (!sniffedAutoKey || autoKeyAppliedTo.length === 0) return;
+    const groups = get().groups.map((g) => {
+      if (!autoKeyAppliedTo.includes(g.id) || !g.sequence) return g;
+      return {
+        ...g,
+        sequence: {
+          ...g.sequence,
+          scope: 'key' as const,
+          keyPattern: sniffedAutoKey.keyPattern,
+        },
+      };
+    });
+    set({
+      groups,
+      sniffedAutoKey: null,
+      autoDetectedKey: null,
+      autoKeyAppliedTo: [],
+    });
     get().recomputeSequences();
     schedulePersist(get);
   },

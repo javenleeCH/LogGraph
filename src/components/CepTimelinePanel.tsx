@@ -260,6 +260,12 @@ export function CepTimelinePanel() {
   const focusEvent = useLogStore((s) => s.focusEvent);
   // 异常高亮开关（从 group 编辑器迁入）：按组控制未覆盖事件标红
   const toggleSequenceAnomaly = useLogStore((s) => s.toggleSequenceAnomaly);
+  // 自动发现关联键（需求维）：未配手写 key 规则时兜底嗅探并自动分桶，
+  // 徽标提供「转显式 / 关闭」两个出口
+  const autoDetectedKey = useLogStore((s) => s.autoDetectedKey);
+  const autoKeyAppliedTo = useLogStore((s) => s.autoKeyAppliedTo);
+  const acceptAutoKey = useLogStore((s) => s.acceptAutoKey);
+  const dismissAutoKey = useLogStore((s) => s.dismissAutoKey);
   // CEP 引擎状态（wasm 是唯一 Web 引擎，TS 副本已删除）：失败显式横幅 + 重试
   const cepEngineError = useLogStore((s) => s.cepEngineError);
   const cepEnginePending = useLogStore((s) => s.cepEnginePending);
@@ -655,6 +661,40 @@ export function CepTimelinePanel() {
                         title={b.keyHint.title}
                       >
                         {b.keyHint.text}
+                      </span>
+                    )}
+                    {autoDetectedKey && autoKeyAppliedTo.includes(b.groupId) && (
+                      <span
+                        className={`${styles.threadStat} ${styles.autoKeyBadge}`}
+                        title={
+                          `🔎 已自动发现关联键「${autoDetectedKey.fieldName}」并按该键分桶` +
+                          `（覆盖率 ${Math.round(autoDetectedKey.coverage * 100)}% · ` +
+                          `${autoDetectedKey.distinctKeys} 键）。\n` +
+                          '仅在你未配置任何关联键规则时兜底启用。\n' +
+                          '「转显式」把 keyPattern 保存为显式规则；「关闭」停止自动关联。'
+                        }
+                      >
+                        🔎 自动·{autoDetectedKey.fieldName}
+                        <button
+                          className={styles.autoKeyAction}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            acceptAutoKey();
+                          }}
+                          title="保存为显式规则（scope=key + keyPattern）"
+                        >
+                          转显式
+                        </button>
+                        <button
+                          className={styles.autoKeyAction}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            dismissAutoKey();
+                          }}
+                          title="关闭自动发现（本次会话不再自动关联）"
+                        >
+                          关闭
+                        </button>
                       </span>
                     )}
                     <button
