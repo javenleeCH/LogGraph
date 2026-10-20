@@ -1,0 +1,6 @@
+# nginx access 样本：$remote_addr - - [$time_local] "$request" $status $body_bytes_sent。
+# $time_local 由 nginx 时间戳格式解析；access 日志无线程（正确）。
+1.2.3.4 - - [10/Oct/2026:13:55:36 +0000] "GET /api/orders/1001 HTTP/1.1" 200 612
+5.6.7.8 - - [10/Oct/2026:13:55:37 +0000] "GET /api/orders/1001 HTTP/1.1" 200 515
+1.2.3.4 - - [10/Oct/2026:13:55:38 +0000] "POST /api/pay HTTP/1.1" 201 120
+9.9.9.9 - - [10/Oct/2026:13:55:39 +0000] "GET /health HTTP/1.1" 200 2

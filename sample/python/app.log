@@ -1,0 +1,10 @@
+# Python logging 样本：%(levelname)s + %(threadName)s（logging.Formatter 常用布局）。
+# threadName 位于裸写级别之后、冒号分隔 —— 由 PythonThread 布局族在预期槽位提取。
+2026-10-20 13:55:36.100 INFO Thread-1: order created id=1001
+2026-10-20 13:55:36.150 INFO Thread-2: inventory check id=1001
+2026-10-20 13:55:36.200 INFO Thread-1: payment started id=1001
+2026-10-20 13:55:36.300 WARN Thread-2: low stock sku=A1
+2026-10-20 13:55:36.350 ERROR Thread-1: payment timeout id=1001
+2026-10-20 13:55:36.400 INFO MainThread: scheduler tick
+2026-10-20 13:55:36.500 ERROR Thread-1: retry payment id=1001
+2026-10-20 13:55:36.600 INFO Thread-1: payment done id=1001

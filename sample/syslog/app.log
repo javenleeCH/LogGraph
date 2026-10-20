@@ -1,0 +1,8 @@
+# syslog 传统格式（RFC3164 风格）：MMM DD HH:mm:ss HOST program[pid]: msg。
+# program[pid] 作组件标识，由 SyslogComponent 布局族提取。
+Oct 20 13:55:36 web01 app[1234]: connect timeout to 10.0.0.1
+Oct 20 13:55:37 web01 app[1234]: connect timeout to 10.0.0.2
+Oct 20 13:55:38 web02 app[5678]: disk space low
+Oct 20 13:55:39 web01 app[1234]: connect timeout to 10.0.0.3
+Oct 20 13:55:40 web02 app[5678]: process restarted
+Oct 20 13:55:41 web01 app[1234]: connection established to 10.0.0.1

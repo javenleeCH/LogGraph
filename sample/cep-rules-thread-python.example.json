@@ -1,0 +1,34 @@
+{
+  "$schema": "https://loggraph.dev/schemas/cep-rules-1.schema.json",
+  "version": 1,
+  "description": "示例：scope=thread 线程分桶（配 sample/python/app.log）——Python logging %(threadName)s 的 thread 由 PythonThread 布局族在级别之后提取；链只在同一线程桶内匹配",
+  "filters": [
+    { "id": "order-created", "label": "订单创建",   "pattern": "order created" },
+    { "id": "payment-started", "label": "支付开始", "pattern": "payment started" },
+    { "id": "payment-timeout", "label": "支付超时", "pattern": "payment timeout" },
+    { "id": "retry", "label": "重试支付",           "pattern": "retry payment" },
+    { "id": "payment-done", "label": "支付完成",     "pattern": "payment done" }
+  ],
+  "groups": [
+    {
+      "groupId": "payment-recovery",
+      "label": "线程内支付恢复链",
+      "scope": "thread",
+      "filterIds": ["payment-timeout", "retry", "payment-done"],
+      "edges": [
+        { "id": "rec_e1", "kind": "seq", "fromFilterId": "payment-timeout", "toFilterId": "retry", "maxGapMs": 2000 },
+        { "id": "rec_e2", "kind": "seq", "fromFilterId": "retry", "toFilterId": "payment-done", "maxGapMs": 2000 }
+      ]
+    },
+    {
+      "groupId": "payment-ok",
+      "label": "线程内健康支付链",
+      "scope": "thread",
+      "filterIds": ["order-created", "payment-started", "payment-done"],
+      "edges": [
+        { "id": "ok_e1", "kind": "seq", "fromFilterId": "order-created", "toFilterId": "payment-started", "maxGapMs": 2000 },
+        { "id": "ok_e2", "kind": "seq", "fromFilterId": "payment-started", "toFilterId": "payment-done", "maxGapMs": 2000 }
+      ]
+    }
+  ]
+}

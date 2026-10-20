@@ -172,6 +172,53 @@ console.log('# A. 解析层：格式族 thread 提取（B 解析覆盖样本）'
   );
 }
 
+{
+  const r = cli(['parse', 'file', 'sample/python/app.log']);
+  const evs = r.events.filter((e) => e.raw.trim());
+  const withThread = evs.filter((e) => e.thread);
+  const threads = [...new Set(withThread.map((e) => e.thread))].sort();
+  eq('python：8 行全部解析出事件', evs.length, 8);
+  eq('python：8/8 提取到 thread（PythonThread 布局族）', withThread.length, 8);
+  eq('python：3 个线程桶齐全', threads, ['MainThread', 'Thread-1', 'Thread-2']);
+  ok(
+    'python：级别提取 INFO/WARN/ERROR',
+    ['INFO', 'WARN', 'ERROR'].every((l) => evs.some((e) => e.level === l)),
+  );
+  ok(
+    'python：message 已剥掉 threadName 与冒号分隔符',
+    evs.every((e) => !e.message.startsWith('Thread-')) &&
+      evs.some((e) => e.message.includes('order created')),
+  );
+}
+
+{
+  const r = cli(['parse', 'file', 'sample/syslog/app.log']);
+  const evs = r.events.filter((e) => e.raw.trim());
+  const withThread = evs.filter((e) => e.thread);
+  const threads = [...new Set(withThread.map((e) => e.thread))].sort();
+  eq('syslog：6 行全部解析出事件', evs.length, 6);
+  eq('syslog：6/6 提取到组件标识（SyslogComponent 族）', withThread.length, 6);
+  eq('syslog：2 个组件桶齐全', threads, ['app[1234]', 'app[5678]']);
+  ok(
+    'syslog：message 已剥掉 program[pid] 与冒号',
+    evs.every((e) => !e.message.includes('[')) &&
+      evs.some((e) => e.message.includes('connect timeout')),
+  );
+}
+
+{
+  const r = cli(['parse', 'file', 'sample/nginx/access.log']);
+  const evs = r.events.filter((e) => e.raw.trim());
+  eq('nginx：4 行全部解析出事件（access 时间戳格式）', evs.length, 4);
+  eq('nginx：时间戳格式识别为 nginx', r.timestampFormatId, 'nginx');
+  ok('nginx：无线程（access 本无线程，正确）', evs.every((e) => e.thread === undefined));
+  ok(
+    'nginx：message 为请求行',
+    evs.some((e) => e.message.includes('POST /api/pay')) &&
+      evs.every((e) => e.message.startsWith('"') || e.message.includes('HTTP/1.1')),
+  );
+}
+
 // =====================================================================
 console.log('# B. CEP 层：scope=thread 线程分桶（格式族样本 + 线程规则）');
 
@@ -208,6 +255,24 @@ console.log('# B. CEP 层：scope=thread 线程分桶（格式族样本 + 线程
     'log4j2/no-fail：0 链 0 违规',
     [res['no-fail-after-startup'].chains.length, res['no-fail-after-startup'].notViolations.length],
     [0, 0],
+  );
+}
+
+{
+  const r = cli(['cep', 'sample/python/app.log', '-R', 'sample/cep-rules-thread-python.example.json', '--json']);
+  const res = r.response.results;
+  eq('python/payment-recovery：恰 1 条链', res['payment-recovery'].chains.length, 1);
+  eq('python/payment-recovery：链在 Thread-1 桶', res['payment-recovery'].chains[0]?.thread, 'Thread-1');
+  eq(
+    'python/payment-recovery：timeout→retry→done 三步',
+    chainShape(res['payment-recovery'].chains[0]),
+    ['payment-timeout', 'retry', 'payment-done'],
+  );
+  eq('python/payment-ok：恰 1 条链', res['payment-ok'].chains.length, 1);
+  ok(
+    'python：threadStats withThread=totalEvents（全行有线程，PythonThread 驱动分桶）',
+    res['payment-recovery'].threadStats?.withThread === res['payment-recovery'].threadStats?.totalEvents &&
+      res['payment-recovery'].threadStats?.totalEvents > 0,
   );
 }
 
@@ -284,6 +349,7 @@ console.log('# E. 规则校验层：S12 关联键闸门 + schema 同步');
   for (const f of [
     'sample/cep-rules-thread.example.json',
     'sample/cep-rules-thread-log4j2.example.json',
+    'sample/cep-rules-thread-python.example.json',
     'sample/cep-rules-key.example.json',
   ]) {
     const r = cli(['validate', f, '--json']);
